@@ -44,14 +44,13 @@ func (s *RedisStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (e
 }
 
 func (s *RedisStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoint, topic *string, spent *bool, includeBEEF bool) (o *engine.Output, err error) {
-
 	o = &engine.Output{
 		Outpoint: *outpoint,
 	}
 	if topic != nil {
 		otKey := OutputTopicKey(outpoint, *topic)
 		if spent != nil {
-			if isSpent, err := s.DB.HGet(ctx, otKey, "sp").Bool(); err != nil {
+			if isSpent, err := s.DB.SIsMember(ctx, SpendsKey, outpoint.String()).Result(); err != nil {
 				return nil, err
 			} else if isSpent != *spent {
 				return nil, nil
@@ -165,7 +164,7 @@ func (s *RedisStorage) DeleteOutputs(ctx context.Context, outpoints []*overlay.O
 }
 
 func (s *RedisStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
-	return s.DB.HSet(ctx, OutputTopicKey(outpoint, topic), "sp", true).Err()
+	return s.DB.SAdd(ctx, SpendsKey, outpoint.String()).Err()
 }
 
 func (s *RedisStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string) error {
