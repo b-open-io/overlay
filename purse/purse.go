@@ -1,4 +1,4 @@
-package paypurse
+package purse
 
 import (
 	"bytes"
