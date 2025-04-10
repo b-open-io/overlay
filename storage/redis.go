@@ -47,15 +47,13 @@ func (s *RedisStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoin
 	o = &engine.Output{
 		Outpoint: *outpoint,
 	}
+	if o.Spent, err = s.DB.SIsMember(ctx, SpentKey, outpoint.String()).Result(); err != nil {
+		return nil, err
+	} else if spent != nil && *spent != o.Spent {
+		return nil, nil
+	}
 	if topic != nil {
 		otKey := OutputTopicKey(outpoint, *topic)
-		if spent != nil {
-			if isSpent, err := s.DB.SIsMember(ctx, SpendsKey, outpoint.String()).Result(); err != nil {
-				return nil, err
-			} else if isSpent != *spent {
-				return nil, nil
-			}
-		}
 		if tm, err := s.DB.HGetAll(ctx, otKey).Result(); err == redis.Nil {
 			return nil, nil
 		} else if err != nil {
@@ -66,7 +64,7 @@ func (s *RedisStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoin
 			return nil, err
 		}
 	}
-	// m := make(map[string]interface{})
+
 	if m, err := s.DB.HGetAll(ctx, outputKey(outpoint)).Result(); err != nil {
 		return nil, err
 	} else if m == nil || len(m) == 0 {
@@ -164,7 +162,7 @@ func (s *RedisStorage) DeleteOutputs(ctx context.Context, outpoints []*overlay.O
 }
 
 func (s *RedisStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
-	return s.DB.SAdd(ctx, SpendsKey, outpoint.String()).Err()
+	return s.DB.SAdd(ctx, SpentKey, outpoint.String()).Err()
 }
 
 func (s *RedisStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string) error {

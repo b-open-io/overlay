@@ -10,7 +10,7 @@ func OutputTopicKey(outpoint *overlay.Outpoint, topic string) string {
 // 	return "sp:" + topic
 // }
 
-const SpendsKey = "spends"
+const SpentKey = "spent"
 
 func outputKey(outpoint *overlay.Outpoint) string {
 	return "o:" + outpoint.String()
