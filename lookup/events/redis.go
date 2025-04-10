@@ -143,9 +143,7 @@ func (l *RedisEventLookup) LookupOutpoints(ctx context.Context, question *Questi
 			return 0
 		})
 		for _, item := range results {
-			if question.Limit > 0 && len(ops) >= question.Limit {
-				break
-			} else if question.Reverse && item.Score < startScore {
+			if question.Reverse && item.Score < startScore {
 				ops = append(ops, item.Member.(string))
 			} else if !question.Reverse && item.Score > startScore {
 				ops = append(ops, item.Member.(string))
@@ -158,35 +156,37 @@ func (l *RedisEventLookup) LookupOutpoints(ctx context.Context, question *Questi
 			Stop:    "+inf",
 			ByScore: true,
 			Rev:     question.Reverse,
-			Count:   int64(question.Limit),
 		}
 		if ops, err = l.Db.ZRangeArgs(ctx, query).Result(); err != nil {
 			return nil, err
 		}
 	}
 
-	outpoints := make([]*overlay.Outpoint, 0, len(ops))
+	// outpoints := make([]*overlay.Outpoint, 0, len(ops))
 	members := make([]any, len(ops))
 	for _, op := range ops {
-		if outpoint, err := overlay.NewOutpointFromString(op); err != nil {
-			return nil, err
-		} else {
-			outpoints = append(outpoints, outpoint)
-			members = append(members, op)
-		}
+		members = append(members, op)
 	}
+	results := make([]*overlay.Outpoint, 0, len(ops))
 	if question.Spent != nil {
 		if spent, err := l.Db.SMIsMember(ctx, "spends", members...).Result(); err != nil {
 			return nil, err
 		} else {
-			for i, outpoint := range outpoints {
+			for i, op := range ops {
 				if spent[i] == *question.Spent {
-					outpoints = append(outpoints, outpoint)
+					if question.Limit > 0 && len(ops) >= question.Limit {
+						break
+					}
+					if outpoint, err := overlay.NewOutpointFromString(op); err != nil {
+						return nil, err
+					} else {
+						results = append(results, outpoint)
+					}
 				}
 			}
 		}
 	}
-	return outpoints, nil
+	return results, nil
 }
 
 func (l *RedisEventLookup) LookupOutputs(ctx context.Context, question *Question) (outputs []*engine.Output, err error) {
