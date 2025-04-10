@@ -163,12 +163,12 @@ func (l *RedisEventLookup) LookupOutpoints(ctx context.Context, question *Questi
 	}
 
 	// outpoints := make([]*overlay.Outpoint, 0, len(ops))
-	members := make([]any, len(ops))
+	members := make([]any, 0, len(ops))
 	for _, op := range ops {
 		members = append(members, op)
 	}
 	results := make([]*overlay.Outpoint, 0, len(ops))
-	if question.Spent != nil {
+	if question.Spent != nil && len(members) > 0 {
 		if spent, err := l.Db.SMIsMember(ctx, "spends", members...).Result(); err != nil {
 			return nil, err
 		} else {
