@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
+	"github.com/b-open-io/overlay/util"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
 	"github.com/redis/go-redis/v9"
@@ -12,10 +13,11 @@ import (
 
 type RedisStorage struct {
 	DB *redis.Client
+	tx util.TxStorage
 }
 
-func NewRedisStorage(connString string) (*RedisStorage, error) {
-	r := &RedisStorage{}
+func NewRedisStorage(connString string, tx util.TxStorage) (r *RedisStorage, err error) {
+	r = &RedisStorage{tx: tx}
 	if opts, err := redis.ParseURL(connString); err != nil {
 		return nil, err
 	} else {
@@ -25,12 +27,13 @@ func NewRedisStorage(connString string) (*RedisStorage, error) {
 }
 
 func (s *RedisStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
+	if err := s.tx.SaveBeef(ctx, utxo.Beef); err != nil {
+		return err
+	}
 	_, err = s.DB.Pipelined(ctx, func(p redis.Pipeliner) error {
 		if err := p.HMSet(ctx, OutputTopicKey(&utxo.Outpoint, utxo.Topic), outputToTopicMap(utxo)).Err(); err != nil {
 			return err
 		} else if err := p.HMSet(ctx, outputKey(&utxo.Outpoint), outputToMap(utxo)).Err(); err != nil {
-			return err
-		} else if err = p.HSet(ctx, BeefKey, utxo.Outpoint.Txid.String(), utxo.Beef).Err(); err != nil {
 			return err
 		} else if err = p.ZAdd(ctx, OutMembershipKey(utxo.Topic), redis.Z{
 			Score:  float64(utxo.BlockHeight)*1e9 + float64(utxo.BlockIdx),
@@ -40,7 +43,7 @@ func (s *RedisStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (e
 		}
 		return nil
 	})
-	return
+	return err
 }
 
 func (s *RedisStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoint, topic *string, spent *bool, includeBEEF bool) (o *engine.Output, err error) {
@@ -73,7 +76,7 @@ func (s *RedisStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoin
 		return nil, err
 	}
 	if includeBEEF {
-		if o.Beef, err = s.DB.HGet(ctx, BeefKey, outpoint.Txid.String()).Bytes(); err != nil {
+		if o.Beef, err = s.tx.LoadBeef(ctx, &outpoint.Txid); err != nil {
 			return nil, err
 		}
 	}
@@ -179,7 +182,7 @@ func (s *RedisStorage) UpdateConsumedBy(ctx context.Context, outpoint *overlay.O
 }
 
 func (s *RedisStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
-	return s.DB.HSetNX(ctx, BeefKey, txid.String(), beef).Err()
+	return s.tx.SaveBeef(ctx, beef)
 }
 
 func (s *RedisStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *overlay.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {

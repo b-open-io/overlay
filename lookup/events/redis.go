@@ -29,6 +29,8 @@ func OutpointEventsKey(outpoint *overlay.Outpoint) string {
 	return "oe:" + outpoint.String()
 }
 
+const SpentKey = "spent"
+
 func NewRedisEventLookup(connString string, storage engine.Storage, topic string) (*RedisEventLookup, error) {
 	r := &RedisEventLookup{
 		Storage: storage,
@@ -169,7 +171,7 @@ func (l *RedisEventLookup) LookupOutpoints(ctx context.Context, question *Questi
 	}
 	results := make([]*overlay.Outpoint, 0, len(ops))
 	if question.Spent != nil && len(members) > 0 {
-		if spent, err := l.Db.SMIsMember(ctx, "spends", members...).Result(); err != nil {
+		if spent, err := l.Db.SMIsMember(ctx, SpentKey, members...).Result(); err != nil {
 			return nil, err
 		} else {
 			for i, op := range ops {
@@ -256,7 +258,7 @@ func (l *RedisEventLookup) FindEvents(ctx context.Context, outpoint *overlay.Out
 }
 
 func (l *RedisEventLookup) OutputSpent(ctx context.Context, outpoint *overlay.Outpoint, _ string) error {
-	return l.Db.SAdd(ctx, "spends", outpoint.String()).Err()
+	return l.Db.SAdd(ctx, SpentKey, outpoint.String()).Err()
 }
 
 func (l *RedisEventLookup) OutputsSpent(ctx context.Context, outpoints []*overlay.Outpoint, _ string) error {
@@ -264,7 +266,7 @@ func (l *RedisEventLookup) OutputsSpent(ctx context.Context, outpoints []*overla
 	for _, outpoint := range outpoints {
 		args = append(args, outpoint.Bytes())
 	}
-	return l.Db.SAdd(ctx, "spends", args...).Err()
+	return l.Db.SAdd(ctx, SpentKey, args...).Err()
 }
 
 func (l *RedisEventLookup) OutputDeleted(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
