@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"log"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ type RedisStorage struct {
 
 func NewRedisStorage(connString string, tx util.TxStorage) (r *RedisStorage, err error) {
 	r = &RedisStorage{tx: tx}
+	log.Println("Connecting to Redis Storage...", connString)
 	if opts, err := redis.ParseURL(connString); err != nil {
 		return nil, err
 	} else {
