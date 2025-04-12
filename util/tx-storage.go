@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"sync"
@@ -34,13 +35,11 @@ type TxStorage interface {
 type RedisTxStorage struct {
 	db          *redis.Client
 	inflightMap sync.Map
-	// chaintracker chaintracker.ChainTracker
 }
 
 func NewRedisTxStorage(connString string) (*RedisTxStorage, error) {
-	r := &RedisTxStorage{
-		// chaintracker: chaintracker,
-	}
+	r := &RedisTxStorage{}
+	log.Println("Connecting to Redis TxStorage...", connString)
 	if opts, err := redis.ParseURL(connString); err != nil {
 		return nil, err
 	} else {
