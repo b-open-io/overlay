@@ -53,7 +53,8 @@ func (l *RedisEventLookup) SaveEvent(ctx context.Context, outpoint *overlay.Outp
 	}
 	_, err := l.Db.Pipelined(ctx, func(p redis.Pipeliner) error {
 		op := outpoint.String()
-		if err := p.ZAdd(ctx, EventKey(event), redis.Z{
+		eventKey := EventKey(event)
+		if err := p.ZAdd(ctx, eventKey, redis.Z{
 			Score:  score,
 			Member: op,
 		}).Err(); err != nil {
@@ -61,7 +62,7 @@ func (l *RedisEventLookup) SaveEvent(ctx context.Context, outpoint *overlay.Outp
 		} else if err := p.SAdd(ctx, OutpointEventsKey(outpoint), event).Err(); err != nil {
 			return err
 		}
-		p.Publish(ctx, event, fmt.Sprintf("%f:%s", score, op))
+		p.Publish(ctx, event, op)
 		return nil
 	})
 	return err
@@ -257,17 +258,17 @@ func (l *RedisEventLookup) FindEvents(ctx context.Context, outpoint *overlay.Out
 	}
 }
 
-func (l *RedisEventLookup) OutputSpent(ctx context.Context, outpoint *overlay.Outpoint, _ string) error {
+func (l *RedisEventLookup) OutputSpent(ctx context.Context, outpoint *overlay.Outpoint, _ string, spendBeef []byte) error {
 	return l.Db.SAdd(ctx, SpentKey, outpoint.String()).Err()
 }
 
-func (l *RedisEventLookup) OutputsSpent(ctx context.Context, outpoints []*overlay.Outpoint, _ string) error {
-	args := make([]interface{}, 0, len(outpoints))
-	for _, outpoint := range outpoints {
-		args = append(args, outpoint.Bytes())
-	}
-	return l.Db.SAdd(ctx, SpentKey, args...).Err()
-}
+// func (l *RedisEventLookup) OutputsSpent(ctx context.Context, outpoints []*overlay.Outpoint, _ string) error {
+// 	args := make([]interface{}, 0, len(outpoints))
+// 	for _, outpoint := range outpoints {
+// 		args = append(args, outpoint.Bytes())
+// 	}
+// 	return l.Db.SAdd(ctx, SpentKey, args...).Err()
+// }
 
 func (l *RedisEventLookup) OutputDeleted(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
 	op := outpoint.String()
