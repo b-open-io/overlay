@@ -19,6 +19,6 @@ require (
 
 // replace github.com/4chain-ag/go-overlay-services => ../go-overlay-services
 
-replace github.com/4chain-ag/go-overlay-services => github.com/4chain-ag/go-overlay-services v0.1.1-0.20250412162901-9d55a84c9469
+replace github.com/4chain-ag/go-overlay-services => github.com/4chain-ag/go-overlay-services v0.1.1-0.20250412185326-512e43a6d27c
 
 replace github.com/bsv-blockchain/go-sdk => github.com/b-open-io/go-sdk v1.1.22-0.20250406003733-6a6b9ac5b847
