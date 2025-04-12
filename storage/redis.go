@@ -37,11 +37,19 @@ func (s *RedisStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (e
 			return err
 		} else if err := p.HMSet(ctx, outputKey(&utxo.Outpoint), outputToMap(utxo)).Err(); err != nil {
 			return err
-		} else if err = p.ZAdd(ctx, OutMembershipKey(utxo.Topic), redis.Z{
-			Score:  float64(utxo.BlockHeight)*1e9 + float64(utxo.BlockIdx),
-			Member: op,
-		}).Err(); err != nil {
-			return err
+		} else {
+			var score float64
+			if utxo.BlockHeight > 0 {
+				score = float64(utxo.BlockHeight)*1e9 + float64(utxo.BlockIdx)
+			} else {
+				score = float64(time.Now().UnixNano())
+			}
+			if err = p.ZAdd(ctx, OutMembershipKey(utxo.Topic), redis.Z{
+				Score:  score,
+				Member: op,
+			}).Err(); err != nil {
+				return err
+			}
 		}
 		p.Publish(ctx, utxo.Topic, op)
 		return nil
@@ -189,10 +197,24 @@ func (s *RedisStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhas
 }
 
 func (s *RedisStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *overlay.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
-	return s.DB.ZAdd(ctx, TxMembershipKey(topic), redis.Z{
-		Member: outpoint.Txid.String(),
-		Score:  float64(blockHeight)*1e9 + float64(blockIndex),
-	}).Err()
+	_, err := s.DB.Pipelined(ctx, func(p redis.Pipeliner) error {
+		if err := p.ZAdd(ctx, OutMembershipKey(topic), redis.Z{
+			Score:  float64(blockHeight)*1e9 + float64(blockIndex),
+			Member: outpoint.String(),
+		}).Err(); err != nil {
+			return err
+			// } else if err := p.ZAdd(ctx, TxMembershipKey(topic), redis.Z{
+			// 	Member: outpoint.Txid.String(),
+			// 	Score:  float64(blockHeight)*1e9 + float64(blockIndex),
+			// }).Err(); err != nil {
+			// 	return err
+		} else if err := p.HSet(ctx, OutputTopicKey(outpoint, topic), "h", blockHeight, "i", blockIndex).Err(); err != nil {
+			return err
+		}
+		return nil
+
+	})
+	return err
 }
 
 func (s *RedisStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
