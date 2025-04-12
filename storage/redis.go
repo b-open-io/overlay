@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
 	"github.com/b-open-io/overlay/util"
@@ -188,15 +189,27 @@ func (s *RedisStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhas
 }
 
 func (s *RedisStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *overlay.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
-	return s.DB.HSet(ctx, OutputTopicKey(outpoint, topic), "h", blockHeight, "i", blockIndex, "ab", ancelliaryBeef).Err()
+	return s.DB.ZAdd(ctx, TxMembershipKey(topic), redis.Z{
+		Member: outpoint.Txid.String(),
+		Score:  float64(blockHeight)*1e9 + float64(blockIndex),
+	}).Err()
 }
 
 func (s *RedisStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
-	return s.DB.SAdd(ctx, TxMembershipKey(tx.Topic), tx.Txid.String()).Err()
+	return s.DB.ZAdd(ctx, TxMembershipKey(tx.Topic), redis.Z{
+		Member: tx.Txid.String(),
+		Score:  float64(time.Now().UnixNano()),
+	}).Err()
 }
 
 func (s *RedisStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
-	return s.DB.SIsMember(ctx, TxMembershipKey(tx.Topic), tx.Txid.String()).Result()
+	if _, err := s.DB.ZScore(ctx, TxMembershipKey(tx.Topic), tx.Txid.String()).Result(); err == redis.Nil {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	} else {
+		return true, nil
+	}
 }
 
 func (s *RedisStorage) Close() error {
