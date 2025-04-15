@@ -63,7 +63,7 @@ func (s *RedisStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoin
 	o = &engine.Output{
 		Outpoint: *outpoint,
 	}
-	if o.Spent, err = s.DB.SIsMember(ctx, SpentKey, outpoint.String()).Result(); err != nil {
+	if o.Spent, err = s.DB.HExists(ctx, SpendsKey, outpoint.String()).Result(); err != nil {
 		return nil, err
 	} else if spent != nil && *spent != o.Spent {
 		return nil, nil
@@ -177,18 +177,18 @@ func (s *RedisStorage) DeleteOutput(ctx context.Context, outpoint *overlay.Outpo
 // 	return nil
 // }
 
-func (s *RedisStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
-	return s.DB.SAdd(ctx, SpentKey, outpoint.String()).Err()
+func (s *RedisStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Outpoint, topic string, spendTxid *chainhash.Hash) error {
+	return s.DB.HSet(ctx, SpendsKey, outpoint.String(), spendTxid.String()).Err()
 }
 
-// func (s *RedisStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string) error {
-// 	for _, outpoint := range outpoints {
-// 		if err := s.MarkUTXOAsSpent(ctx, outpoint, topic); err != nil {
-// 			return err
-// 		}
-// 	}
-// 	return nil
-// }
+func (s *RedisStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string, spendTxid *chainhash.Hash) error {
+	values := make(map[string]interface{}, len(outpoints)*2)
+	for _, outpoint := range outpoints {
+		values[outpoint.String()] = spendTxid.String()
+	}
+
+	return s.DB.HSet(ctx, SpendsKey, values).Err()
+}
 
 func (s *RedisStorage) UpdateConsumedBy(ctx context.Context, outpoint *overlay.Outpoint, topic string, consumedBy []*overlay.Outpoint) error {
 	return s.DB.HSet(ctx, OutputTopicKey(outpoint, topic), "cb", outpointsToBytes(consumedBy)).Err()

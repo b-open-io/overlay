@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
+	"github.com/b-open-io/overlay/storage"
 	"github.com/bsv-blockchain/go-sdk/overlay"
 	"github.com/bsv-blockchain/go-sdk/overlay/lookup"
 	"github.com/bsv-blockchain/go-sdk/transaction"
@@ -28,8 +29,6 @@ func EventKey(event string) string {
 func OutpointEventsKey(outpoint *overlay.Outpoint) string {
 	return "oe:" + outpoint.String()
 }
-
-const SpentKey = "spent"
 
 func NewRedisEventLookup(connString string, storage engine.Storage, topic string) (*RedisEventLookup, error) {
 	r := &RedisEventLookup{
@@ -165,18 +164,14 @@ func (l *RedisEventLookup) LookupOutpoints(ctx context.Context, question *Questi
 		}
 	}
 
-	// outpoints := make([]*overlay.Outpoint, 0, len(ops))
-	members := make([]any, 0, len(ops))
-	for _, op := range ops {
-		members = append(members, op)
-	}
 	results := make([]*overlay.Outpoint, 0, len(ops))
-	if question.Spent != nil && len(members) > 0 {
-		if spent, err := l.Db.SMIsMember(ctx, SpentKey, members...).Result(); err != nil {
+	if question.Spent != nil && len(ops) > 0 {
+		if spent, err := l.Db.HMGet(ctx, storage.SpendsKey, ops...).Result(); err != nil {
 			return nil, err
 		} else {
 			for i, op := range ops {
-				if spent[i] == *question.Spent {
+				if (*question.Spent && spent[i] != nil && spent[i] != "") ||
+					(!*question.Spent && (spent[i] == nil || spent[i] == "")) {
 					if question.Limit > 0 && len(ops) >= question.Limit {
 						break
 					}
@@ -259,7 +254,13 @@ func (l *RedisEventLookup) FindEvents(ctx context.Context, outpoint *overlay.Out
 }
 
 func (l *RedisEventLookup) OutputSpent(ctx context.Context, outpoint *overlay.Outpoint, _ string, spendBeef []byte) error {
-	return l.Db.SAdd(ctx, SpentKey, outpoint.String()).Err()
+	if _, _, txid, err := transaction.ParseBeef(spendBeef); err != nil {
+		return err
+	} else if txid == nil {
+		return errors.New("invalid beef")
+	} else {
+		return l.Db.HSet(ctx, storage.SpendsKey, outpoint.String(), txid.String()).Err()
+	}
 }
 
 // func (l *RedisEventLookup) OutputsSpent(ctx context.Context, outpoints []*overlay.Outpoint, _ string) error {
