@@ -14,12 +14,12 @@ import (
 )
 
 type RedisStorage struct {
-	DB *redis.Client
-	tx util.TxStorage
+	DB      *redis.Client
+	TxStore util.TxStorage
 }
 
 func NewRedisStorage(connString string, tx util.TxStorage) (r *RedisStorage, err error) {
-	r = &RedisStorage{tx: tx}
+	r = &RedisStorage{TxStore: tx}
 	log.Println("Connecting to Redis Storage...", connString)
 	if opts, err := redis.ParseURL(connString); err != nil {
 		return nil, err
@@ -30,7 +30,7 @@ func NewRedisStorage(connString string, tx util.TxStorage) (r *RedisStorage, err
 }
 
 func (s *RedisStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
-	if err := s.tx.SaveBeef(ctx, utxo.Beef); err != nil {
+	if err := s.TxStore.SaveBeef(ctx, utxo.Beef); err != nil {
 		return err
 	}
 	_, err = s.DB.Pipelined(ctx, func(p redis.Pipeliner) error {
@@ -89,7 +89,7 @@ func (s *RedisStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoin
 		return nil, err
 	}
 	if includeBEEF {
-		if o.Beef, err = s.tx.LoadBeef(ctx, &outpoint.Txid); err != nil {
+		if o.Beef, err = s.TxStore.LoadBeef(ctx, &outpoint.Txid); err != nil {
 			return nil, err
 		}
 	}
@@ -195,7 +195,7 @@ func (s *RedisStorage) UpdateConsumedBy(ctx context.Context, outpoint *overlay.O
 }
 
 func (s *RedisStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
-	return s.tx.SaveBeef(ctx, beef)
+	return s.TxStore.SaveBeef(ctx, beef)
 }
 
 func (s *RedisStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *overlay.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
@@ -205,11 +205,6 @@ func (s *RedisStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *ov
 			Member: outpoint.String(),
 		}).Err(); err != nil {
 			return err
-			// } else if err := p.ZAdd(ctx, TxMembershipKey(topic), redis.Z{
-			// 	Member: outpoint.Txid.String(),
-			// 	Score:  float64(blockHeight)*1e9 + float64(blockIndex),
-			// }).Err(); err != nil {
-			// 	return err
 		} else if err := p.HSet(ctx, OutputTopicKey(outpoint, topic), "h", blockHeight, "i", blockIndex).Err(); err != nil {
 			return err
 		}
