@@ -111,7 +111,7 @@ type BSONOutput struct {
 	ConsumedBy      []string `bson:"consumedBy"`
 	BlockHeight     uint32   `bson:"blockHeight"`
 	BlockIdx        uint64   `bson:"blockIdx"`
-	Beef            []byte   `bson:"beef"`
+	BeefFileId      string   `bson:"beefFileId"`
 	AncillaryTxids  []string `bson:"ancillaryTxids"`
 	AncillaryBeef   []byte   `bson:"ancillaryBeef"`
 }

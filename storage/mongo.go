@@ -6,17 +6,19 @@ import (
 	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
-	"go.mongodb.org/mongo-driver/mongo/options"
+
+	"go.mongodb.org/mongo-driver/v2/bson"
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 type MongoStorage struct {
-	DB *mongo.Database
+	DB     *mongo.Database
+	bucket *mongo.GridFSBucket
 }
 
 func NewMongoStorage(connString string, dbName string) (*MongoStorage, error) {
-	client, err := mongo.Connect(context.Background(), options.Client().ApplyURI(connString))
+	client, err := mongo.Connect(options.Client().ApplyURI(connString))
 	if err != nil {
 		return nil, err
 	}
@@ -52,27 +54,56 @@ func NewMongoStorage(connString string, dbName string) (*MongoStorage, error) {
 		return nil, err
 	}
 
-	return &MongoStorage{DB: db}, nil
+	return &MongoStorage{DB: db, bucket: db.GridFSBucket()}, nil
 }
 
 func (s *MongoStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
+	// Delete existing GridFS file for this txid (if any)
+	if _, err = s.DB.Collection("fs.files").DeleteOne(ctx, bson.M{"metadata.txid": utxo.Outpoint.Txid.String()}); err != nil {
+		return err
+	}
+
+	// Upload the new Beef data to GridFS
+	var beefFileID interface{}
+	if len(utxo.Beef) > 0 {
+		uploadStream, err := s.bucket.OpenUploadStreamWithID(
+			ctx,
+			utxo.Outpoint.Txid.String(), // Use txid as the file ID
+			"beef",
+			options.GridFSUpload().SetMetadata(bson.M{"txid": utxo.Outpoint.Txid.String()}),
+		)
+		if err != nil {
+			return err
+		}
+		defer uploadStream.Close()
+
+		if _, err = uploadStream.Write(utxo.Beef); err != nil {
+			return err
+		}
+		beefFileID = uploadStream.FileID
+	}
+
 	bo := NewBSONOutput(utxo)
+	bo.BeefFileId = beefFileID.(string) // Store the GridFS file ID in the BSONOutput
+	// Insert or update the output in the "outputs" collection
 	if _, err = s.DB.Collection("outputs").UpdateOne(ctx,
 		bson.M{"outpoint": utxo.Outpoint.String(), "topic": utxo.Topic},
 		bson.M{"$set": bo},
-		options.Update().SetUpsert(true),
+		options.UpdateOne().SetUpsert(true),
 	); err != nil {
 		return err
 	}
 
-	if _, err = s.DB.Collection("beefs").UpdateOne(ctx,
-		bson.M{"_id": utxo.Outpoint.Txid.String()},
-		bson.M{"$set": bson.M{"beef": utxo.Beef}},
-		options.Update().SetUpsert(true),
-	); err != nil {
-		return err
-	}
-	return err
+	// // Update the "beefs" collection with the GridFS file ID
+	// if _, err = s.DB.Collection("beefs").UpdateOne(ctx,
+	// 	bson.M{"_id": utxo.Outpoint.Txid.String()},
+	// 	bson.M{"$set": bson.M{"beefFileID": beefFileID}},
+	// 	options.Update().SetUpsert(true),
+	// ); err != nil {
+	// 	return err
+	// }
+
+	return nil
 }
 
 func (s *MongoStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoint, topic *string, spent *bool, includeBEEF bool) (o *engine.Output, err error) {
