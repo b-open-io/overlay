@@ -93,3 +93,79 @@ func bytesToChainhashes(b []byte) []*chainhash.Hash {
 	}
 	return hashes
 }
+
+type BSONBeef struct {
+	Txid   string   `bson:"_id"`
+	Beef   []byte   `bson:"beef"`
+	Topics []string `bson:"topics"`
+}
+
+type BSONOutput struct {
+	Outpoint        string   `bson:"outpoint"`
+	Txid            string   `bson:"txid"`
+	Topic           string   `bson:"topic"`
+	Script          []byte   `bson:"script"`
+	Satoshis        uint64   `bson:"satoshis"`
+	Spent           bool     `bson:"spent"`
+	OutputsConsumed []string `bson:"outputsConsumed"`
+	ConsumedBy      []string `bson:"consumedBy"`
+	BlockHeight     uint32   `bson:"blockHeight"`
+	BlockIdx        uint64   `bson:"blockIdx"`
+	Beef            []byte   `bson:"beef"`
+	AncillaryTxids  []string `bson:"ancillaryTxids"`
+	AncillaryBeef   []byte   `bson:"ancillaryBeef"`
+}
+
+func NewBSONOutput(o *engine.Output) *BSONOutput {
+	bo := &BSONOutput{
+		Outpoint:    o.Outpoint.String(),
+		Txid:        o.Outpoint.Txid.String(),
+		Topic:       o.Topic,
+		Script:      o.Script.Bytes(),
+		Satoshis:    o.Satoshis,
+		Spent:       o.Spent,
+		BlockHeight: o.BlockHeight,
+		BlockIdx:    o.BlockIdx,
+		// Beef:          o.Beef,
+		AncillaryBeef: o.AncillaryBeef,
+	}
+	for _, oc := range o.OutputsConsumed {
+		bo.OutputsConsumed = append(bo.OutputsConsumed, oc.String())
+	}
+	for _, cb := range o.ConsumedBy {
+		bo.ConsumedBy = append(bo.ConsumedBy, cb.String())
+	}
+	for _, at := range o.AncillaryTxids {
+		bo.AncillaryTxids = append(bo.AncillaryTxids, at.String())
+	}
+	return bo
+}
+
+func (o *BSONOutput) ToEngineOutput() *engine.Output {
+	outpoint, _ := overlay.NewOutpointFromString(o.Outpoint)
+	output := &engine.Output{
+		Outpoint:    *outpoint,
+		Topic:       o.Topic,
+		Script:      script.NewFromBytes(o.Script),
+		Satoshis:    o.Satoshis,
+		Spent:       o.Spent,
+		BlockHeight: o.BlockHeight,
+		BlockIdx:    o.BlockIdx,
+		// Beef:          o.Beef,
+		AncillaryBeef: o.AncillaryBeef,
+	}
+	for _, oc := range o.OutputsConsumed {
+		op, _ := overlay.NewOutpointFromString(oc)
+		output.OutputsConsumed = append(output.OutputsConsumed, op)
+	}
+	for _, cb := range o.ConsumedBy {
+		op, _ := overlay.NewOutpointFromString(cb)
+		output.ConsumedBy = append(output.ConsumedBy, op)
+	}
+	for _, at := range o.AncillaryTxids {
+		txid, _ := chainhash.NewHashFromHex(at)
+		output.AncillaryTxids = append(output.AncillaryTxids, txid)
+	}
+
+	return output
+}
