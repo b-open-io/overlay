@@ -7,19 +7,20 @@ import (
 	"time"
 
 	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
-	"github.com/b-open-io/overlay/util"
+	"github.com/b-open-io/overlay/beef"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
+	"github.com/bsv-blockchain/go-sdk/transaction"
 	"github.com/redis/go-redis/v9"
 )
 
 type RedisStorage struct {
-	DB      *redis.Client
-	TxStore util.TxStorage
+	DB        *redis.Client
+	BeefStore beef.BeefStorage
 }
 
-func NewRedisStorage(connString string, tx util.TxStorage) (r *RedisStorage, err error) {
-	r = &RedisStorage{TxStore: tx}
+func NewRedisStorage(connString string, beefStore beef.BeefStorage) (r *RedisStorage, err error) {
+	r = &RedisStorage{BeefStore: beefStore}
 	log.Println("Connecting to Redis Storage...", connString)
 	if opts, err := redis.ParseURL(connString); err != nil {
 		return nil, err
@@ -30,7 +31,7 @@ func NewRedisStorage(connString string, tx util.TxStorage) (r *RedisStorage, err
 }
 
 func (s *RedisStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
-	if err := s.TxStore.SaveBeef(ctx, utxo.Beef); err != nil {
+	if err := s.BeefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
 	_, err = s.DB.Pipelined(ctx, func(p redis.Pipeliner) error {
@@ -74,7 +75,7 @@ func (s *RedisStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoin
 			return nil, nil
 		} else if err != nil {
 			return nil, err
-		} else if tm == nil || len(tm) == 0 {
+		} else if len(tm) == 0 {
 			return nil, nil
 		} else if err := populateOutputTopic(o, tm); err != nil {
 			return nil, err
@@ -83,23 +84,23 @@ func (s *RedisStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoin
 
 	if m, err := s.DB.HGetAll(ctx, outputKey(outpoint)).Result(); err != nil {
 		return nil, err
-	} else if m == nil || len(m) == 0 {
+	} else if len(m) == 0 {
 		return nil, nil
 	} else if err := populateOutput(o, m); err != nil {
 		return nil, err
 	}
 	if includeBEEF {
-		if o.Beef, err = s.TxStore.LoadBeef(ctx, &outpoint.Txid); err != nil {
+		if o.Beef, err = s.BeefStore.LoadBeef(ctx, &outpoint.Txid); err != nil {
 			return nil, err
 		}
 	}
 	return
 }
 
-func (s *RedisStorage) FindOutputs(ctx context.Context, outpoints []*overlay.Outpoint, topic *string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
+func (s *RedisStorage) FindOutputs(ctx context.Context, outpoints []*overlay.Outpoint, topic string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
 	outputs := make([]*engine.Output, 0, len(outpoints))
 	for _, outpoint := range outpoints {
-		if output, err := s.FindOutput(ctx, outpoint, topic, spent, includeBEEF); err != nil {
+		if output, err := s.FindOutput(ctx, outpoint, &topic, spent, includeBEEF); err != nil {
 			return nil, err
 		} else {
 			outputs = append(outputs, output)
@@ -177,17 +178,25 @@ func (s *RedisStorage) DeleteOutput(ctx context.Context, outpoint *overlay.Outpo
 // 	return nil
 // }
 
-func (s *RedisStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Outpoint, topic string, spendTxid *chainhash.Hash) error {
-	return s.DB.HSet(ctx, SpendsKey, outpoint.String(), spendTxid.String()).Err()
+func (s *RedisStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Outpoint, topic string, beef []byte) error {
+	if _, _, spendTxid, err := transaction.ParseBeef(beef); err != nil {
+		return err
+	} else {
+		return s.DB.HSet(ctx, SpendsKey, outpoint.String(), spendTxid.String()).Err()
+	}
 }
 
-func (s *RedisStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string, spendTxid *chainhash.Hash) error {
-	values := make(map[string]interface{}, len(outpoints)*2)
-	for _, outpoint := range outpoints {
-		values[outpoint.String()] = spendTxid.String()
-	}
+func (s *RedisStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string, beef []byte) error {
+	if _, _, spendTxid, err := transaction.ParseBeef(beef); err != nil {
+		return err
+	} else {
+		values := make(map[string]interface{}, len(outpoints)*2)
+		for _, outpoint := range outpoints {
+			values[outpoint.String()] = spendTxid.String()
+		}
 
-	return s.DB.HSet(ctx, SpendsKey, values).Err()
+		return s.DB.HSet(ctx, SpendsKey, values).Err()
+	}
 }
 
 func (s *RedisStorage) UpdateConsumedBy(ctx context.Context, outpoint *overlay.Outpoint, topic string, consumedBy []*overlay.Outpoint) error {
@@ -195,7 +204,7 @@ func (s *RedisStorage) UpdateConsumedBy(ctx context.Context, outpoint *overlay.O
 }
 
 func (s *RedisStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
-	return s.TxStore.SaveBeef(ctx, beef)
+	return s.BeefStore.SaveBeef(ctx, txid, beef)
 }
 
 func (s *RedisStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *overlay.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {

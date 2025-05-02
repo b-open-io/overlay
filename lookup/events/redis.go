@@ -195,7 +195,7 @@ func (l *RedisEventLookup) LookupOutputs(ctx context.Context, question *Question
 	if len(outpoints) == 0 {
 		return nil, nil
 	}
-	results, err := l.Storage.FindOutputs(ctx, outpoints, &l.Topic, nil, true)
+	results, err := l.Storage.FindOutputs(ctx, outpoints, l.Topic, nil, true)
 	if err != nil {
 		return nil, err
 	}
@@ -262,14 +262,6 @@ func (l *RedisEventLookup) OutputSpent(ctx context.Context, outpoint *overlay.Ou
 		return l.Db.HSet(ctx, storage.SpendsKey, outpoint.String(), txid.String()).Err()
 	}
 }
-
-// func (l *RedisEventLookup) OutputsSpent(ctx context.Context, outpoints []*overlay.Outpoint, _ string) error {
-// 	args := make([]interface{}, 0, len(outpoints))
-// 	for _, outpoint := range outpoints {
-// 		args = append(args, outpoint.Bytes())
-// 	}
-// 	return l.Db.SAdd(ctx, SpentKey, args...).Err()
-// }
 
 func (l *RedisEventLookup) OutputDeleted(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
 	op := outpoint.String()

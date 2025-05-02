@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
+	"github.com/b-open-io/overlay/beef"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
 
@@ -13,11 +14,11 @@ import (
 )
 
 type MongoStorage struct {
-	DB     *mongo.Database
-	bucket *mongo.GridFSBucket
+	DB        *mongo.Database
+	BeefStore beef.BeefStorage
 }
 
-func NewMongoStorage(connString string, dbName string) (*MongoStorage, error) {
+func NewMongoStorage(connString string, dbName string, beefStore beef.BeefStorage) (*MongoStorage, error) {
 	client, err := mongo.Connect(options.Client().ApplyURI(connString))
 	if err != nil {
 		return nil, err
@@ -54,37 +55,15 @@ func NewMongoStorage(connString string, dbName string) (*MongoStorage, error) {
 		return nil, err
 	}
 
-	return &MongoStorage{DB: db, bucket: db.GridFSBucket()}, nil
+	return &MongoStorage{DB: db, BeefStore: beefStore}, nil
 }
 
 func (s *MongoStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
-	// Delete existing GridFS file for this txid (if any)
-	if _, err = s.DB.Collection("fs.files").DeleteOne(ctx, bson.M{"metadata.txid": utxo.Outpoint.Txid.String()}); err != nil {
+	if err := s.BeefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
 
-	// Upload the new Beef data to GridFS
-	var beefFileID interface{}
-	if len(utxo.Beef) > 0 {
-		uploadStream, err := s.bucket.OpenUploadStreamWithID(
-			ctx,
-			utxo.Outpoint.Txid.String(), // Use txid as the file ID
-			"beef",
-			options.GridFSUpload().SetMetadata(bson.M{"txid": utxo.Outpoint.Txid.String()}),
-		)
-		if err != nil {
-			return err
-		}
-		defer uploadStream.Close()
-
-		if _, err = uploadStream.Write(utxo.Beef); err != nil {
-			return err
-		}
-		beefFileID = uploadStream.FileID
-	}
-
 	bo := NewBSONOutput(utxo)
-	bo.BeefFileId = beefFileID.(string) // Store the GridFS file ID in the BSONOutput
 	// Insert or update the output in the "outputs" collection
 	if _, err = s.DB.Collection("outputs").UpdateOne(ctx,
 		bson.M{"outpoint": utxo.Outpoint.String(), "topic": utxo.Topic},
@@ -93,15 +72,6 @@ func (s *MongoStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (e
 	); err != nil {
 		return err
 	}
-
-	// // Update the "beefs" collection with the GridFS file ID
-	// if _, err = s.DB.Collection("beefs").UpdateOne(ctx,
-	// 	bson.M{"_id": utxo.Outpoint.Txid.String()},
-	// 	bson.M{"$set": bson.M{"beefFileID": beefFileID}},
-	// 	options.Update().SetUpsert(true),
-	// ); err != nil {
-	// 	return err
-	// }
 
 	return nil
 }
@@ -115,112 +85,86 @@ func (s *MongoStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoin
 		query["spent"] = *spent
 	}
 
-	// Aggregation pipeline
-	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: query}}, // Match the output
+	bo := &BSONOutput{}
+	if err := s.DB.Collection("outputs").FindOne(ctx, query).Decode(bo); err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil // No output found
+		}
+		return nil, err // An error occurred
 	}
-
+	o = bo.ToEngineOutput()
 	if includeBEEF {
-		// Add a $lookup stage to join with the "beef" collection
-		pipeline = append(pipeline, bson.D{
-			{Key: "$lookup", Value: bson.M{
-				"from":         "beef",
-				"localField":   "txid",
-				"foreignField": "_id", // Match on the unique _id field in the beef collection
-				"as":           "beefData",
-			}},
-		})
-		// Add a $set stage to directly assign the Beef field
-		pipeline = append(pipeline, bson.D{
-			{Key: "$set", Value: bson.M{
-				"beef": bson.M{"$arrayElemAt": []interface{}{"$beefData.beef", 0}},
-			}},
-		})
-	}
-
-	// Execute the aggregation
-	cursor, err := s.DB.Collection("outputs").Aggregate(ctx, pipeline)
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(ctx)
-
-	// Decode the result
-	if cursor.Next(ctx) {
-		var result BSONOutput
-		if err := cursor.Decode(&result); err != nil {
+		if o.Beef, err = s.BeefStore.LoadBeef(ctx, &outpoint.Txid); err != nil {
 			return nil, err
 		}
-
-		// Convert BSONOutput to engine.Output
-		o = result.ToEngineOutput()
-	} else {
-		return nil, nil // No output found
 	}
 
-	return o, nil
+	return bo.ToEngineOutput(), nil
 }
 
-func (s *MongoStorage) FindOutputs(ctx context.Context, outpoints []*overlay.Outpoint, topic *string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
-	outputs := make([]*engine.Output, 0, len(outpoints))
+func (s *MongoStorage) FindOutputs(ctx context.Context, outpoints []*overlay.Outpoint, topic string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
+	ops := make([]string, 0, len(outpoints))
 	for _, outpoint := range outpoints {
-		if output, err := s.FindOutput(ctx, outpoint, topic, spent, includeBEEF); err != nil {
-			return nil, err
-		} else {
-			outputs = append(outputs, output)
-		}
+		ops = append(ops, outpoint.String())
 	}
-	return outputs, nil
+	query := bson.M{"topic": topic, "outpoint": bson.M{"$in": ops}}
+
+	resultsByOutpoint := make(map[string]*engine.Output)
+	if cursor, err := s.DB.Collection("outputs").Find(ctx, query); err != nil {
+		return nil, err // An error occurred while querying the outputs
+	} else {
+		defer cursor.Close(ctx) // Ensure the cursor is closed after use
+		for cursor.Next(ctx) {
+			var result BSONOutput
+			if err := cursor.Decode(&result); err != nil {
+				return nil, err // An error occurred while decoding the output
+			}
+			output := result.ToEngineOutput()
+			if includeBEEF {
+				if output.Beef, err = s.BeefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
+					return nil, err
+				}
+			}
+			resultsByOutpoint[result.Outpoint] = output // Store the output by its outpoint
+			// outputs = append(outputs, output)
+		}
+		if err := cursor.Err(); err != nil {
+			return nil, err // An error occurred while iterating through the cursor
+		}
+		var outputs []*engine.Output
+		for _, outpoint := range outpoints {
+			outputs = append(outputs, resultsByOutpoint[outpoint.String()])
+		}
+		return outputs, nil // Return the list of outputs found
+	}
 }
 
 func (s *MongoStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
 	query := bson.M{"txid": txid.String()}
 
-	// Aggregation pipeline
-	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: query}}, // Match outputs with the given txid
-	}
-
-	if includeBEEF {
-		// Add a $lookup stage to join with the "beef" collection
-		pipeline = append(pipeline, bson.D{
-			{Key: "$lookup", Value: bson.M{
-				"from":         "beef",
-				"localField":   "txid",
-				"foreignField": "_id", // Match on the unique _id field in the beef collection
-				"as":           "beefData",
-			}},
-		})
-		// Add a $set stage to directly assign the Beef field
-		pipeline = append(pipeline, bson.D{
-			{Key: "$set", Value: bson.M{
-				"beef": bson.M{"$arrayElemAt": []interface{}{"$beefData.beef", 0}},
-			}},
-		})
-	}
-
-	// Execute the aggregation
-	cursor, err := s.DB.Collection("outputs").Aggregate(ctx, pipeline)
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(ctx)
-
-	// Decode the results
-	var outputs []*engine.Output
-	for cursor.Next(ctx) {
-		var result BSONOutput
-		if err := cursor.Decode(&result); err != nil {
-			return nil, err
+	if cursor, err := s.DB.Collection("outputs").Find(ctx, query); err != nil {
+		return nil, err // An error occurred while querying the outputs
+	} else {
+		defer cursor.Close(ctx) // Ensure the cursor is closed after use
+		var outputs []*engine.Output
+		for cursor.Next(ctx) {
+			var result BSONOutput
+			if err := cursor.Decode(&result); err != nil {
+				return nil, err // An error occurred while decoding the output
+			}
+			output := result.ToEngineOutput()
+			if includeBEEF {
+				if output.Beef, err = s.BeefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
+					return nil, err
+				}
+			}
+			outputs = append(outputs, output)
 		}
-		outputs = append(outputs, result.ToEngineOutput())
+		if err := cursor.Err(); err != nil {
+			return nil, err // An error occurred while iterating through the cursor
+		}
+		return outputs, nil // Return the list of outputs found for the transaction
 	}
-
-	if err := cursor.Err(); err != nil {
-		return nil, err
-	}
-
-	return outputs, nil
 }
 
 func (s *MongoStorage) FindUTXOsForTopic(ctx context.Context, topic string, since uint32, includeBEEF bool) ([]*engine.Output, error) {
@@ -229,52 +173,29 @@ func (s *MongoStorage) FindUTXOsForTopic(ctx context.Context, topic string, sinc
 		"blockHeight": bson.M{"$gte": since},
 		"spent":       false, // Ensure only unspent outputs are retrieved
 	}
-
-	// Aggregation pipeline
-	pipeline := mongo.Pipeline{
-		{{Key: "$match", Value: query}}, // Match UTXOs for the given topic and blockHeight
-	}
-
-	if includeBEEF {
-		// Add a $lookup stage to join with the "beef" collection
-		pipeline = append(pipeline, bson.D{
-			{Key: "$lookup", Value: bson.M{
-				"from":         "beef",
-				"localField":   "txid",
-				"foreignField": "_id", // Match on the unique _id field in the beef collection
-				"as":           "beefData",
-			}},
-		})
-		// Add a $set stage to directly assign the Beef field
-		pipeline = append(pipeline, bson.D{
-			{Key: "$set", Value: bson.M{
-				"beef": bson.M{"$arrayElemAt": []interface{}{"$beefData.beef", 0}},
-			}},
-		})
-	}
-
-	// Execute the aggregation
-	cursor, err := s.DB.Collection("outputs").Aggregate(ctx, pipeline)
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(ctx)
-
-	// Decode the results
-	var outputs []*engine.Output
-	for cursor.Next(ctx) {
-		var result BSONOutput
-		if err := cursor.Decode(&result); err != nil {
-			return nil, err
+	if cursor, err := s.DB.Collection("outputs").Find(ctx, query, options.Find().SetSort(bson.M{"blockHeight": 1, "blockIdx": 1})); err != nil {
+		return nil, err // An error occurred while querying the outputs
+	} else {
+		defer cursor.Close(ctx) // Ensure the cursor is closed after use
+		var outputs []*engine.Output
+		for cursor.Next(ctx) {
+			var result BSONOutput
+			if err := cursor.Decode(&result); err != nil {
+				return nil, err // An error occurred while decoding the output
+			}
+			output := result.ToEngineOutput()
+			if includeBEEF {
+				if output.Beef, err = s.BeefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
+					return nil, err
+				}
+			}
+			outputs = append(outputs, output)
 		}
-		outputs = append(outputs, result.ToEngineOutput())
+		if err := cursor.Err(); err != nil {
+			return nil, err // An error occurred while iterating through the cursor
+		}
+		return outputs, nil // Return the list of outputs found for the transaction
 	}
-
-	if err := cursor.Err(); err != nil {
-		return nil, err
-	}
-
-	return outputs, nil
 }
 
 func (s *MongoStorage) DeleteOutput(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
@@ -285,7 +206,7 @@ func (s *MongoStorage) DeleteOutput(ctx context.Context, outpoint *overlay.Outpo
 	return err
 }
 
-func (s *MongoStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Outpoint, topic string, spendTxid *chainhash.Hash) error {
+func (s *MongoStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Outpoint, topic string, beef []byte) error {
 	_, err := s.DB.Collection("outputs").UpdateOne(ctx,
 		bson.M{"outpoint": outpoint.String(), "topic": topic},
 		bson.M{"$set": bson.M{"spent": true}},
@@ -293,13 +214,13 @@ func (s *MongoStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Ou
 	return err
 }
 
-func (s *MongoStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string, spendTxid *chainhash.Hash) error {
+func (s *MongoStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string, beef []byte) error {
 	ops := make([]string, 0, len(outpoints))
 	for _, outpoint := range outpoints {
 		ops = append(ops, outpoint.String())
 	}
 	_, err := s.DB.Collection("outputs").UpdateMany(ctx,
-		bson.M{"outpoint": bson.M{"$in": ops, "topic": topic}},
+		bson.M{"outpoint": bson.M{"$in": ops}, "topic": topic},
 		bson.M{"$set": bson.M{"spent": true}},
 	)
 	return err
@@ -318,11 +239,7 @@ func (s *MongoStorage) UpdateConsumedBy(ctx context.Context, outpoint *overlay.O
 }
 
 func (s *MongoStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
-	_, err := s.DB.Collection("beefs").UpdateOne(ctx,
-		bson.M{"_id": txid.String()},
-		bson.M{"$set": bson.M{"beef": beef}},
-	)
-	return err
+	return s.BeefStore.SaveBeef(ctx, txid, beef)
 }
 
 func (s *MongoStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *overlay.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
@@ -341,6 +258,7 @@ func (s *MongoStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay
 	_, err := s.DB.Collection("beefs").UpdateOne(ctx,
 		bson.M{"_id": tx.Txid.String()},
 		bson.M{"$addToSet": bson.M{"topics": tx.Topic}},
+		options.UpdateOne().SetUpsert(true),
 	)
 	return err
 }
