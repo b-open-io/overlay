@@ -255,7 +255,7 @@ func (s *MongoStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *ov
 }
 
 func (s *MongoStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
-	_, err := s.DB.Collection("beefs").UpdateOne(ctx,
+	_, err := s.DB.Collection("tx-topics").UpdateOne(ctx,
 		bson.M{"_id": tx.Txid.String()},
 		bson.M{"$addToSet": bson.M{"topics": tx.Topic}},
 		options.UpdateOne().SetUpsert(true),
@@ -264,7 +264,7 @@ func (s *MongoStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay
 }
 
 func (s *MongoStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
-	if err := s.DB.Collection("beefs").FindOne(ctx, bson.M{"_id": tx.Txid.String(), "topics": tx.Topic}).Err(); err != nil {
+	if err := s.DB.Collection("tx-topics").FindOne(ctx, bson.M{"_id": tx.Txid.String(), "topics": tx.Topic}).Err(); err != nil {
 		if err == mongo.ErrNoDocuments {
 			return false, nil // Transaction does not exist
 		}
