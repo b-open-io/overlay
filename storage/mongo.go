@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"time"
 
 	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
 	"github.com/b-open-io/overlay/beef"
@@ -257,7 +258,10 @@ func (s *MongoStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *ov
 func (s *MongoStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
 	_, err := s.DB.Collection("tx-topics").UpdateOne(ctx,
 		bson.M{"_id": tx.Txid.String()},
-		bson.M{"$addToSet": bson.M{"topics": tx.Topic}},
+		bson.M{
+			"$addToSet":    bson.M{"topics": tx.Topic},
+			"$setOnInsert": bson.M{"firstSeen": time.Now().UnixMilli()},
+		},
 		options.UpdateOne().SetUpsert(true),
 	)
 	return err
