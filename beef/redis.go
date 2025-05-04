@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/redis/go-redis/v9"
@@ -11,11 +12,14 @@ import (
 
 type RedisBeefStorage struct {
 	BaseBeefStorage
-	db *redis.Client
+	db  *redis.Client
+	ttl time.Duration
 }
 
-func NewRedisBeefStorage(connString string) (*RedisBeefStorage, error) {
-	r := &RedisBeefStorage{}
+func NewRedisBeefStorage(connString string, cacheTTL time.Duration) (*RedisBeefStorage, error) {
+	r := &RedisBeefStorage{
+		ttl: cacheTTL,
+	}
 	log.Println("Connecting to Redis BeefStorage...", connString)
 	if opts, err := redis.ParseURL(connString); err != nil {
 		return nil, err
@@ -44,5 +48,15 @@ func (t *RedisBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) (
 }
 
 func (t *RedisBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
-	return t.db.HSet(ctx, BeefKey, txid.String(), beefBytes).Err()
+	_, err := t.db.Pipelined(ctx, func(p redis.Pipeliner) error {
+		if err := p.HSet(ctx, BeefKey, txid.String(), beefBytes).Err(); err != nil {
+			return err
+		} else if t.ttl > 0 {
+			if err := p.Expire(ctx, BeefKey, t.ttl).Err(); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return err
 }
