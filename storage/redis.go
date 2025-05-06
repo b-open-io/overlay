@@ -2,12 +2,14 @@ package storage
 
 import (
 	"context"
+	"encoding/base64"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
 	"github.com/b-open-io/overlay/beef"
+	"github.com/b-open-io/overlay/publish"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
 	"github.com/bsv-blockchain/go-sdk/transaction"
@@ -17,9 +19,10 @@ import (
 type RedisStorage struct {
 	DB        *redis.Client
 	BeefStore beef.BeefStorage
+	pub       publish.Publisher
 }
 
-func NewRedisStorage(connString string, beefStore beef.BeefStorage) (r *RedisStorage, err error) {
+func NewRedisStorage(connString string, beefStore beef.BeefStorage, pub publish.Publisher) (r *RedisStorage, err error) {
 	r = &RedisStorage{BeefStore: beefStore}
 	log.Println("Connecting to Redis Storage...", connString)
 	if opts, err := redis.ParseURL(connString); err != nil {
@@ -54,7 +57,9 @@ func (s *RedisStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (e
 				return err
 			}
 		}
-		p.Publish(ctx, utxo.Topic, op)
+		if s.pub != nil {
+			s.pub.Publish(ctx, utxo.Topic, base64.StdEncoding.EncodeToString(utxo.Beef))
+		}
 		return nil
 	})
 	return err

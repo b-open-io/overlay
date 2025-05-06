@@ -2,10 +2,12 @@ package storage
 
 import (
 	"context"
+	"encoding/base64"
 	"time"
 
 	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
 	"github.com/b-open-io/overlay/beef"
+	"github.com/b-open-io/overlay/publish"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
 
@@ -17,9 +19,10 @@ import (
 type MongoStorage struct {
 	DB        *mongo.Database
 	BeefStore beef.BeefStorage
+	pub       publish.Publisher
 }
 
-func NewMongoStorage(connString string, dbName string, beefStore beef.BeefStorage) (*MongoStorage, error) {
+func NewMongoStorage(connString string, dbName string, beefStore beef.BeefStorage, pub publish.Publisher) (*MongoStorage, error) {
 	client, err := mongo.Connect(options.Client().ApplyURI(connString))
 	if err != nil {
 		return nil, err
@@ -56,7 +59,11 @@ func NewMongoStorage(connString string, dbName string, beefStore beef.BeefStorag
 		return nil, err
 	}
 
-	return &MongoStorage{DB: db, BeefStore: beefStore}, nil
+	return &MongoStorage{
+		DB:        db,
+		BeefStore: beefStore,
+		pub:       pub,
+	}, nil
 }
 
 func (s *MongoStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
@@ -72,6 +79,10 @@ func (s *MongoStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (e
 		options.UpdateOne().SetUpsert(true),
 	); err != nil {
 		return err
+	}
+
+	if s.pub != nil {
+		s.pub.Publish(ctx, utxo.Topic, base64.StdEncoding.EncodeToString(utxo.Beef))
 	}
 
 	return nil
