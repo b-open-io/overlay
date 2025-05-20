@@ -226,7 +226,7 @@ func (s *MongoStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Ou
 	return err
 }
 
-func (s *MongoStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string, beef []byte) error {
+func (s *MongoStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string) error {
 	ops := make([]string, 0, len(outpoints))
 	for _, outpoint := range outpoints {
 		ops = append(ops, outpoint.String())

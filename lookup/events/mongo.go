@@ -3,6 +3,8 @@ package events
 import (
 	"context"
 
+	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
+	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
 	"github.com/bsv-blockchain/go-sdk/overlay/lookup"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -34,20 +36,24 @@ func (l *MongoEventLookup) SaveEvents(ctx context.Context, outpoint *overlay.Out
 	return nil
 }
 
-func (l *MongoEventLookup) OutputAdded(ctx context.Context, outpoint *overlay.Outpoint, topic string, beef []byte) error {
+func (l *MongoEventLookup) OutputAdmittedByTopic(ctx context.Context, payload *engine.OutputAdmittedByTopic) error {
 	// Implementation for adding an output event
 	return nil
 }
 
-func (l *MongoEventLookup) OutputSpent(ctx context.Context, outpoint *overlay.Outpoint, topic string, beef []byte) error {
+func (l *MongoEventLookup) OutputSpent(ctx context.Context, payload *engine.OutputSpent) error {
 	// Implementation for marking an output as spent
 	return nil
 }
-func (l *MongoEventLookup) OutputDeleted(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
+func (l *MongoEventLookup) OutputNoLongerRetainedInHistory(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
 	// Implementation for deleting an output event
 	return nil
 }
-func (l *MongoEventLookup) OutputBlockHeightUpdated(ctx context.Context, outpoint *overlay.Outpoint, blockHeight uint32, blockIndex uint64) error {
+func (l *MongoEventLookup) OutputEvicted(ctx context.Context, outpoint *overlay.Outpoint) error {
+	// Implementation for evicting an output
+	return nil
+}
+func (l *MongoEventLookup) OutputBlockHeightUpdated(ctx context.Context, txid *chainhash.Hash, blockHeight uint32, blockIndex uint64) error {
 	// Implementation for updating the block height of an output
 	return nil
 }

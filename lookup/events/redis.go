@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
 	"github.com/b-open-io/overlay/storage"
+	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
 	"github.com/bsv-blockchain/go-sdk/overlay/lookup"
 	"github.com/bsv-blockchain/go-sdk/transaction"
@@ -253,17 +255,11 @@ func (l *RedisEventLookup) FindEvents(ctx context.Context, outpoint *overlay.Out
 	}
 }
 
-func (l *RedisEventLookup) OutputSpent(ctx context.Context, outpoint *overlay.Outpoint, _ string, spendBeef []byte) error {
-	if _, _, txid, err := transaction.ParseBeef(spendBeef); err != nil {
-		return err
-	} else if txid == nil {
-		return errors.New("invalid beef")
-	} else {
-		return l.Db.HSet(ctx, storage.SpendsKey, outpoint.String(), txid.String()).Err()
-	}
+func (l *RedisEventLookup) OutputSpent(ctx context.Context, payload *engine.OutputSpent) error {
+	return l.Db.HSet(ctx, storage.SpendsKey, payload.Outpoint.String(), payload.SpendingTxid.String()).Err()
 }
 
-func (l *RedisEventLookup) OutputDeleted(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
+func (l *RedisEventLookup) OutputNoLongerRetainedInHistory(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
 	op := outpoint.String()
 	if events, err := l.Db.SMembers(ctx, OutpointEventsKey(outpoint)).Result(); err != nil {
 		return err
@@ -282,32 +278,42 @@ func (l *RedisEventLookup) OutputDeleted(ctx context.Context, outpoint *overlay.
 	}
 }
 
-func (l *RedisEventLookup) OutputBlockHeightUpdated(ctx context.Context, outpoint *overlay.Outpoint, height uint32, idx uint64) error {
+func (l *RedisEventLookup) OutputEvicted(ctx context.Context, outpoint *overlay.Outpoint) error {
+	// Implementation for evicting an output
+	return nil
+}
+
+func (l *RedisEventLookup) OutputBlockHeightUpdated(ctx context.Context, txid *chainhash.Hash, height uint32, idx uint64) error {
 	var score float64
 	if height > 0 {
 		score = float64(height)*1e9 + float64(idx)
 	} else {
 		score = float64(time.Now().UnixNano())
 	}
-	op := outpoint.String()
-	if events, err := l.Db.SMembers(ctx, OutpointEventsKey(outpoint)).Result(); err != nil {
-		return err
-	} else if len(events) == 0 {
-		return nil
-	} else {
-		_, err := l.Db.Pipelined(ctx, func(p redis.Pipeliner) error {
-			for _, event := range events {
-				if err := p.ZAdd(ctx, EventKey(event), redis.Z{
-					Score:  score,
-					Member: op,
-				}).Err(); err != nil {
-					return err
-				}
-			}
+	iter := l.Db.Scan(ctx, 0, fmt.Sprintf("oe:%s*", txid), 0).Iterator()
+	for iter.Next(ctx) {
+		op := strings.TrimPrefix(iter.Val(), "oe:")
+		if events, err := l.Db.SMembers(ctx, iter.Val()).Result(); err != nil {
+			return err
+		} else if len(events) == 0 {
 			return nil
-		})
-		return err
+		} else {
+			_, err := l.Db.Pipelined(ctx, func(p redis.Pipeliner) error {
+				for _, event := range events {
+					if err := p.ZAdd(ctx, EventKey(event), redis.Z{
+						Score:  score,
+						Member: op,
+					}).Err(); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			return err
+		}
 	}
+
+	return iter.Err()
 }
 
 func (l *RedisEventLookup) GetDocumentation() string {
