@@ -1,3 +1,5 @@
+github.com/4chain-ag/go-overlay-services v0.1.1-0.20250520171119-353d52f44efd h1:nSUVvYk2cnlqT4ZTjHrCnMBS7MKEHzTPjFbEmHhBuK8=
+github.com/4chain-ag/go-overlay-services v0.1.1-0.20250520171119-353d52f44efd/go.mod h1:S1+P648IWr3asSm1L82z14+7ani9ot/lXJrRTJ97Mew=
 github.com/b-open-io/go-sdk v1.1.25-0.20250520163347-a6ea0e8b256c h1:5jTSWJnushSEW+WTJ/n4vcYEkrfB9DNq+kahJbSLsrk=
 github.com/b-open-io/go-sdk v1.1.25-0.20250520163347-a6ea0e8b256c/go.mod h1:8YTJF5LuTRzSYNPIdi5xv2FBwLjOytwzaYkXkJn/doI=
 github.com/bsm/ginkgo/v2 v2.12.0 h1:Ny8MWAHyOepLGlLKYmXG4IEkioBysk6GpaRTLC8zwWs=
