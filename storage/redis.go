@@ -191,17 +191,13 @@ func (s *RedisStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Ou
 	}
 }
 
-func (s *RedisStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string, beef []byte) error {
-	if _, _, spendTxid, err := transaction.ParseBeef(beef); err != nil {
-		return err
-	} else {
-		values := make(map[string]interface{}, len(outpoints)*2)
-		for _, outpoint := range outpoints {
-			values[outpoint.String()] = spendTxid.String()
-		}
-
-		return s.DB.HSet(ctx, SpendsKey, values).Err()
+func (s *RedisStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string, spendTxid *chainhash.Hash) error {
+	values := make(map[string]interface{}, len(outpoints)*2)
+	for _, outpoint := range outpoints {
+		values[outpoint.String()] = spendTxid.String()
 	}
+
+	return s.DB.HSet(ctx, SpendsKey, values).Err()
 }
 
 func (s *RedisStorage) UpdateConsumedBy(ctx context.Context, outpoint *overlay.Outpoint, topic string, consumedBy []*overlay.Outpoint) error {

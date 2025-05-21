@@ -11,7 +11,7 @@ type RedisPublish struct {
 	DB *redis.Client
 }
 
-func NewRedisStorage(connString string) (r *RedisPublish, err error) {
+func NewRedisPublish(connString string) (r *RedisPublish, err error) {
 	r = &RedisPublish{}
 	log.Println("Connecting to Redis Storage...", connString)
 	if opts, err := redis.ParseURL(connString); err != nil {
