@@ -1,8 +1,8 @@
 package storage
 
-import "github.com/bsv-blockchain/go-sdk/overlay"
+import "github.com/bsv-blockchain/go-sdk/transaction"
 
-func OutputTopicKey(outpoint *overlay.Outpoint, topic string) string {
+func OutputTopicKey(outpoint *transaction.Outpoint, topic string) string {
 	return "ot:" + outpoint.String() + ":" + topic
 }
 
@@ -12,7 +12,7 @@ func OutputTopicKey(outpoint *overlay.Outpoint, topic string) string {
 
 const SpendsKey = "spends"
 
-func outputKey(outpoint *overlay.Outpoint) string {
+func outputKey(outpoint *transaction.Outpoint) string {
 	return "o:" + outpoint.String()
 }
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/transaction"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker/headers_client"
 	"github.com/joho/godotenv"
 )
 
@@ -27,6 +28,7 @@ func init() {
 type BeefStorage interface {
 	LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error)
 	SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error
+	LoadTx(ctx context.Context, txid *chainhash.Hash, chaintracker *headers_client.Client) (*transaction.Transaction, error)
 }
 
 type inflightRequest struct {
@@ -58,6 +60,49 @@ func (t *BaseBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([
 }
 
 func (t *BaseBeefStorage) SaveBeef(ctx context.Context, beefBytes []byte) error {
+	return nil
+}
+
+// LoadTx loads a transaction from BEEF storage with optional merkle path validation
+func (t *BaseBeefStorage) LoadTx(ctx context.Context, txid *chainhash.Hash, chaintracker *headers_client.Client) (*transaction.Transaction, error) {
+	// Load BEEF from storage
+	beefBytes, err := t.LoadBeef(ctx, txid)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse BEEF to get the transaction
+	_, tx, _, err := transaction.ParseBeef(beefBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate merkle path if present and chaintracker is provided
+	if tx.MerklePath != nil && chaintracker != nil {
+		if err := t.validateMerklePath(tx, txid, chaintracker); err != nil {
+			return nil, err
+		}
+	}
+
+	return tx, nil
+}
+
+// validateMerklePath validates the transaction's merkle path against the chain tracker
+func (t *BaseBeefStorage) validateMerklePath(tx *transaction.Transaction, txid *chainhash.Hash, chaintracker *headers_client.Client) error {
+	root, err := tx.MerklePath.ComputeRoot(txid)
+	if err != nil {
+		return err
+	}
+	
+	valid, err := chaintracker.IsValidRootForHeight(root, tx.MerklePath.BlockHeight)
+	if err != nil {
+		return err
+	}
+	
+	if !valid {
+		return errors.New("invalid merkle path")
+	}
+	
 	return nil
 }
 

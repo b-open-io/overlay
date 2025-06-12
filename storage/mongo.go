@@ -10,6 +10,7 @@ import (
 	"github.com/b-open-io/overlay/publish"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
+	"github.com/bsv-blockchain/go-sdk/transaction"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -88,7 +89,7 @@ func (s *MongoStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (e
 	return nil
 }
 
-func (s *MongoStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoint, topic *string, spent *bool, includeBEEF bool) (o *engine.Output, err error) {
+func (s *MongoStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, topic *string, spent *bool, includeBEEF bool) (o *engine.Output, err error) {
 	query := bson.M{"outpoint": outpoint.String()}
 	if topic != nil {
 		query["topic"] = *topic
@@ -114,7 +115,7 @@ func (s *MongoStorage) FindOutput(ctx context.Context, outpoint *overlay.Outpoin
 	return bo.ToEngineOutput(), nil
 }
 
-func (s *MongoStorage) FindOutputs(ctx context.Context, outpoints []*overlay.Outpoint, topic string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
+func (s *MongoStorage) FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
 	ops := make([]string, 0, len(outpoints))
 	for _, outpoint := range outpoints {
 		ops = append(ops, outpoint.String())
@@ -210,7 +211,7 @@ func (s *MongoStorage) FindUTXOsForTopic(ctx context.Context, topic string, sinc
 	}
 }
 
-func (s *MongoStorage) DeleteOutput(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
+func (s *MongoStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint, topic string) error {
 	_, err := s.DB.Collection("outputs").DeleteOne(ctx, bson.M{
 		"outpoint": outpoint.String(),
 		"topic":    topic,
@@ -218,7 +219,7 @@ func (s *MongoStorage) DeleteOutput(ctx context.Context, outpoint *overlay.Outpo
 	return err
 }
 
-func (s *MongoStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Outpoint, topic string, beef []byte) error {
+func (s *MongoStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *transaction.Outpoint, topic string, beef []byte) error {
 	_, err := s.DB.Collection("outputs").UpdateOne(ctx,
 		bson.M{"outpoint": outpoint.String(), "topic": topic},
 		bson.M{"$set": bson.M{"spent": true}},
@@ -226,7 +227,7 @@ func (s *MongoStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *overlay.Ou
 	return err
 }
 
-func (s *MongoStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overlay.Outpoint, topic string, spendTxid *chainhash.Hash) error {
+func (s *MongoStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spendTxid *chainhash.Hash) error {
 	ops := make([]string, 0, len(outpoints))
 	for _, outpoint := range outpoints {
 		ops = append(ops, outpoint.String())
@@ -238,7 +239,7 @@ func (s *MongoStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*overla
 	return err
 }
 
-func (s *MongoStorage) UpdateConsumedBy(ctx context.Context, outpoint *overlay.Outpoint, topic string, consumedBy []*overlay.Outpoint) error {
+func (s *MongoStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, topic string, consumedBy []*transaction.Outpoint) error {
 	ops := make([]string, 0, len(consumedBy))
 	for _, outpoint := range consumedBy {
 		ops = append(ops, outpoint.String())
@@ -254,7 +255,7 @@ func (s *MongoStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhas
 	return s.BeefStore.SaveBeef(ctx, txid, beef)
 }
 
-func (s *MongoStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *overlay.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
+func (s *MongoStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
 	_, err := s.DB.Collection("outputs").UpdateOne(ctx,
 		bson.M{"outpoint": outpoint.String(), "topic": topic},
 		bson.M{"$set": bson.M{

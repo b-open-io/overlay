@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/bsv-blockchain/go-sdk/overlay"
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
@@ -52,9 +51,9 @@ func NewPayPurse(connString, wif string) (p *PayPurse, err error) {
 
 func (p *PayPurse) UpdateFromTx(ctx context.Context, tx *transaction.Transaction) error {
 	for _, txin := range tx.Inputs {
-		outpoint := &overlay.Outpoint{
-			Txid:        *txin.SourceTXID,
-			OutputIndex: txin.SourceTxOutIndex,
+		outpoint := &transaction.Outpoint{
+			Txid:  *txin.SourceTXID,
+			Index: txin.SourceTxOutIndex,
 		}
 		if err := p.db.ZRem(ctx, p.utxoKey, outpoint.String()).Err(); err != nil {
 			return err
@@ -62,9 +61,9 @@ func (p *PayPurse) UpdateFromTx(ctx context.Context, tx *transaction.Transaction
 	}
 	txid := tx.TxID()
 	for vout, txout := range tx.Outputs {
-		outpoint := &overlay.Outpoint{
-			Txid:        *txid,
-			OutputIndex: uint32(vout),
+		outpoint := &transaction.Outpoint{
+			Txid:  *txid,
+			Index: uint32(vout),
 		}
 		if bytes.Equal(*txout.LockingScript, *p.LockingScript) {
 			if err := p.db.ZAdd(ctx, p.utxoKey, redis.Z{
@@ -144,14 +143,14 @@ func (p *PayPurse) LockUtxos(ctx context.Context, satoshis uint64) ([]*transacti
 			break
 		}
 		op := result.Member.(string)
-		if outpoint, err := overlay.NewOutpointFromString(op); err != nil {
+		if outpoint, err := transaction.OutpointFromString(op); err != nil {
 			log.Panicln(err)
 		} else if locked, err := p.db.SetNX(ctx, "lock:"+op, time.Now().Unix(), time.Minute).Result(); err != nil {
 			log.Panic(err)
 		} else if locked {
 			utxos = append(utxos, &transaction.UTXO{
 				TxID:                    &outpoint.Txid,
-				Vout:                    outpoint.OutputIndex,
+				Vout:                    outpoint.Index,
 				LockingScript:           p.LockingScript,
 				Satoshis:                uint64(result.Score),
 				UnlockingScriptTemplate: p.unlock,

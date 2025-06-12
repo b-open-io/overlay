@@ -5,8 +5,8 @@ import (
 
 	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
-	"github.com/bsv-blockchain/go-sdk/overlay"
 	"github.com/bsv-blockchain/go-sdk/script"
+	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 func outputToMap(output *engine.Output) map[string]interface{} {
@@ -61,17 +61,17 @@ func populateOutputTopic(o *engine.Output, m map[string]string) (err error) {
 	return
 }
 
-func outpointsToBytes(outpoints []*overlay.Outpoint) []byte {
+func outpointsToBytes(outpoints []*transaction.Outpoint) []byte {
 	b := make([]byte, 36*len(outpoints))
 	for i, outpoint := range outpoints {
 		copy(b[i*36:], outpoint.Bytes())
 	}
 	return b
 }
-func bytesToOutpoints(b []byte) []*overlay.Outpoint {
-	outpoints := make([]*overlay.Outpoint, 0, len(b)/36)
+func bytesToOutpoints(b []byte) []*transaction.Outpoint {
+	outpoints := make([]*transaction.Outpoint, 0, len(b)/36)
 	for i := 0; i < len(b); i += 36 {
-		outpoints = append(outpoints, overlay.NewOutpointFromBytes([36]byte(b[i:i+36])))
+		outpoints = append(outpoints, transaction.NewOutpointFromBytes([36]byte(b[i:i+36])))
 	}
 	return outpoints
 }
@@ -140,7 +140,7 @@ func NewBSONOutput(o *engine.Output) *BSONOutput {
 }
 
 func (o *BSONOutput) ToEngineOutput() *engine.Output {
-	outpoint, _ := overlay.NewOutpointFromString(o.Outpoint)
+	outpoint, _ := transaction.OutpointFromString(o.Outpoint)
 	output := &engine.Output{
 		Outpoint: *outpoint,
 		Topic:    o.Topic,
@@ -152,11 +152,11 @@ func (o *BSONOutput) ToEngineOutput() *engine.Output {
 		AncillaryBeef: o.AncillaryBeef,
 	}
 	for _, oc := range o.OutputsConsumed {
-		op, _ := overlay.NewOutpointFromString(oc)
+		op, _ := transaction.OutpointFromString(oc)
 		output.OutputsConsumed = append(output.OutputsConsumed, op)
 	}
 	for _, cb := range o.ConsumedBy {
-		op, _ := overlay.NewOutpointFromString(cb)
+		op, _ := transaction.OutpointFromString(cb)
 		output.ConsumedBy = append(output.ConsumedBy, op)
 	}
 	for _, at := range o.AncillaryTxids {

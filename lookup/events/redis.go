@@ -28,7 +28,7 @@ func EventKey(event string) string {
 	return "ev:" + event
 }
 
-func OutpointEventsKey(outpoint *overlay.Outpoint) string {
+func OutpointEventsKey(outpoint *transaction.Outpoint) string {
 	return "oe:" + outpoint.String()
 }
 
@@ -45,7 +45,7 @@ func NewRedisEventLookup(connString string, storage engine.Storage, topic string
 	}
 }
 
-func (l *RedisEventLookup) SaveEvent(ctx context.Context, outpoint *overlay.Outpoint, event string, height uint32, idx uint64) error {
+func (l *RedisEventLookup) SaveEvent(ctx context.Context, outpoint *transaction.Outpoint, event string, height uint32, idx uint64) error {
 	var score float64
 	if height > 0 {
 		score = float64(height)*1e9 + float64(idx)
@@ -69,7 +69,7 @@ func (l *RedisEventLookup) SaveEvent(ctx context.Context, outpoint *overlay.Outp
 	return err
 
 }
-func (l *RedisEventLookup) SaveEvents(ctx context.Context, outpoint *overlay.Outpoint, events []string, height uint32, idx uint64) error {
+func (l *RedisEventLookup) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64) error {
 	var score float64
 	if height > 0 {
 		score = float64(height)*1e9 + float64(idx)
@@ -98,7 +98,7 @@ func (l *RedisEventLookup) Close() {
 		l.Db.Close()
 	}
 }
-func (l *RedisEventLookup) LookupOutpoints(ctx context.Context, question *Question) (outputs []*overlay.Outpoint, err error) {
+func (l *RedisEventLookup) LookupOutpoints(ctx context.Context, question *Question) (outputs []*transaction.Outpoint, err error) {
 	startScore := float64(question.From.Height)*1e9 + float64(question.From.Idx)
 	var ops []string
 	if len(question.Events) > 0 {
@@ -166,7 +166,7 @@ func (l *RedisEventLookup) LookupOutpoints(ctx context.Context, question *Questi
 		}
 	}
 
-	results := make([]*overlay.Outpoint, 0, len(ops))
+	results := make([]*transaction.Outpoint, 0, len(ops))
 	if question.Spent != nil && len(ops) > 0 {
 		if spent, err := l.Db.HMGet(ctx, storage.SpendsKey, ops...).Result(); err != nil {
 			return nil, err
@@ -177,7 +177,7 @@ func (l *RedisEventLookup) LookupOutpoints(ctx context.Context, question *Questi
 					if question.Limit > 0 && len(ops) >= question.Limit {
 						break
 					}
-					if outpoint, err := overlay.NewOutpointFromString(op); err != nil {
+					if outpoint, err := transaction.OutpointFromString(op); err != nil {
 						return nil, err
 					} else {
 						results = append(results, outpoint)
@@ -238,7 +238,7 @@ func (l *RedisEventLookup) Lookup(ctx context.Context, q *lookup.LookupQuestion)
 				return nil, err
 			} else {
 				answer.Outputs = append(answer.Outputs, &lookup.OutputListItem{
-					OutputIndex: output.Outpoint.OutputIndex,
+					OutputIndex: output.Outpoint.Index,
 					Beef:        beefBytes,
 				})
 			}
@@ -247,7 +247,7 @@ func (l *RedisEventLookup) Lookup(ctx context.Context, q *lookup.LookupQuestion)
 	return answer, nil
 }
 
-func (l *RedisEventLookup) FindEvents(ctx context.Context, outpoint *overlay.Outpoint) ([]string, error) {
+func (l *RedisEventLookup) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
 	if events, err := l.Db.SMembers(ctx, OutpointEventsKey(outpoint)).Result(); err != nil {
 		return nil, err
 	} else {
@@ -259,7 +259,7 @@ func (l *RedisEventLookup) OutputSpent(ctx context.Context, payload *engine.Outp
 	return l.Db.HSet(ctx, storage.SpendsKey, payload.Outpoint.String(), payload.SpendingTxid.String()).Err()
 }
 
-func (l *RedisEventLookup) OutputNoLongerRetainedInHistory(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
+func (l *RedisEventLookup) OutputNoLongerRetainedInHistory(ctx context.Context, outpoint *transaction.Outpoint, topic string) error {
 	op := outpoint.String()
 	if events, err := l.Db.SMembers(ctx, OutpointEventsKey(outpoint)).Result(); err != nil {
 		return err
@@ -278,7 +278,7 @@ func (l *RedisEventLookup) OutputNoLongerRetainedInHistory(ctx context.Context, 
 	}
 }
 
-func (l *RedisEventLookup) OutputEvicted(ctx context.Context, outpoint *overlay.Outpoint) error {
+func (l *RedisEventLookup) OutputEvicted(ctx context.Context, outpoint *transaction.Outpoint) error {
 	// Implementation for evicting an output
 	return nil
 }

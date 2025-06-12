@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
-	"github.com/bsv-blockchain/go-sdk/overlay"
 	"github.com/bsv-blockchain/go-sdk/overlay/lookup"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 )
@@ -83,7 +82,7 @@ func NewSQLiteEventLookup(storage engine.Storage, dbPath string) *SQLiteEventLoo
 	return l
 }
 
-func (l *SQLiteEventLookup) SaveEvent(outpoint *overlay.Outpoint, event string, height uint32, idx uint64) error {
+func (l *SQLiteEventLookup) SaveEvent(outpoint *transaction.Outpoint, event string, height uint32, idx uint64) error {
 	_, err := l.insEvent.Exec(
 		event,
 		outpoint.String(),
@@ -92,7 +91,7 @@ func (l *SQLiteEventLookup) SaveEvent(outpoint *overlay.Outpoint, event string, 
 	)
 	return err
 }
-func (l *SQLiteEventLookup) SaveEvents(outpoint *overlay.Outpoint, events []string, height uint32, idx uint64) error {
+func (l *SQLiteEventLookup) SaveEvents(outpoint *transaction.Outpoint, events []string, height uint32, idx uint64) error {
 	for _, event := range events {
 		if _, err := l.insEvent.Exec(
 			event,
@@ -157,7 +156,7 @@ func (l *SQLiteEventLookup) Lookup(ctx context.Context, q *lookup.LookupQuestion
 			if err := rows.Scan(&op); err != nil {
 				return nil, err
 			}
-			if outpoint, err := overlay.NewOutpointFromString(op); err != nil {
+			if outpoint, err := transaction.OutpointFromString(op); err != nil {
 				return nil, err
 			} else if outpoint != nil {
 				if output, err := l.storage.FindOutput(ctx, outpoint, nil, nil, true); err != nil {
@@ -175,7 +174,7 @@ func (l *SQLiteEventLookup) Lookup(ctx context.Context, q *lookup.LookupQuestion
 							return nil, err
 						} else {
 							answer.Outputs = append(answer.Outputs, &lookup.OutputListItem{
-								OutputIndex: output.Outpoint.OutputIndex,
+								OutputIndex: output.Outpoint.Index,
 								Beef:        beefBytes,
 							})
 						}
@@ -188,14 +187,14 @@ func (l *SQLiteEventLookup) Lookup(ctx context.Context, q *lookup.LookupQuestion
 
 }
 
-func (l *SQLiteEventLookup) OutputSpent(ctx context.Context, outpoint *overlay.Outpoint, _ string) error {
+func (l *SQLiteEventLookup) OutputSpent(ctx context.Context, outpoint *transaction.Outpoint, _ string) error {
 	if _, err := l.updSpend.Exec(outpoint.String()); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (l *SQLiteEventLookup) OutputsSpent(ctx context.Context, outpoints []*overlay.Outpoint, _ string) error {
+func (l *SQLiteEventLookup) OutputsSpent(ctx context.Context, outpoints []*transaction.Outpoint, _ string) error {
 	args := []interface{}{}
 	for _, outpoint := range outpoints {
 		args = append(args, outpoint.String())
@@ -207,14 +206,14 @@ func (l *SQLiteEventLookup) OutputsSpent(ctx context.Context, outpoints []*overl
 	return err
 }
 
-func (l *SQLiteEventLookup) OutputDeleted(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
+func (l *SQLiteEventLookup) OutputDeleted(ctx context.Context, outpoint *transaction.Outpoint, topic string) error {
 	if _, err := l.delOutpoint.Exec(outpoint.String()); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (l *SQLiteEventLookup) OutputBlockHeightUpdated(ctx context.Context, outpoint *overlay.Outpoint, blockHeight uint32, blockIdx uint64) error {
+func (l *SQLiteEventLookup) OutputBlockHeightUpdated(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIdx uint64) error {
 	if _, err := l.updBlockHeight.Exec(outpoint.String(), blockHeight, blockIdx); err != nil {
 		return err
 	}

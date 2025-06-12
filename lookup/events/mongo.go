@@ -7,6 +7,7 @@ import (
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
 	"github.com/bsv-blockchain/go-sdk/overlay/lookup"
+	"github.com/bsv-blockchain/go-sdk/transaction"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
@@ -28,11 +29,11 @@ func NewMongoEventLookup(connString string, dbName string) (*MongoEventLookup, e
 	}
 }
 
-func (l *MongoEventLookup) SaveEvent(ctx context.Context, outpoint *overlay.Outpoint, event string, height uint32, idx uint64) error {
+func (l *MongoEventLookup) SaveEvent(ctx context.Context, outpoint *transaction.Outpoint, event string, height uint32, idx uint64) error {
 	return nil
 }
 
-func (l *MongoEventLookup) SaveEvents(ctx context.Context, outpoint *overlay.Outpoint, events []string, height uint32, idx uint64) error {
+func (l *MongoEventLookup) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64) error {
 	return nil
 }
 
@@ -45,11 +46,11 @@ func (l *MongoEventLookup) OutputSpent(ctx context.Context, payload *engine.Outp
 	// Implementation for marking an output as spent
 	return nil
 }
-func (l *MongoEventLookup) OutputNoLongerRetainedInHistory(ctx context.Context, outpoint *overlay.Outpoint, topic string) error {
+func (l *MongoEventLookup) OutputNoLongerRetainedInHistory(ctx context.Context, outpoint *transaction.Outpoint, topic string) error {
 	// Implementation for deleting an output event
 	return nil
 }
-func (l *MongoEventLookup) OutputEvicted(ctx context.Context, outpoint *overlay.Outpoint) error {
+func (l *MongoEventLookup) OutputEvicted(ctx context.Context, outpoint *transaction.Outpoint) error {
 	// Implementation for evicting an output
 	return nil
 }
