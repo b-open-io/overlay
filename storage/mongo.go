@@ -186,7 +186,7 @@ func (s *MongoStorage) FindUTXOsForTopic(ctx context.Context, topic string, sinc
 		"blockHeight": bson.M{"$gte": since},
 		"spent":       false, // Ensure only unspent outputs are retrieved
 	}
-	if cursor, err := s.DB.Collection("outputs").Find(ctx, query, options.Find().SetSort(bson.M{"blockHeight": 1, "blockIdx": 1})); err != nil {
+	if cursor, err := s.DB.Collection("outputs").Find(ctx, query, options.Find().SetSort(bson.M{"blockHeight": 1})); err != nil {
 		return nil, err // An error occurred while querying the outputs
 	} else {
 		defer cursor.Close(ctx) // Ensure the cursor is closed after use
