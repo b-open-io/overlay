@@ -112,7 +112,7 @@ func (s *MongoStorage) FindOutput(ctx context.Context, outpoint *transaction.Out
 		}
 	}
 
-	return bo.ToEngineOutput(), nil
+	return o, nil
 }
 
 func (s *MongoStorage) FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
