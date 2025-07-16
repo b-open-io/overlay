@@ -3,7 +3,7 @@ package storage
 import (
 	"strconv"
 
-	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
+	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
@@ -111,6 +111,7 @@ type BSONOutput struct {
 	ConsumedBy      []string `bson:"consumedBy"`
 	BlockHeight     uint32   `bson:"blockHeight"`
 	BlockIdx        uint64   `bson:"blockIdx"`
+	Score           float64  `bson:"score"`
 	AncillaryTxids  []string `bson:"ancillaryTxids"`
 	AncillaryBeef   []byte   `bson:"ancillaryBeef"`
 }
@@ -125,6 +126,7 @@ func NewBSONOutput(o *engine.Output) *BSONOutput {
 		Spent:         o.Spent,
 		BlockHeight:   o.BlockHeight,
 		BlockIdx:      o.BlockIdx,
+		Score:         o.Score,
 		AncillaryBeef: o.AncillaryBeef,
 	}
 	for _, oc := range o.OutputsConsumed {
@@ -149,6 +151,7 @@ func (o *BSONOutput) ToEngineOutput() *engine.Output {
 		Spent:         o.Spent,
 		BlockHeight:   o.BlockHeight,
 		BlockIdx:      o.BlockIdx,
+		Score:         o.Score,
 		AncillaryBeef: o.AncillaryBeef,
 	}
 	for _, oc := range o.OutputsConsumed {

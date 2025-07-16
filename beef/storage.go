@@ -79,7 +79,7 @@ func (t *BaseBeefStorage) LoadTx(ctx context.Context, txid *chainhash.Hash, chai
 
 	// Validate merkle path if present and chaintracker is provided
 	if tx.MerklePath != nil && chaintracker != nil {
-		if err := t.validateMerklePath(tx, txid, chaintracker); err != nil {
+		if err := t.validateMerklePath(ctx, tx, txid, chaintracker); err != nil {
 			return nil, err
 		}
 	}
@@ -88,21 +88,21 @@ func (t *BaseBeefStorage) LoadTx(ctx context.Context, txid *chainhash.Hash, chai
 }
 
 // validateMerklePath validates the transaction's merkle path against the chain tracker
-func (t *BaseBeefStorage) validateMerklePath(tx *transaction.Transaction, txid *chainhash.Hash, chaintracker *headers_client.Client) error {
+func (t *BaseBeefStorage) validateMerklePath(ctx context.Context, tx *transaction.Transaction, txid *chainhash.Hash, chaintracker *headers_client.Client) error {
 	root, err := tx.MerklePath.ComputeRoot(txid)
 	if err != nil {
 		return err
 	}
-	
-	valid, err := chaintracker.IsValidRootForHeight(root, tx.MerklePath.BlockHeight)
+
+	valid, err := chaintracker.IsValidRootForHeight(ctx, root, tx.MerklePath.BlockHeight)
 	if err != nil {
 		return err
 	}
-	
+
 	if !valid {
 		return errors.New("invalid merkle path")
 	}
-	
+
 	return nil
 }
 

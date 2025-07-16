@@ -1,11 +1,11 @@
-github.com/4chain-ag/go-overlay-services v0.1.1-0.20250612191609-be04aa3b0efd h1:pHTIDHJKAbUXA9NuC/lD2BAi51oIGGO8O5TSp42phGI=
-github.com/4chain-ag/go-overlay-services v0.1.1-0.20250612191609-be04aa3b0efd/go.mod h1:+TWIaOBlpirzTpg/fFMybxMx+NsVH+DTF2LR8eeczqo=
 github.com/GorillaPool/go-junglebus v0.2.14 h1:dnGU3LIZ21JiHeeSRW0Yn5xvSHKgiN0T/t3cioABtyg=
 github.com/GorillaPool/go-junglebus v0.2.14/go.mod h1:EMAAnFQbBQB7xLe7DdLTLbescKUudflsXT0CqlSeWgQ=
 github.com/bsm/ginkgo/v2 v2.12.0 h1:Ny8MWAHyOepLGlLKYmXG4IEkioBysk6GpaRTLC8zwWs=
 github.com/bsm/ginkgo/v2 v2.12.0/go.mod h1:SwYbGRRDovPVboqFv0tPTcG1sN61LM1Z4ARdbAV9g4c=
 github.com/bsm/gomega v1.27.10 h1:yeMWxP2pV2fG3FgAODIY8EiRE3dy0aeFYt4l7wh6yKA=
 github.com/bsm/gomega v1.27.10/go.mod h1:JyEr/xRbxbtgWNi8tIEVPUYZ5Dzef52k01W3YH0H+O0=
+github.com/bsv-blockchain/go-overlay-services v0.1.1 h1:Jg3XFXYpay+aD4tupbjj7PhAciR88gPnRfIQLy8D2Vg=
+github.com/bsv-blockchain/go-overlay-services v0.1.1/go.mod h1:9Sc35Ur2hiW0klLOosEY/TpQDHEroIJzNeLOd5SeLqc=
 github.com/bsv-blockchain/go-sdk v1.2.1 h1:yQXHpHPIxoyvU+DERzaSuUEQF/ejVjcsdPhNV+z8OTI=
 github.com/bsv-blockchain/go-sdk v1.2.1/go.mod h1:v//5tDobbCNhhZvHlEyP8SvuE+N3UFpWToH0+lOw9QM=
 github.com/centrifugal/centrifuge-go v0.10.2 h1:9DK7YvhlDO553k1kYnsSgowgGjz8EK406VTRLG+Thsk=

@@ -5,7 +5,7 @@ import (
 	"encoding/base64"
 	"time"
 
-	"github.com/4chain-ag/go-overlay-services/pkg/core/engine"
+	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/b-open-io/overlay/beef"
 	"github.com/b-open-io/overlay/publish"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
@@ -57,6 +57,30 @@ func NewMongoStorage(connString string, dbName string, beefStore beef.BeefStorag
 		},
 	}
 	if _, err = db.Collection("outputs").Indexes().CreateOne(context.TODO(), indexModel); err != nil {
+		return nil, err
+	}
+
+	// Index for score-based queries in FindUTXOsForTopic
+	indexModel = mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "topic", Value: 1},
+			{Key: "score", Value: 1},
+			{Key: "spent", Value: 1},
+		},
+	}
+	if _, err = db.Collection("outputs").Indexes().CreateOne(context.TODO(), indexModel); err != nil {
+		return nil, err
+	}
+
+	// Index for interactions collection
+	indexModel = mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "host", Value: 1},
+			{Key: "topic", Value: 1},
+		},
+		Options: options.Index().SetUnique(true),
+	}
+	if _, err = db.Collection("interactions").Indexes().CreateOne(context.TODO(), indexModel); err != nil {
 		return nil, err
 	}
 
@@ -180,13 +204,17 @@ func (s *MongoStorage) FindOutputsForTransaction(ctx context.Context, txid *chai
 	}
 }
 
-func (s *MongoStorage) FindUTXOsForTopic(ctx context.Context, topic string, since uint32, includeBEEF bool) ([]*engine.Output, error) {
+func (s *MongoStorage) FindUTXOsForTopic(ctx context.Context, topic string, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
 	query := bson.M{
-		"topic":       topic,
-		"blockHeight": bson.M{"$gte": since},
-		"spent":       false, // Ensure only unspent outputs are retrieved
+		"topic": topic,
+		"score": bson.M{"$gte": since},
+		"spent": false, // Ensure only unspent outputs are retrieved
 	}
-	if cursor, err := s.DB.Collection("outputs").Find(ctx, query, options.Find().SetSort(bson.M{"blockHeight": 1})); err != nil {
+	findOpts := options.Find().SetSort(bson.M{"score": 1})
+	if limit > 0 {
+		findOpts.SetLimit(int64(limit))
+	}
+	if cursor, err := s.DB.Collection("outputs").Find(ctx, query, findOpts); err != nil {
 		return nil, err // An error occurred while querying the outputs
 	} else {
 		defer cursor.Close(ctx) // Ensure the cursor is closed after use
@@ -288,4 +316,32 @@ func (s *MongoStorage) DoesAppliedTransactionExist(ctx context.Context, tx *over
 	}
 
 	return true, nil
+}
+
+func (s *MongoStorage) UpdateLastInteraction(ctx context.Context, host string, topic string, since float64) error {
+	_, err := s.DB.Collection("interactions").UpdateOne(ctx,
+		bson.M{"host": host, "topic": topic},
+		bson.M{"$set": bson.M{
+			"host":      host,
+			"topic":     topic,
+			"score":     since,
+			"updatedAt": time.Now(),
+		}},
+		options.UpdateOne().SetUpsert(true),
+	)
+	return err
+}
+
+func (s *MongoStorage) GetLastInteraction(ctx context.Context, host string, topic string) (float64, error) {
+	var result struct {
+		Score float64 `bson:"score"`
+	}
+	err := s.DB.Collection("interactions").FindOne(ctx, bson.M{"host": host, "topic": topic}).Decode(&result)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return 0, nil // No record exists, return 0 as specified
+		}
+		return 0, err
+	}
+	return result.Score, nil
 }

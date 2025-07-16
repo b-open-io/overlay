@@ -3,8 +3,8 @@ module github.com/b-open-io/overlay
 go 1.24.3
 
 require (
-	github.com/4chain-ag/go-overlay-services v0.0.0-00010101000000-000000000000
 	github.com/GorillaPool/go-junglebus v0.2.14
+	github.com/bsv-blockchain/go-overlay-services v0.1.1
 	github.com/bsv-blockchain/go-sdk v1.2.1
 	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.7.3
@@ -40,5 +40,3 @@ require (
 	google.golang.org/protobuf v1.30.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/4chain-ag/go-overlay-services => github.com/4chain-ag/go-overlay-services v0.1.1-0.20250612191609-be04aa3b0efd
