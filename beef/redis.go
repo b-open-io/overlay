@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
+	"github.com/bsv-blockchain/go-sdk/transaction"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker/headers_client"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -59,4 +61,29 @@ func (t *RedisBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, b
 		return nil
 	})
 	return err
+}
+
+// LoadTx loads a transaction from BEEF storage with optional merkle path validation
+// This overrides BaseBeefStorage.LoadTx to ensure RedisBeefStorage.LoadBeef is called
+func (t *RedisBeefStorage) LoadTx(ctx context.Context, txid *chainhash.Hash, chaintracker *headers_client.Client) (*transaction.Transaction, error) {
+	// Load BEEF from storage - this will use RedisBeefStorage.LoadBeef
+	beefBytes, err := t.LoadBeef(ctx, txid)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse BEEF to get the transaction
+	_, tx, _, err := transaction.ParseBeef(beefBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate merkle path if present and chaintracker is provided
+	if tx.MerklePath != nil && chaintracker != nil {
+		if err := t.BaseBeefStorage.validateMerklePath(ctx, tx, txid, chaintracker); err != nil {
+			return nil, err
+		}
+	}
+
+	return tx, nil
 }

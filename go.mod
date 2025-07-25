@@ -5,7 +5,7 @@ go 1.24.3
 require (
 	github.com/GorillaPool/go-junglebus v0.2.14
 	github.com/bsv-blockchain/go-overlay-services v0.1.1
-	github.com/bsv-blockchain/go-sdk v1.2.5
+	github.com/bsv-blockchain/go-sdk v1.2.6
 	github.com/joho/godotenv v1.5.1
 	github.com/redis/go-redis/v9 v9.11.0
 	go.mongodb.org/mongo-driver/v2 v2.2.2
@@ -43,4 +43,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/bsv-blockchain/go-overlay-services => github.com/bsv-blockchain/go-overlay-services v0.1.2-0.20250716183025-20ff926b7a19
+replace github.com/bsv-blockchain/go-overlay-services => ../go-overlay-services

@@ -101,10 +101,10 @@ type BSONBeef struct {
 }
 
 type BSONOutput struct {
-	Outpoint string `bson:"outpoint"`
-	Txid     string `bson:"txid"`
-	Topic    string `bson:"topic"`
-	// Script          []byte   `bson:"script"`
+	Outpoint        string   `bson:"outpoint"`
+	Txid            string   `bson:"txid"`
+	Topic           string   `bson:"topic"`
+	Script          []byte   `bson:"script"`
 	Satoshis        uint64   `bson:"satoshis"`
 	Spent           bool     `bson:"spent"`
 	OutputsConsumed []string `bson:"outputsConsumed"`
@@ -118,16 +118,19 @@ type BSONOutput struct {
 
 func NewBSONOutput(o *engine.Output) *BSONOutput {
 	bo := &BSONOutput{
-		Outpoint: o.Outpoint.String(),
-		Txid:     o.Outpoint.Txid.String(),
-		Topic:    o.Topic,
-		// Script:        o.Script.Bytes(),
-		Satoshis:      o.Satoshis,
-		Spent:         o.Spent,
-		BlockHeight:   o.BlockHeight,
-		BlockIdx:      o.BlockIdx,
-		Score:         o.Score,
-		AncillaryBeef: o.AncillaryBeef,
+		Outpoint:        o.Outpoint.String(),
+		Txid:            o.Outpoint.Txid.String(),
+		Topic:           o.Topic,
+		Script:          o.Script.Bytes(),
+		Satoshis:        o.Satoshis,
+		Spent:           o.Spent,
+		BlockHeight:     o.BlockHeight,
+		BlockIdx:        o.BlockIdx,
+		Score:           o.Score,
+		AncillaryTxids:  make([]string, 0, len(o.AncillaryTxids)),
+		AncillaryBeef:   o.AncillaryBeef,
+		OutputsConsumed: make([]string, 0, len(o.OutputsConsumed)),
+		ConsumedBy:      make([]string, 0, len(o.ConsumedBy)),
 	}
 	for _, oc := range o.OutputsConsumed {
 		bo.OutputsConsumed = append(bo.OutputsConsumed, oc.String())
@@ -144,15 +147,18 @@ func NewBSONOutput(o *engine.Output) *BSONOutput {
 func (o *BSONOutput) ToEngineOutput() *engine.Output {
 	outpoint, _ := transaction.OutpointFromString(o.Outpoint)
 	output := &engine.Output{
-		Outpoint: *outpoint,
-		Topic:    o.Topic,
-		// Script:        script.NewFromBytes(o.Script),
-		Satoshis:      o.Satoshis,
-		Spent:         o.Spent,
-		BlockHeight:   o.BlockHeight,
-		BlockIdx:      o.BlockIdx,
-		Score:         o.Score,
-		AncillaryBeef: o.AncillaryBeef,
+		Outpoint:        *outpoint,
+		Topic:           o.Topic,
+		Script:          script.NewFromBytes(o.Script),
+		Satoshis:        o.Satoshis,
+		Spent:           o.Spent,
+		BlockHeight:     o.BlockHeight,
+		BlockIdx:        o.BlockIdx,
+		Score:           o.Score,
+		AncillaryTxids:  make([]*chainhash.Hash, 0, len(o.AncillaryTxids)),
+		AncillaryBeef:   o.AncillaryBeef,
+		OutputsConsumed: make([]*transaction.Outpoint, 0, len(o.OutputsConsumed)),
+		ConsumedBy:      make([]*transaction.Outpoint, 0, len(o.ConsumedBy)),
 	}
 	for _, oc := range o.OutputsConsumed {
 		op, _ := transaction.OutpointFromString(oc)
