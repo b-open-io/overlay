@@ -19,13 +19,13 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
-type MongoStorage struct {
+type MongoEventDataStorage struct {
 	DB        *mongo.Database
 	BeefStore beef.BeefStorage
 	pub       publish.Publisher
 }
 
-func NewMongoStorage(connString string, dbName string, beefStore beef.BeefStorage, pub publish.Publisher) (*MongoStorage, error) {
+func NewMongoEventDataStorage(connString string, dbName string, beefStore beef.BeefStorage, pub publish.Publisher) (*MongoEventDataStorage, error) {
 	client, err := mongo.Connect(options.Client().ApplyURI(connString))
 	if err != nil {
 		return nil, err
@@ -86,14 +86,14 @@ func NewMongoStorage(connString string, dbName string, beefStore beef.BeefStorag
 		return nil, err
 	}
 
-	return &MongoStorage{
+	return &MongoEventDataStorage{
 		DB:        db,
 		BeefStore: beefStore,
 		pub:       pub,
 	}, nil
 }
 
-func (s *MongoStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
+func (s *MongoEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
 	if err := s.BeefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
@@ -115,7 +115,7 @@ func (s *MongoStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (e
 	return nil
 }
 
-func (s *MongoStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, topic *string, spent *bool, includeBEEF bool) (o *engine.Output, err error) {
+func (s *MongoEventDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, topic *string, spent *bool, includeBEEF bool) (o *engine.Output, err error) {
 	query := bson.M{"outpoint": outpoint.String()}
 	if topic != nil {
 		query["topic"] = *topic
@@ -147,7 +147,7 @@ func (s *MongoStorage) FindOutput(ctx context.Context, outpoint *transaction.Out
 	return o, nil
 }
 
-func (s *MongoStorage) FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
+func (s *MongoEventDataStorage) FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
 	ops := make([]string, 0, len(outpoints))
 	for _, outpoint := range outpoints {
 		ops = append(ops, outpoint.String())
@@ -184,7 +184,7 @@ func (s *MongoStorage) FindOutputs(ctx context.Context, outpoints []*transaction
 	}
 }
 
-func (s *MongoStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
+func (s *MongoEventDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
 	query := bson.M{"txid": txid.String()}
 
 	if cursor, err := s.DB.Collection("outputs").Find(ctx, query); err != nil {
@@ -212,7 +212,7 @@ func (s *MongoStorage) FindOutputsForTransaction(ctx context.Context, txid *chai
 	}
 }
 
-func (s *MongoStorage) FindUTXOsForTopic(ctx context.Context, topic string, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
+func (s *MongoEventDataStorage) FindUTXOsForTopic(ctx context.Context, topic string, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
 	query := bson.M{
 		"topic": topic,
 		"score": bson.M{"$gte": since},
@@ -247,7 +247,7 @@ func (s *MongoStorage) FindUTXOsForTopic(ctx context.Context, topic string, sinc
 	}
 }
 
-func (s *MongoStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint, topic string) error {
+func (s *MongoEventDataStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint, topic string) error {
 	_, err := s.DB.Collection("outputs").DeleteOne(ctx, bson.M{
 		"outpoint": outpoint.String(),
 		"topic":    topic,
@@ -255,7 +255,7 @@ func (s *MongoStorage) DeleteOutput(ctx context.Context, outpoint *transaction.O
 	return err
 }
 
-func (s *MongoStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *transaction.Outpoint, topic string, beef []byte) error {
+func (s *MongoEventDataStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *transaction.Outpoint, topic string, beef []byte) error {
 	// Parse the beef to get the spending txid
 	_, _, spendTxid, err := transaction.ParseBeef(beef)
 	if err != nil {
@@ -269,7 +269,7 @@ func (s *MongoStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *transactio
 	return err
 }
 
-func (s *MongoStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spendTxid *chainhash.Hash) error {
+func (s *MongoEventDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spendTxid *chainhash.Hash) error {
 	ops := make([]string, 0, len(outpoints))
 	for _, outpoint := range outpoints {
 		ops = append(ops, outpoint.String())
@@ -281,7 +281,7 @@ func (s *MongoStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transa
 	return err
 }
 
-func (s *MongoStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, topic string, consumedBy []*transaction.Outpoint) error {
+func (s *MongoEventDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, topic string, consumedBy []*transaction.Outpoint) error {
 	ops := make([]string, 0, len(consumedBy))
 	for _, outpoint := range consumedBy {
 		ops = append(ops, outpoint.String())
@@ -293,11 +293,11 @@ func (s *MongoStorage) UpdateConsumedBy(ctx context.Context, outpoint *transacti
 	return err
 }
 
-func (s *MongoStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
+func (s *MongoEventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
 	return s.BeefStore.SaveBeef(ctx, txid, beef)
 }
 
-func (s *MongoStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
+func (s *MongoEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
 	_, err := s.DB.Collection("outputs").UpdateOne(ctx,
 		bson.M{"outpoint": outpoint.String(), "topic": topic},
 		bson.M{"$set": bson.M{
@@ -309,7 +309,7 @@ func (s *MongoStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *tr
 	return err
 }
 
-func (s *MongoStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
+func (s *MongoEventDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
 	_, err := s.DB.Collection("tx-topics").UpdateOne(ctx,
 		bson.M{"_id": tx.Txid.String()},
 		bson.M{
@@ -321,7 +321,7 @@ func (s *MongoStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay
 	return err
 }
 
-func (s *MongoStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
+func (s *MongoEventDataStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
 	if err := s.DB.Collection("tx-topics").FindOne(ctx, bson.M{"_id": tx.Txid.String(), "topics": tx.Topic}).Err(); err != nil {
 		if err == mongo.ErrNoDocuments {
 			return false, nil // Transaction does not exist
@@ -332,7 +332,7 @@ func (s *MongoStorage) DoesAppliedTransactionExist(ctx context.Context, tx *over
 	return true, nil
 }
 
-func (s *MongoStorage) UpdateLastInteraction(ctx context.Context, host string, topic string, since float64) error {
+func (s *MongoEventDataStorage) UpdateLastInteraction(ctx context.Context, host string, topic string, since float64) error {
 	_, err := s.DB.Collection("interactions").UpdateOne(ctx,
 		bson.M{"host": host, "topic": topic},
 		bson.M{"$set": bson.M{
@@ -346,7 +346,7 @@ func (s *MongoStorage) UpdateLastInteraction(ctx context.Context, host string, t
 	return err
 }
 
-func (s *MongoStorage) GetLastInteraction(ctx context.Context, host string, topic string) (float64, error) {
+func (s *MongoEventDataStorage) GetLastInteraction(ctx context.Context, host string, topic string) (float64, error) {
 	var result struct {
 		Score float64 `bson:"score"`
 	}
@@ -361,7 +361,7 @@ func (s *MongoStorage) GetLastInteraction(ctx context.Context, host string, topi
 }
 
 // GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height
-func (s *MongoStorage) GetTransactionsByTopicAndHeight(ctx context.Context, topic string, height uint32) ([]*TransactionData, error) {
+func (s *MongoEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Context, topic string, height uint32) ([]*TransactionData, error) {
 	collection := s.DB.Collection("outputs")
 	
 	// Find all outputs for this topic at the specified height
@@ -476,7 +476,7 @@ func (s *MongoStorage) GetTransactionsByTopicAndHeight(ctx context.Context, topi
 }
 
 // SaveEvents associates multiple events with a single output, storing arbitrary data
-func (s *MongoStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64, data interface{}) error {
+func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64, data interface{}) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -508,7 +508,7 @@ func (s *MongoStorage) SaveEvents(ctx context.Context, outpoint *transaction.Out
 }
 
 // FindEvents returns all events associated with a given outpoint
-func (s *MongoStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
+func (s *MongoEventDataStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
 	var result struct {
 		Events []string `bson:"events"`
 	}
@@ -533,7 +533,7 @@ func (s *MongoStorage) FindEvents(ctx context.Context, outpoint *transaction.Out
 }
 
 // LookupOutpoints returns outpoints matching the given query criteria using aggregations for performance
-func (s *MongoStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
+func (s *MongoEventDataStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
 	withData := len(includeData) > 0 && includeData[0]
 	
 	// Build match criteria
@@ -643,7 +643,7 @@ func (s *MongoStorage) LookupOutpoints(ctx context.Context, question *EventQuest
 }
 
 // GetOutputData retrieves the data associated with a specific output
-func (s *MongoStorage) GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error) {
+func (s *MongoEventDataStorage) GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error) {
 	var result struct {
 		Data interface{} `bson:"data"`
 	}

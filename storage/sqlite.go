@@ -20,16 +20,16 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type SQLiteStorage struct {
+type SQLiteEventDataStorage struct {
 	wdb       *sql.DB
 	rdb       *sql.DB
 	BeefStore beef.BeefStorage
 	pub       publish.Publisher
 }
 
-func NewSQLiteStorage(dbPath string, beefStore beef.BeefStorage, pub publish.Publisher) (*SQLiteStorage, error) {
+func NewSQLiteEventDataStorage(dbPath string, beefStore beef.BeefStorage, pub publish.Publisher) (*SQLiteEventDataStorage, error) {
 	var err error
-	s := &SQLiteStorage{
+	s := &SQLiteEventDataStorage{
 		BeefStore: beefStore,
 		pub:       pub,
 	}
@@ -90,7 +90,7 @@ func NewSQLiteStorage(dbPath string, beefStore beef.BeefStorage, pub publish.Pub
 	return s, nil
 }
 
-func (s *SQLiteStorage) createTables() error {
+func (s *SQLiteEventDataStorage) createTables() error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS outputs (
 			outpoint TEXT NOT NULL,
@@ -162,7 +162,7 @@ func (s *SQLiteStorage) createTables() error {
 	return nil
 }
 
-func (s *SQLiteStorage) InsertOutput(ctx context.Context, utxo *engine.Output) error {
+func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) error {
 	// Save BEEF to BEEF storage
 	if err := s.BeefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
@@ -243,7 +243,7 @@ func (s *SQLiteStorage) InsertOutput(ctx context.Context, utxo *engine.Output) e
 	return nil
 }
 
-func (s *SQLiteStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, topic *string, spent *bool, includeBEEF bool) (*engine.Output, error) {
+func (s *SQLiteEventDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, topic *string, spent *bool, includeBEEF bool) (*engine.Output, error) {
 	query := `SELECT outpoint, topic, txid, script, satoshis, spend, 
 		block_height, block_idx, score, ancillary_beef 
 		FROM outputs WHERE outpoint = ?`
@@ -320,7 +320,7 @@ func (s *SQLiteStorage) FindOutput(ctx context.Context, outpoint *transaction.Ou
 	return &output, nil
 }
 
-func (s *SQLiteStorage) FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
+func (s *SQLiteEventDataStorage) FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
 	if len(outpoints) == 0 {
 		return nil, nil
 	}
@@ -367,7 +367,7 @@ func (s *SQLiteStorage) FindOutputs(ctx context.Context, outpoints []*transactio
 	return outputs, rows.Err()
 }
 
-func (s *SQLiteStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
+func (s *SQLiteEventDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
 	query := `SELECT outpoint, topic, txid, script, satoshis, spend, 
 		block_height, block_idx, score, ancillary_beef 
 		FROM outputs WHERE txid = ?`
@@ -390,7 +390,7 @@ func (s *SQLiteStorage) FindOutputsForTransaction(ctx context.Context, txid *cha
 	return outputs, rows.Err()
 }
 
-func (s *SQLiteStorage) FindUTXOsForTopic(ctx context.Context, topic string, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
+func (s *SQLiteEventDataStorage) FindUTXOsForTopic(ctx context.Context, topic string, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
 	query := `SELECT outpoint, topic, txid, script, satoshis, spend, 
 		block_height, block_idx, score, ancillary_beef 
 		FROM outputs 
@@ -416,14 +416,14 @@ func (s *SQLiteStorage) FindUTXOsForTopic(ctx context.Context, topic string, sin
 	return outputs, rows.Err()
 }
 
-func (s *SQLiteStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint, topic string) error {
+func (s *SQLiteEventDataStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint, topic string) error {
 	_, err := s.wdb.ExecContext(ctx,
 		"DELETE FROM outputs WHERE outpoint = ? AND topic = ?",
 		outpoint.String(), topic)
 	return err
 }
 
-func (s *SQLiteStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spendTxid *chainhash.Hash) error {
+func (s *SQLiteEventDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spendTxid *chainhash.Hash) error {
 	if len(outpoints) == 0 {
 		return nil
 	}
@@ -459,7 +459,7 @@ func (s *SQLiteStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*trans
 	return tx.Commit()
 }
 
-func (s *SQLiteStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, topic string, consumedBy []*transaction.Outpoint) error {
+func (s *SQLiteEventDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, topic string, consumedBy []*transaction.Outpoint) error {
 	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -489,11 +489,11 @@ func (s *SQLiteStorage) UpdateConsumedBy(ctx context.Context, outpoint *transact
 	return tx.Commit()
 }
 
-func (s *SQLiteStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
+func (s *SQLiteEventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
 	return s.BeefStore.SaveBeef(ctx, txid, beef)
 }
 
-func (s *SQLiteStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
+func (s *SQLiteEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
 	score := float64(blockHeight) + float64(blockIndex)/1e9
 	outpointStr := outpoint.String()
 
@@ -527,7 +527,7 @@ func (s *SQLiteStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *t
 	return tx.Commit()
 }
 
-func (s *SQLiteStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
+func (s *SQLiteEventDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
 	score := float64(time.Now().Unix())
 
 	_, err := s.wdb.ExecContext(ctx, `
@@ -541,7 +541,7 @@ func (s *SQLiteStorage) InsertAppliedTransaction(ctx context.Context, tx *overla
 	return err
 }
 
-func (s *SQLiteStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
+func (s *SQLiteEventDataStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
 	var exists bool
 	err := s.rdb.QueryRowContext(ctx,
 		"SELECT EXISTS(SELECT 1 FROM applied_transactions WHERE txid = ? AND topic = ?)",
@@ -549,7 +549,7 @@ func (s *SQLiteStorage) DoesAppliedTransactionExist(ctx context.Context, tx *ove
 	return exists, err
 }
 
-func (s *SQLiteStorage) UpdateLastInteraction(ctx context.Context, host string, topic string, since float64) error {
+func (s *SQLiteEventDataStorage) UpdateLastInteraction(ctx context.Context, host string, topic string, since float64) error {
 	_, err := s.wdb.ExecContext(ctx, `
 		INSERT OR REPLACE INTO interactions (host, topic, last_score, updated_at)
 		VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
@@ -557,7 +557,7 @@ func (s *SQLiteStorage) UpdateLastInteraction(ctx context.Context, host string, 
 	return err
 }
 
-func (s *SQLiteStorage) GetLastInteraction(ctx context.Context, host string, topic string) (float64, error) {
+func (s *SQLiteEventDataStorage) GetLastInteraction(ctx context.Context, host string, topic string) (float64, error) {
 	var score float64
 	err := s.rdb.QueryRowContext(ctx,
 		"SELECT last_score FROM interactions WHERE host = ? AND topic = ?",
@@ -568,7 +568,7 @@ func (s *SQLiteStorage) GetLastInteraction(ctx context.Context, host string, top
 	return score, err
 }
 
-func (s *SQLiteStorage) Close() error {
+func (s *SQLiteEventDataStorage) Close() error {
 	if s.wdb != nil {
 		s.wdb.Close()
 	}
@@ -580,7 +580,7 @@ func (s *SQLiteStorage) Close() error {
 
 // Helper functions
 
-func (s *SQLiteStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*engine.Output, error) {
+func (s *SQLiteEventDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*engine.Output, error) {
 	var output engine.Output
 	var outpointStr, txidStr string
 	var scriptBytes []byte
@@ -636,7 +636,7 @@ func (s *SQLiteStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*engine.Ou
 	return &output, nil
 }
 
-func (s *SQLiteStorage) loadOutputRelations(ctx context.Context, output *engine.Output) error {
+func (s *SQLiteEventDataStorage) loadOutputRelations(ctx context.Context, output *engine.Output) error {
 	// Load outputs consumed by this output (this output is the consumer)
 	rows, err := s.rdb.QueryContext(ctx,
 		"SELECT consumed_outpoint FROM output_relationships WHERE consuming_outpoint = ? AND topic = ?",
@@ -683,7 +683,7 @@ func (s *SQLiteStorage) loadOutputRelations(ctx context.Context, output *engine.
 }
 
 // GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height
-func (s *SQLiteStorage) GetTransactionsByTopicAndHeight(ctx context.Context, topic string, height uint32) ([]*TransactionData, error) {
+func (s *SQLiteEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Context, topic string, height uint32) ([]*TransactionData, error) {
 	// Query 1: Get all outputs for the topic and block height, including data field
 	query := `SELECT outpoint, txid, script, satoshis, spend, data 
 	         FROM outputs 
@@ -844,7 +844,7 @@ func (s *SQLiteStorage) GetTransactionsByTopicAndHeight(ctx context.Context, top
 }
 
 // SaveEvents associates multiple events with a single output, storing arbitrary data
-func (s *SQLiteStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64, data interface{}) error {
+func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64, data interface{}) error {
 	if len(events) == 0 && data == nil {
 		return nil
 	}
@@ -907,7 +907,7 @@ func (s *SQLiteStorage) SaveEvents(ctx context.Context, outpoint *transaction.Ou
 }
 
 // FindEvents returns all events associated with a given outpoint
-func (s *SQLiteStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
+func (s *SQLiteEventDataStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
 	rows, err := s.rdb.QueryContext(ctx,
 		"SELECT event FROM events WHERE outpoint = ?",
 		outpoint.String())
@@ -929,7 +929,7 @@ func (s *SQLiteStorage) FindEvents(ctx context.Context, outpoint *transaction.Ou
 }
 
 // LookupOutpoints returns outpoints matching the given query criteria
-func (s *SQLiteStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
+func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
 	withData := len(includeData) > 0 && includeData[0]
 	
 	// Build the query
@@ -1133,7 +1133,7 @@ func (s *SQLiteStorage) LookupOutpoints(ctx context.Context, question *EventQues
 }
 
 // GetOutputData retrieves the data associated with a specific output
-func (s *SQLiteStorage) GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error) {
+func (s *SQLiteEventDataStorage) GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error) {
 	var dataJSON *string
 	err := s.rdb.QueryRowContext(ctx,
 		"SELECT data FROM outputs WHERE outpoint = ? LIMIT 1",
