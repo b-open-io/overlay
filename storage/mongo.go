@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
@@ -119,7 +121,13 @@ func (s *MongoStorage) FindOutput(ctx context.Context, outpoint *transaction.Out
 		query["topic"] = *topic
 	}
 	if spent != nil {
-		query["spent"] = *spent
+		if *spent {
+			// If looking for spent outputs, spend field must not be nil
+			query["spend"] = bson.M{"$ne": nil}
+		} else {
+			// If looking for unspent outputs, spend field must be nil
+			query["spend"] = nil
+		}
 	}
 
 	bo := &BSONOutput{}
@@ -208,7 +216,7 @@ func (s *MongoStorage) FindUTXOsForTopic(ctx context.Context, topic string, sinc
 	query := bson.M{
 		"topic": topic,
 		"score": bson.M{"$gte": since},
-		"spent": false, // Ensure only unspent outputs are retrieved
+		"spend": nil, // Ensure only unspent outputs are retrieved (spend field is null when unspent)
 	}
 	findOpts := options.Find().SetSort(bson.M{"score": 1})
 	if limit > 0 {
@@ -248,9 +256,15 @@ func (s *MongoStorage) DeleteOutput(ctx context.Context, outpoint *transaction.O
 }
 
 func (s *MongoStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *transaction.Outpoint, topic string, beef []byte) error {
-	_, err := s.DB.Collection("outputs").UpdateOne(ctx,
+	// Parse the beef to get the spending txid
+	_, _, spendTxid, err := transaction.ParseBeef(beef)
+	if err != nil {
+		return err
+	}
+	
+	_, err = s.DB.Collection("outputs").UpdateOne(ctx,
 		bson.M{"outpoint": outpoint.String(), "topic": topic},
-		bson.M{"$set": bson.M{"spent": true}},
+		bson.M{"$set": bson.M{"spend": spendTxid.String()}},
 	)
 	return err
 }
@@ -262,7 +276,7 @@ func (s *MongoStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transa
 	}
 	_, err := s.DB.Collection("outputs").UpdateMany(ctx,
 		bson.M{"outpoint": bson.M{"$in": ops}, "topic": topic},
-		bson.M{"$set": bson.M{"spent": true}},
+		bson.M{"$set": bson.M{"spend": spendTxid.String()}},
 	)
 	return err
 }
@@ -344,4 +358,322 @@ func (s *MongoStorage) GetLastInteraction(ctx context.Context, host string, topi
 		return 0, err
 	}
 	return result.Score, nil
+}
+
+// GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height
+func (s *MongoStorage) GetTransactionsByTopicAndHeight(ctx context.Context, topic string, height uint32) ([]*TransactionData, error) {
+	collection := s.DB.Collection("outputs")
+	
+	// Find all outputs for this topic at the specified height
+	pipeline := bson.A{
+		// Match outputs for the topic at the specified block height
+		bson.D{{Key: "$match", Value: bson.D{
+			{Key: "topic", Value: topic},
+			{Key: "blockHeight", Value: height},
+		}}},
+		
+		// Group by transaction ID to collect all outputs for each transaction
+		bson.D{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$txid"},
+			{Key: "outputs", Value: bson.D{{Key: "$push", Value: "$$ROOT"}}},
+		}}},
+		
+		// Sort by transaction ID for consistent ordering
+		bson.D{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
+	}
+	
+	cursor, err := collection.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+	
+	var transactions []*TransactionData
+	
+	for cursor.Next(ctx) {
+		var result struct {
+			TxID    string       `bson:"_id"`
+			Outputs []BSONOutput `bson:"outputs"`
+		}
+		
+		if err := cursor.Decode(&result); err != nil {
+			return nil, err
+		}
+		
+		txid, err := chainhash.NewHashFromHex(result.TxID)
+		if err != nil {
+			return nil, err
+		}
+		
+		txData := &TransactionData{
+			TxID:    *txid,
+			Outputs: make([]*OutputData, 0, len(result.Outputs)),
+		}
+		
+		// Convert outputs
+		for _, output := range result.Outputs {
+			// Parse outpoint to get vout
+			outpoint, err := transaction.OutpointFromString(output.Outpoint)
+			if err != nil {
+				continue
+			}
+			
+			outputData := &OutputData{
+				Vout:     outpoint.Index,
+				Data:     output.Data,
+				Script:   output.Script,
+				Satoshis: output.Satoshis,
+			}
+			txData.Outputs = append(txData.Outputs, outputData)
+		}
+		
+		// Find inputs for this transaction using aggregation
+		inputPipeline := bson.A{
+			bson.D{{Key: "$match", Value: bson.D{
+				{Key: "topic", Value: topic},
+				{Key: "spend", Value: result.TxID},
+			}}},
+		}
+		
+		inputCursor, err := collection.Aggregate(ctx, inputPipeline)
+		if err == nil {
+			defer inputCursor.Close(ctx)
+			
+			txData.Inputs = make([]*OutputData, 0)
+			for inputCursor.Next(ctx) {
+				var inputOutput BSONOutput
+				if err := inputCursor.Decode(&inputOutput); err != nil {
+					continue
+				}
+				
+				// Parse source txid
+				sourceTxid, err := chainhash.NewHashFromHex(inputOutput.Txid)
+				if err != nil {
+					continue
+				}
+				
+				// Parse outpoint to get vout
+				inputOutpoint, err := transaction.OutpointFromString(inputOutput.Outpoint)
+				if err != nil {
+					continue
+				}
+				
+				inputData := &OutputData{
+					TxID:     sourceTxid,
+					Vout:     inputOutpoint.Index,
+					Data:     inputOutput.Data,
+					Script:   inputOutput.Script,
+					Satoshis: inputOutput.Satoshis,
+				}
+				txData.Inputs = append(txData.Inputs, inputData)
+			}
+		}
+		
+		transactions = append(transactions, txData)
+	}
+	
+	return transactions, nil
+}
+
+// SaveEvents associates multiple events with a single output, storing arbitrary data
+func (s *MongoStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64, data interface{}) error {
+	if len(events) == 0 {
+		return nil
+	}
+	
+	var score float64
+	if height > 0 {
+		score = float64(height) + float64(idx)/1e9
+	} else {
+		score = float64(time.Now().Unix())
+	}
+	
+	// Update the output document with events, score, and data
+	update := bson.M{
+		"$set": bson.M{
+			"events": events,
+			"score":  score,
+		},
+	}
+	
+	if data != nil {
+		update["$set"].(bson.M)["data"] = data
+	}
+	
+	_, err := s.DB.Collection("outputs").UpdateOne(ctx,
+		bson.M{"outpoint": outpoint.String()},
+		update,
+	)
+	return err
+}
+
+// FindEvents returns all events associated with a given outpoint
+func (s *MongoStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
+	var result struct {
+		Events []string `bson:"events"`
+	}
+	
+	err := s.DB.Collection("outputs").FindOne(ctx, 
+		bson.M{"outpoint": outpoint.String()},
+		options.FindOne().SetProjection(bson.M{"events": 1}),
+	).Decode(&result)
+	
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+	
+	if result.Events == nil {
+		return []string{}, nil
+	}
+	
+	return result.Events, nil
+}
+
+// LookupOutpoints returns outpoints matching the given query criteria using aggregations for performance
+func (s *MongoStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
+	withData := len(includeData) > 0 && includeData[0]
+	
+	// Build match criteria
+	match := bson.M{}
+	
+	// Handle event filtering
+	if question.Event != "" {
+		match["events"] = question.Event
+	} else if len(question.Events) > 0 {
+		if question.JoinType == nil || *question.JoinType == JoinTypeUnion {
+			// Union: match any of the events
+			match["events"] = bson.M{"$in": question.Events}
+		} else if *question.JoinType == JoinTypeIntersect {
+			// Intersection: must have all events
+			match["events"] = bson.M{"$all": question.Events}
+		}
+		// Note: Difference join type would need more complex aggregation
+	}
+	
+	// Handle score range
+	if question.From > 0 || question.Until > 0 {
+		scoreMatch := bson.M{}
+		if question.From > 0 {
+			scoreMatch["$gte"] = question.From
+		}
+		if question.Until > 0 {
+			scoreMatch["$lte"] = question.Until
+		}
+		match["score"] = scoreMatch
+	}
+	
+	// Handle unspent filter
+	if question.UnspentOnly {
+		match["spend"] = nil
+	}
+	
+	// Build aggregation pipeline
+	pipeline := bson.A{
+		bson.D{{Key: "$match", Value: match}},
+	}
+	
+	// Sort by score
+	sortOrder := 1
+	if question.Reverse {
+		sortOrder = -1
+	}
+	pipeline = append(pipeline, bson.D{{Key: "$sort", Value: bson.D{{Key: "score", Value: sortOrder}}}})
+	
+	// Limit results
+	if question.Limit > 0 {
+		pipeline = append(pipeline, bson.D{{Key: "$limit", Value: question.Limit}})
+	}
+	
+	// Project only needed fields
+	projection := bson.M{
+		"outpoint": 1,
+		"score":    1,
+	}
+	if withData {
+		projection["data"] = 1
+	}
+	pipeline = append(pipeline, bson.D{{Key: "$project", Value: projection}})
+	
+	cursor, err := s.DB.Collection("outputs").Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+	
+	var results []*OutpointResult
+	for cursor.Next(ctx) {
+		var doc struct {
+			Outpoint string      `bson:"outpoint"`
+			Score    float64     `bson:"score"`
+			Data     interface{} `bson:"data,omitempty"`
+		}
+		
+		if err := cursor.Decode(&doc); err != nil {
+			continue
+		}
+		
+		outpoint, err := transaction.OutpointFromString(doc.Outpoint)
+		if err != nil {
+			continue
+		}
+		
+		result := &OutpointResult{
+			Outpoint: outpoint,
+			Score:    doc.Score,
+		}
+		
+		if withData && doc.Data != nil {
+			// Convert BSON data to clean types like GetOutputData does
+			jsonBytes, err := json.Marshal(doc.Data)
+			if err == nil {
+				var cleanData interface{}
+				if err := json.Unmarshal(jsonBytes, &cleanData); err == nil {
+					result.Data = cleanData
+				}
+			}
+		}
+		
+		results = append(results, result)
+	}
+	
+	return results, nil
+}
+
+// GetOutputData retrieves the data associated with a specific output
+func (s *MongoStorage) GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error) {
+	var result struct {
+		Data interface{} `bson:"data"`
+	}
+	
+	err := s.DB.Collection("outputs").FindOne(ctx,
+		bson.M{"outpoint": outpoint.String()},
+		options.FindOne().SetProjection(bson.M{"data": 1}),
+	).Decode(&result)
+	
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf("outpoint not found")
+		}
+		return nil, err
+	}
+	
+	if result.Data == nil {
+		return nil, nil
+	}
+	
+	// Convert through JSON to get clean types like Redis implementation
+	jsonBytes, err := json.Marshal(result.Data)
+	if err != nil {
+		return nil, err
+	}
+	
+	var cleanData interface{}
+	if err := json.Unmarshal(jsonBytes, &cleanData); err != nil {
+		return nil, err
+	}
+	
+	return cleanData, nil
 }

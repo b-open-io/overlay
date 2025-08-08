@@ -22,7 +22,8 @@ func outputToMap(output *engine.Output) map[string]interface{} {
 func outputToTopicMap(output *engine.Output) map[string]interface{} {
 	m := make(map[string]interface{})
 	m["t"] = output.Topic
-	m["sp"] = output.Spent
+	// Don't store spent status here anymore - we'll track spending txid separately
+	// m["sp"] = output.Spent
 	if len(output.OutputsConsumed) > 0 {
 		m["c"] = outpointsToBytes(output.OutputsConsumed)
 	}
@@ -101,19 +102,21 @@ type BSONBeef struct {
 }
 
 type BSONOutput struct {
-	Outpoint        string   `bson:"outpoint"`
-	Txid            string   `bson:"txid"`
-	Topic           string   `bson:"topic"`
-	Script          []byte   `bson:"script"`
-	Satoshis        uint64   `bson:"satoshis"`
-	Spent           bool     `bson:"spent"`
-	OutputsConsumed []string `bson:"outputsConsumed"`
-	ConsumedBy      []string `bson:"consumedBy"`
-	BlockHeight     uint32   `bson:"blockHeight"`
-	BlockIdx        uint64   `bson:"blockIdx"`
-	Score           float64  `bson:"score"`
-	AncillaryTxids  []string `bson:"ancillaryTxids"`
-	AncillaryBeef   []byte   `bson:"ancillaryBeef"`
+	Outpoint        string      `bson:"outpoint"`
+	Txid            string      `bson:"txid"`
+	Topic           string      `bson:"topic"`
+	Script          []byte      `bson:"script"`
+	Satoshis        uint64      `bson:"satoshis"`
+	Spend           *string     `bson:"spend"` // Changed from Spent bool to Spend *string
+	OutputsConsumed []string    `bson:"outputsConsumed"`
+	ConsumedBy      []string    `bson:"consumedBy"`
+	BlockHeight     uint32      `bson:"blockHeight"`
+	BlockIdx        uint64      `bson:"blockIdx"`
+	Score           float64     `bson:"score"`
+	AncillaryTxids  []string    `bson:"ancillaryTxids"`
+	AncillaryBeef   []byte      `bson:"ancillaryBeef"`
+	Events          []string    `bson:"events"`          // Event names this output is associated with
+	Data            interface{} `bson:"data,omitempty"`  // Arbitrary data associated with the output
 }
 
 func NewBSONOutput(o *engine.Output) *BSONOutput {
@@ -123,7 +126,7 @@ func NewBSONOutput(o *engine.Output) *BSONOutput {
 		Topic:           o.Topic,
 		Script:          o.Script.Bytes(),
 		Satoshis:        o.Satoshis,
-		Spent:           o.Spent,
+		Spend:           nil, // Will be set when output is spent
 		BlockHeight:     o.BlockHeight,
 		BlockIdx:        o.BlockIdx,
 		Score:           o.Score,
@@ -131,6 +134,8 @@ func NewBSONOutput(o *engine.Output) *BSONOutput {
 		AncillaryBeef:   o.AncillaryBeef,
 		OutputsConsumed: make([]string, 0, len(o.OutputsConsumed)),
 		ConsumedBy:      make([]string, 0, len(o.ConsumedBy)),
+		Events:          make([]string, 0), // Initialize empty events array
+		Data:            nil,               // Initialize empty data
 	}
 	for _, oc := range o.OutputsConsumed {
 		bo.OutputsConsumed = append(bo.OutputsConsumed, oc.String())
@@ -151,7 +156,7 @@ func (o *BSONOutput) ToEngineOutput() *engine.Output {
 		Topic:           o.Topic,
 		Script:          script.NewFromBytes(o.Script),
 		Satoshis:        o.Satoshis,
-		Spent:           o.Spent,
+		Spent:           o.Spend != nil, // Set to true if Spend field has a value
 		BlockHeight:     o.BlockHeight,
 		BlockIdx:        o.BlockIdx,
 		Score:           o.Score,
