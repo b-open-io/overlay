@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	
 	"github.com/b-open-io/overlay/beef"
@@ -10,40 +11,55 @@ import (
 )
 
 // CreateEventDataStorage creates the appropriate EventDataStorage implementation
-// based on the EVENT_STORAGE environment variable
-func CreateEventDataStorage(dbName string, beefStore beef.BeefStorage, publisher publish.Publisher) (EventDataStorage, error) {
-	storageType := strings.ToLower(os.Getenv("EVENT_STORAGE"))
-	
-	// Default to SQLite if not specified - no external dependencies needed
-	if storageType == "" {
-		storageType = "sqlite"
+// from a connection string. Auto-detects the storage type from the URL scheme.
+//
+// Supported formats:
+//   - redis://localhost:6379
+//   - mongodb://localhost:27017/dbname
+//   - sqlite:///path/to/overlay.db or sqlite://overlay.db
+//   - ./overlay.db (inferred as SQLite)
+//
+// If no connection string is provided, defaults to ./overlay.db
+func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage, publisher publish.Publisher) (EventDataStorage, error) {
+	// If no connection string provided, try EVENT_STORAGE environment variable
+	if connectionString == "" {
+		connectionString = os.Getenv("EVENT_STORAGE")
+		if connectionString == "" {
+			// Default to local SQLite database
+			connectionString = "./overlay.db"
+		}
 	}
 	
-	switch storageType {
-	case "mongo", "mongodb":
-		mongoURL := os.Getenv("MONGO_URL")
-		if mongoURL == "" {
-			mongoURL = "mongodb://localhost:27017"
-		}
-		return NewMongoEventDataStorage(mongoURL, dbName, beefStore, publisher)
+	// Detect storage type from connection string
+	switch {
+	case strings.HasPrefix(connectionString, "redis://"):
+		return NewRedisEventDataStorage(connectionString, beefStore, publisher)
 		
-	case "redis":
-		redisURL := os.Getenv("REDIS_URL")
-		if redisURL == "" {
-			redisURL = "redis://localhost:6379"
-		}
-		return NewRedisEventDataStorage(redisURL, beefStore, publisher)
+	case strings.HasPrefix(connectionString, "mongodb://"), strings.HasPrefix(connectionString, "mongo://"):
+		// MongoDB driver will extract database name from the connection string
+		return NewMongoEventDataStorage(connectionString, beefStore, publisher)
 		
-	case "sqlite":
-		// SQLite path can be specified via SQLITE_PATH env var
-		// or defaults to a local file based on dbName
-		sqlitePath := os.Getenv("SQLITE_PATH")
-		if sqlitePath == "" {
-			sqlitePath = fmt.Sprintf("./%s.db", dbName)
+	case strings.HasPrefix(connectionString, "sqlite://"):
+		// Remove sqlite:// prefix (can be sqlite:// or sqlite:///path)
+		path := strings.TrimPrefix(connectionString, "sqlite://")
+		path = strings.TrimPrefix(path, "/") // Handle sqlite:///path format
+		if path == "" {
+			path = "./overlay.db"
 		}
-		return NewSQLiteEventDataStorage(sqlitePath, beefStore, publisher)
+		return NewSQLiteEventDataStorage(path, beefStore, publisher)
+		
+	case strings.HasSuffix(connectionString, ".db"), strings.HasSuffix(connectionString, ".sqlite"):
+		// Looks like a SQLite database file
+		return NewSQLiteEventDataStorage(connectionString, beefStore, publisher)
+		
+	case filepath.IsAbs(connectionString) || strings.HasPrefix(connectionString, "./") || strings.HasPrefix(connectionString, "../"):
+		// Looks like a filesystem path - assume SQLite
+		if !strings.HasSuffix(connectionString, ".db") {
+			connectionString = connectionString + "/overlay.db"
+		}
+		return NewSQLiteEventDataStorage(connectionString, beefStore, publisher)
 		
 	default:
-		return nil, fmt.Errorf("unsupported storage type: %s (supported: mongo, redis, sqlite)", storageType)
+		return nil, fmt.Errorf("unable to determine storage type from connection string: %s", connectionString)
 	}
 }

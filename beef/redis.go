@@ -64,7 +64,6 @@ func (t *RedisBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, b
 }
 
 // LoadTx loads a transaction from BEEF storage with optional merkle path validation
-// This overrides BaseBeefStorage.LoadTx to ensure RedisBeefStorage.LoadBeef is called
 func (t *RedisBeefStorage) LoadTx(ctx context.Context, txid *chainhash.Hash, chaintracker *headers_client.Client) (*transaction.Transaction, error) {
 	// Load BEEF from storage - this will use RedisBeefStorage.LoadBeef
 	beefBytes, err := t.LoadBeef(ctx, txid)
@@ -72,18 +71,5 @@ func (t *RedisBeefStorage) LoadTx(ctx context.Context, txid *chainhash.Hash, cha
 		return nil, err
 	}
 
-	// Parse BEEF to get the transaction
-	_, tx, _, err := transaction.ParseBeef(beefBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	// Validate merkle path if present and chaintracker is provided
-	if tx.MerklePath != nil && chaintracker != nil {
-		if err := t.BaseBeefStorage.validateMerklePath(ctx, tx, txid, chaintracker); err != nil {
-			return nil, err
-		}
-	}
-
-	return tx, nil
+	return LoadTxFromBeef(ctx, beefBytes, txid, chaintracker)
 }

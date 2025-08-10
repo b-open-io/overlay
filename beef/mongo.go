@@ -10,6 +10,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/connstring"
 )
 
 type MongoBeefStorage struct {
@@ -18,16 +19,24 @@ type MongoBeefStorage struct {
 	bucket *mongo.GridFSBucket
 }
 
-func NewMongoBeefStorage(connString string, dbName string) (*MongoBeefStorage, error) {
-	if client, err := mongo.Connect(nil, options.Client().ApplyURI(connString)); err != nil {
+func NewMongoBeefStorage(connString string) (*MongoBeefStorage, error) {
+	client, err := mongo.Connect(nil, options.Client().ApplyURI(connString))
+	if err != nil {
 		return nil, err
-	} else {
-		db := client.Database(dbName)
-		return &MongoBeefStorage{
-			db:     db,
-			bucket: db.GridFSBucket(),
-		}, nil
 	}
+	
+	// Extract database name from the connection string
+	// MongoDB connection strings can include the database as: mongodb://host/database
+	dbName := "beef" // default
+	if cs, err := connstring.ParseAndValidate(connString); err == nil && cs.Database != "" {
+		dbName = cs.Database
+	}
+	
+	db := client.Database(dbName)
+	return &MongoBeefStorage{
+		db:     db,
+		bucket: db.GridFSBucket(),
+	}, nil
 }
 
 func (t *MongoBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
@@ -62,7 +71,6 @@ func (t *MongoBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, b
 }
 
 // LoadTx loads a transaction from BEEF storage with optional merkle path validation
-// This overrides BaseBeefStorage.LoadTx to ensure MongoBeefStorage.LoadBeef is called
 func (t *MongoBeefStorage) LoadTx(ctx context.Context, txid *chainhash.Hash, chaintracker *headers_client.Client) (*transaction.Transaction, error) {
 	// Load BEEF from storage - this will use MongoBeefStorage.LoadBeef
 	beefBytes, err := t.LoadBeef(ctx, txid)
@@ -70,18 +78,5 @@ func (t *MongoBeefStorage) LoadTx(ctx context.Context, txid *chainhash.Hash, cha
 		return nil, err
 	}
 
-	// Parse BEEF to get the transaction
-	_, tx, _, err := transaction.ParseBeef(beefBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	// Validate merkle path if present and chaintracker is provided
-	if tx.MerklePath != nil && chaintracker != nil {
-		if err := t.BaseBeefStorage.validateMerklePath(ctx, tx, txid, chaintracker); err != nil {
-			return nil, err
-		}
-	}
-
-	return tx, nil
+	return LoadTxFromBeef(ctx, beefBytes, txid, chaintracker)
 }

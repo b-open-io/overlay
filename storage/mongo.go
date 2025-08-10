@@ -17,6 +17,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/connstring"
 )
 
 type MongoEventDataStorage struct {
@@ -25,11 +26,27 @@ type MongoEventDataStorage struct {
 	pub       publish.Publisher
 }
 
-func NewMongoEventDataStorage(connString string, dbName string, beefStore beef.BeefStorage, pub publish.Publisher) (*MongoEventDataStorage, error) {
-	client, err := mongo.Connect(options.Client().ApplyURI(connString))
+// GetBeefStorage returns the underlying BEEF storage implementation
+func (s *MongoEventDataStorage) GetBeefStorage() beef.BeefStorage {
+	return s.BeefStore
+}
+
+func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, pub publish.Publisher) (*MongoEventDataStorage, error) {
+	// Parse the connection string to extract database name
+	clientOpts := options.Client().ApplyURI(connString)
+	
+	client, err := mongo.Connect(clientOpts)
 	if err != nil {
 		return nil, err
 	}
+	
+	// Extract database name from the connection string
+	// MongoDB connection strings can include the database as: mongodb://host/database
+	dbName := "overlay" // default
+	if cs, err := connstring.ParseAndValidate(connString); err == nil && cs.Database != "" {
+		dbName = cs.Database
+	}
+	
 	db := client.Database(dbName)
 
 	indexModel := mongo.IndexModel{

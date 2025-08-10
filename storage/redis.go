@@ -25,6 +25,11 @@ type RedisEventDataStorage struct {
 	pub       publish.Publisher
 }
 
+// GetBeefStorage returns the underlying BEEF storage implementation
+func (s *RedisEventDataStorage) GetBeefStorage() beef.BeefStorage {
+	return s.BeefStore
+}
+
 func NewRedisEventDataStorage(connString string, beefStore beef.BeefStorage, pub publish.Publisher) (r *RedisEventDataStorage, err error) {
 	r = &RedisEventDataStorage{BeefStore: beefStore}
 	log.Println("Connecting to Redis Storage...", connString)

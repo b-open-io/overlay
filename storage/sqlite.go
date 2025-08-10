@@ -27,6 +27,11 @@ type SQLiteEventDataStorage struct {
 	pub       publish.Publisher
 }
 
+// GetBeefStorage returns the underlying BEEF storage implementation
+func (s *SQLiteEventDataStorage) GetBeefStorage() beef.BeefStorage {
+	return s.BeefStore
+}
+
 func NewSQLiteEventDataStorage(dbPath string, beefStore beef.BeefStorage, pub publish.Publisher) (*SQLiteEventDataStorage, error) {
 	var err error
 	s := &SQLiteEventDataStorage{

@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 
+	"github.com/b-open-io/overlay/beef"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/transaction"
@@ -28,6 +29,9 @@ type TransactionData struct {
 // This consolidates all database operations into a single storage interface
 type EventDataStorage interface {
 	engine.Storage
+	
+	// GetBeefStorage returns the underlying BEEF storage implementation
+	GetBeefStorage() beef.BeefStorage
 	
 	// Block Data Methods
 	// GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height
