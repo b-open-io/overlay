@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/b-open-io/overlay/beef"
+	"github.com/b-open-io/overlay/publish"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/transaction"
@@ -32,6 +33,9 @@ type EventDataStorage interface {
 	
 	// GetBeefStorage returns the underlying BEEF storage implementation
 	GetBeefStorage() beef.BeefStorage
+	
+	// GetPublisher returns the underlying publisher implementation
+	GetPublisher() publish.Publisher
 	
 	// Block Data Methods
 	// GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height

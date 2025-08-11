@@ -21,22 +21,17 @@ import (
 )
 
 type SQLiteEventDataStorage struct {
-	wdb       *sql.DB
-	rdb       *sql.DB
-	BeefStore beef.BeefStorage
-	pub       publish.Publisher
+	BaseEventDataStorage
+	wdb *sql.DB
+	rdb *sql.DB
 }
 
-// GetBeefStorage returns the underlying BEEF storage implementation
-func (s *SQLiteEventDataStorage) GetBeefStorage() beef.BeefStorage {
-	return s.BeefStore
-}
+// Methods GetBeefStorage and GetPublisher are inherited from BaseEventDataStorage
 
 func NewSQLiteEventDataStorage(dbPath string, beefStore beef.BeefStorage, pub publish.Publisher) (*SQLiteEventDataStorage, error) {
 	var err error
 	s := &SQLiteEventDataStorage{
-		BeefStore: beefStore,
-		pub:       pub,
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pub),
 	}
 
 	// Write database connection
@@ -115,7 +110,7 @@ func (s *SQLiteEventDataStorage) createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_outputs_txid ON outputs(txid)`,
 		`CREATE INDEX IF NOT EXISTS idx_outputs_topic_score ON outputs(topic, score)`,
 		`CREATE INDEX IF NOT EXISTS idx_outputs_topic_spend_score ON outputs(topic, spend, score)`,
-		
+
 		`CREATE TABLE IF NOT EXISTS events (
 			event TEXT NOT NULL,
 			outpoint TEXT NOT NULL,
@@ -169,7 +164,7 @@ func (s *SQLiteEventDataStorage) createTables() error {
 
 func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) error {
 	// Save BEEF to BEEF storage
-	if err := s.BeefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
+	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
 
@@ -213,8 +208,8 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 		_, err = tx.ExecContext(ctx, `
 			INSERT OR IGNORE INTO output_relationships (consuming_outpoint, consumed_outpoint, topic)
 			VALUES (?, ?, ?)`,
-			utxo.Outpoint.String(),  // This output is the consumer
-			consumed.String(),       // This is what it consumes
+			utxo.Outpoint.String(), // This output is the consumer
+			consumed.String(),      // This is what it consumes
 			utxo.Topic,
 		)
 		if err != nil {
@@ -227,8 +222,8 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 		_, err = tx.ExecContext(ctx, `
 			INSERT OR IGNORE INTO output_relationships (consuming_outpoint, consumed_outpoint, topic)
 			VALUES (?, ?, ?)`,
-			consumedBy.String(),     // The other output is the consumer
-			utxo.Outpoint.String(),  // This output is being consumed
+			consumedBy.String(),    // The other output is the consumer
+			utxo.Outpoint.String(), // This output is being consumed
 			utxo.Topic,
 		)
 		if err != nil {
@@ -310,7 +305,7 @@ func (s *SQLiteEventDataStorage) FindOutput(ctx context.Context, outpoint *trans
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.BeefStore.LoadBeef(ctx, &output.Outpoint.Txid)
+		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid)
 		if err != nil {
 			return nil, err
 		}
@@ -443,7 +438,7 @@ func (s *SQLiteEventDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints
 
 	for _, op := range outpoints {
 		opStr := op.String()
-		
+
 		// Update outputs table
 		_, err = tx.ExecContext(ctx,
 			"UPDATE outputs SET spend = ? WHERE outpoint = ? AND topic = ?",
@@ -451,7 +446,7 @@ func (s *SQLiteEventDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints
 		if err != nil {
 			return err
 		}
-		
+
 		// Update events table for all events associated with this outpoint
 		_, err = tx.ExecContext(ctx,
 			"UPDATE events SET spend = ? WHERE outpoint = ?",
@@ -483,8 +478,8 @@ func (s *SQLiteEventDataStorage) UpdateConsumedBy(ctx context.Context, outpoint 
 	for _, cb := range consumedBy {
 		_, err = tx.ExecContext(ctx,
 			"INSERT INTO output_relationships (consuming_outpoint, consumed_outpoint, topic) VALUES (?, ?, ?)",
-			cb.String(),             // The other output is the consumer
-			outpoint.String(),       // This output is being consumed
+			cb.String(),       // The other output is the consumer
+			outpoint.String(), // This output is being consumed
 			topic)
 		if err != nil {
 			return err
@@ -495,7 +490,7 @@ func (s *SQLiteEventDataStorage) UpdateConsumedBy(ctx context.Context, outpoint 
 }
 
 func (s *SQLiteEventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
-	return s.BeefStore.SaveBeef(ctx, txid, beef)
+	return s.beefStore.SaveBeef(ctx, txid, beef)
 }
 
 func (s *SQLiteEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
@@ -625,7 +620,7 @@ func (s *SQLiteEventDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.BeefStore.LoadBeef(context.Background(), &output.Outpoint.Txid)
+		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid)
 		if err != nil {
 			log.Printf("Failed to load BEEF for %s: %v", output.Outpoint.Txid, err)
 		} else {
@@ -908,7 +903,24 @@ func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 		}
 	}
 
-	return tx.Commit()
+	// Commit the transaction
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	// Publish events if publisher is available
+	if s.pub != nil {
+		for _, event := range events {
+			// Publish event with outpoint string as the message
+			if err := s.pub.Publish(ctx, event, outpointStr); err != nil {
+				// Log error but don't fail the operation
+				// Publishing is best-effort
+				continue
+			}
+		}
+	}
+
+	return nil
 }
 
 // FindEvents returns all events associated with a given outpoint
@@ -936,11 +948,11 @@ func (s *SQLiteEventDataStorage) FindEvents(ctx context.Context, outpoint *trans
 // LookupOutpoints returns outpoints matching the given query criteria
 func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
 	withData := len(includeData) > 0 && includeData[0]
-	
+
 	// Build the query
 	var query strings.Builder
 	var args []interface{}
-	
+
 	// Handle event filtering using the events table
 	if question.Event != "" {
 		// Single event query - use the events table directly
@@ -1020,7 +1032,7 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 		}
 		query.WriteString(" FROM outputs WHERE 1=1")
 	}
-	
+
 	// Score filter
 	if question.Event != "" || len(question.Events) > 0 {
 		// Querying events table
@@ -1038,7 +1050,7 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 		}
 	}
 	args = append(args, question.From)
-	
+
 	// Until filter
 	if question.Until > 0 {
 		if question.Event != "" || len(question.Events) > 0 {
@@ -1058,7 +1070,7 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 		}
 		args = append(args, question.Until)
 	}
-	
+
 	// Unspent filter - now we can use the denormalized spend column in events table
 	if question.UnspentOnly {
 		if question.Event != "" || len(question.Events) > 0 {
@@ -1069,7 +1081,7 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 			query.WriteString(" AND (spend IS NULL OR spend = '')")
 		}
 	}
-	
+
 	// Sort order
 	if question.Reverse {
 		if question.Event != "" || len(question.Events) > 0 {
@@ -1084,26 +1096,26 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 			query.WriteString(" ORDER BY score ASC")
 		}
 	}
-	
+
 	// Limit
 	if question.Limit > 0 {
 		query.WriteString(" LIMIT ?")
 		args = append(args, question.Limit)
 	}
-	
+
 	// Execute query
 	rows, err := s.rdb.QueryContext(ctx, query.String(), args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	
+
 	var results []*OutpointResult
 	for rows.Next() {
 		var outpointStr string
 		var score float64
 		var dataJSON *string
-		
+
 		if withData {
 			err = rows.Scan(&outpointStr, &score, &dataJSON)
 		} else {
@@ -1112,17 +1124,17 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 		if err != nil {
 			return nil, err
 		}
-		
+
 		outpoint, err := transaction.OutpointFromString(outpointStr)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		result := &OutpointResult{
 			Outpoint: outpoint,
 			Score:    score,
 		}
-		
+
 		// Include data if requested and available
 		if withData && dataJSON != nil && *dataJSON != "" {
 			var data interface{}
@@ -1130,10 +1142,10 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 				result.Data = data
 			}
 		}
-		
+
 		results = append(results, result)
 	}
-	
+
 	return results, rows.Err()
 }
 
@@ -1143,22 +1155,22 @@ func (s *SQLiteEventDataStorage) GetOutputData(ctx context.Context, outpoint *tr
 	err := s.rdb.QueryRowContext(ctx,
 		"SELECT data FROM outputs WHERE outpoint = ? LIMIT 1",
 		outpoint.String()).Scan(&dataJSON)
-	
+
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("outpoint not found")
 	}
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if dataJSON == nil || *dataJSON == "" {
 		return nil, nil
 	}
-	
+
 	var data interface{}
 	if err := json.Unmarshal([]byte(*dataJSON), &data); err != nil {
 		return nil, err
 	}
-	
+
 	return data, nil
 }

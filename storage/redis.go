@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/b-open-io/overlay/beef"
 	"github.com/b-open-io/overlay/publish"
+	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
 	"github.com/bsv-blockchain/go-sdk/transaction"
@@ -20,18 +20,16 @@ import (
 )
 
 type RedisEventDataStorage struct {
-	DB        *redis.Client
-	BeefStore beef.BeefStorage
-	pub       publish.Publisher
+	BaseEventDataStorage
+	DB *redis.Client
 }
 
-// GetBeefStorage returns the underlying BEEF storage implementation
-func (s *RedisEventDataStorage) GetBeefStorage() beef.BeefStorage {
-	return s.BeefStore
-}
+// Methods GetBeefStorage and GetPublisher are inherited from BaseEventDataStorage
 
 func NewRedisEventDataStorage(connString string, beefStore beef.BeefStorage, pub publish.Publisher) (r *RedisEventDataStorage, err error) {
-	r = &RedisEventDataStorage{BeefStore: beefStore}
+	r = &RedisEventDataStorage{
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pub),
+	}
 	log.Println("Connecting to Redis Storage...", connString)
 	if opts, err := redis.ParseURL(connString); err != nil {
 		return nil, err
@@ -42,12 +40,12 @@ func NewRedisEventDataStorage(connString string, beefStore beef.BeefStorage, pub
 }
 
 func (s *RedisEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
-	if err := s.BeefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
+	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
 	_, err = s.DB.Pipelined(ctx, func(p redis.Pipeliner) error {
 		op := utxo.Outpoint.String()
-		
+
 		// Calculate score
 		var score float64
 		if utxo.BlockHeight > 0 {
@@ -55,19 +53,19 @@ func (s *RedisEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 		} else {
 			score = float64(time.Now().Unix())
 		}
-		
+
 		// Store output topic data
 		if err := p.HMSet(ctx, OutputTopicKey(&utxo.Outpoint, utxo.Topic), outputToTopicMap(utxo)).Err(); err != nil {
 			return err
 		}
-		
+
 		// Store output data with score
 		outputMap := outputToMap(utxo)
 		outputMap["score"] = score
 		if err := p.HMSet(ctx, outputKey(&utxo.Outpoint), outputMap).Err(); err != nil {
 			return err
 		}
-		
+
 		// Add to topic membership
 		if err = p.ZAdd(ctx, OutMembershipKey(utxo.Topic), redis.Z{
 			Score:  score,
@@ -96,7 +94,7 @@ func (s *RedisEventDataStorage) FindOutput(ctx context.Context, outpoint *transa
 		// Output is spent (we have the spending txid but don't need it here)
 		o.Spent = true
 	}
-	
+
 	if spent != nil && *spent != o.Spent {
 		return nil, nil
 	}
@@ -121,7 +119,7 @@ func (s *RedisEventDataStorage) FindOutput(ctx context.Context, outpoint *transa
 		return nil, err
 	}
 	if includeBEEF {
-		if o.Beef, err = s.BeefStore.LoadBeef(ctx, &outpoint.Txid); err != nil {
+		if o.Beef, err = s.beefStore.LoadBeef(ctx, &outpoint.Txid); err != nil {
 			return nil, err
 		}
 	}
@@ -186,18 +184,18 @@ func (s *RedisEventDataStorage) FindUTXOsForTopic(ctx context.Context, topic str
 
 func (s *RedisEventDataStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint, topic string) error {
 	outpointStr := outpoint.String()
-	
+
 	// First, gather data we need for cleanup
 	// Check if this output was spent (to clean up reverse index)
 	spendingTxid, _ := s.DB.HGet(ctx, SpendsKey, outpointStr).Result()
-	
+
 	// Get events from the output hash (new location)
 	eventsJSON, _ := s.DB.HGet(ctx, outputKey(outpoint), "e").Result()
 	var events []string
 	if eventsJSON != "" {
 		json.Unmarshal([]byte(eventsJSON), &events)
 	}
-	
+
 	// Check if this output is used by other topics
 	otherTopics := false
 	iter := s.DB.Scan(ctx, 0, "ot:"+outpointStr+":*", 0).Iterator()
@@ -209,26 +207,26 @@ func (s *RedisEventDataStorage) DeleteOutput(ctx context.Context, outpoint *tran
 			break
 		}
 	}
-	
+
 	_, err := s.DB.Pipelined(ctx, func(p redis.Pipeliner) error {
 		// 1. Delete output-topic data
 		if err := p.Del(ctx, OutputTopicKey(outpoint, topic)).Err(); err != nil {
 			return err
 		}
-		
+
 		// 2. Remove from topic membership
 		if err := p.ZRem(ctx, OutMembershipKey(topic), outpointStr).Err(); err != nil {
 			return err
 		}
-		
+
 		// If no other topics use this output, clean up everything
 		if !otherTopics {
 			// 3. Delete the main output hash (contains score and events now)
 			p.Del(ctx, outputKey(outpoint))
-			
+
 			// 4. Delete optional data
 			p.Del(ctx, "data:"+outpointStr)
-			
+
 			// 5. Clean up spend tracking if this output was spent
 			if spendingTxid != "" {
 				// Remove from forward index
@@ -237,14 +235,14 @@ func (s *RedisEventDataStorage) DeleteOutput(ctx context.Context, outpoint *tran
 				reverseKey := fmt.Sprintf("spends:%s", spendingTxid)
 				p.SRem(ctx, reverseKey, outpointStr)
 			}
-			
+
 			// 6. Clean up event-based indexes
 			for _, event := range events {
 				eventSetKey := "event:" + event
 				p.ZRem(ctx, eventSetKey, outpointStr)
 			}
 		}
-		
+
 		return nil
 	})
 	return err
@@ -281,18 +279,18 @@ func (s *RedisEventDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints 
 		// Prepare values for forward index
 		values := make(map[string]interface{}, len(outpoints))
 		outpointStrs := make([]interface{}, 0, len(outpoints))
-		
+
 		for _, outpoint := range outpoints {
 			opStr := outpoint.String()
 			values[opStr] = spendTxid.String()
 			outpointStrs = append(outpointStrs, opStr)
 		}
-		
+
 		// Forward index: outpoints -> spending txid
 		if err := p.HSet(ctx, SpendsKey, values).Err(); err != nil {
 			return err
 		}
-		
+
 		// Reverse index: add all outpoints to set of inputs for this txid
 		reverseKey := fmt.Sprintf("spends:%s", spendTxid.String())
 		return p.SAdd(ctx, reverseKey, outpointStrs...).Err()
@@ -305,19 +303,19 @@ func (s *RedisEventDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *
 }
 
 func (s *RedisEventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
-	return s.BeefStore.SaveBeef(ctx, txid, beef)
+	return s.beefStore.SaveBeef(ctx, txid, beef)
 }
 
 func (s *RedisEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
 	score := float64(blockHeight) + float64(blockIndex)/1e9
 	outpointStr := outpoint.String()
-	
+
 	// First, get the events associated with this output
 	events, err := s.FindEvents(ctx, outpoint)
 	if err != nil {
 		return err
 	}
-	
+
 	_, err = s.DB.Pipelined(ctx, func(p redis.Pipeliner) error {
 		// Update topic membership score
 		if err := p.ZAdd(ctx, OutMembershipKey(topic), redis.Z{
@@ -326,21 +324,21 @@ func (s *RedisEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, out
 		}).Err(); err != nil {
 			return err
 		}
-		
+
 		// Update output block height, index, and score in main hash
-		if err := p.HSet(ctx, outputKey(outpoint), 
-			"h", blockHeight, 
+		if err := p.HSet(ctx, outputKey(outpoint),
+			"h", blockHeight,
 			"i", blockIndex,
 			"score", score,
 		).Err(); err != nil {
 			return err
 		}
-		
+
 		// Update output topic data
 		if err := p.HSet(ctx, OutputTopicKey(outpoint, topic), "h", blockHeight, "i", blockIndex).Err(); err != nil {
 			return err
 		}
-		
+
 		// Update scores in event sorted sets
 		for _, event := range events {
 			eventSetKey := "event:" + event
@@ -351,7 +349,7 @@ func (s *RedisEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, out
 				return err
 			}
 		}
-		
+
 		return nil
 	})
 	return err
@@ -388,7 +386,7 @@ func (s *RedisEventDataStorage) GetLastInteraction(ctx context.Context, host str
 	if err != nil {
 		return 0, err
 	}
-	
+
 	score, err := strconv.ParseFloat(result, 64)
 	if err != nil {
 		return 0, err
@@ -407,7 +405,7 @@ func (s *RedisEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Cont
 	// So for height H, we want scores in range [H, H+1)
 	minScore := float64(height)
 	maxScore := float64(height + 1)
-	
+
 	// Get outpoints at the specific block height using score range
 	outpointStrs, err := s.DB.ZRangeByScore(ctx, OutMembershipKey(topic), &redis.ZRangeBy{
 		Min: fmt.Sprintf("%f", minScore),
@@ -416,69 +414,69 @@ func (s *RedisEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Cont
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Group outputs by transaction ID
 	txOutputMap := make(map[chainhash.Hash][]*OutputData)
-	
+
 	// Process each output
 	for _, outpointStr := range outpointStrs {
 		outpoint, err := transaction.OutpointFromString(outpointStr)
 		if err != nil {
 			continue
 		}
-		
+
 		// Get the output topic data (currently not needed for transaction data)
 		// _, err = s.DB.HGetAll(ctx, OutputTopicKey(outpoint, topic)).Result()
 		// if err != nil {
 		// 	continue
 		// }
-		
-		// Get the general output data  
+
+		// Get the general output data
 		outputData, err := s.DB.HGetAll(ctx, outputKey(outpoint)).Result()
 		if err != nil {
 			continue
 		}
-		
+
 		// Parse satoshis
 		var satoshis uint64
 		if satoshisStr, ok := outputData["st"]; ok {
 			satoshis, _ = strconv.ParseUint(satoshisStr, 10, 64)
 		}
-		
+
 		// Parse script (stored as raw bytes, not base64)
 		var script []byte
 		if scriptStr, ok := outputData["sc"]; ok {
 			script = []byte(scriptStr)
 		}
-		
+
 		// Get data
 		var data interface{}
 		dataKey := "data:" + outpointStr
 		if dataJSON, err := s.DB.Get(ctx, dataKey).Result(); err == nil && dataJSON != "" {
 			json.Unmarshal([]byte(dataJSON), &data)
 		}
-		
+
 		output := &OutputData{
 			Vout:     outpoint.Index,
 			Data:     data,
 			Script:   script,
 			Satoshis: satoshis,
 		}
-		
+
 		txid := outpoint.Txid
 		txOutputMap[txid] = append(txOutputMap[txid], output)
 	}
-	
+
 	// Build TransactionData for each transaction
 	var transactions []*TransactionData
-	
+
 	for txid, outputs := range txOutputMap {
 		txData := &TransactionData{
 			TxID:    txid,
 			Outputs: outputs,
 			Inputs:  make([]*OutputData, 0),
 		}
-		
+
 		// Use reverse index to find inputs for this transaction
 		reverseKey := fmt.Sprintf("spends:%s", txid.String())
 		inputOutpointStrs, err := s.DB.SMembers(ctx, reverseKey).Result()
@@ -489,33 +487,33 @@ func (s *RedisEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Cont
 				if err != nil {
 					continue
 				}
-				
+
 				// Get the input's output data
 				inputData, err := s.DB.HGetAll(ctx, outputKey(inputOutpoint)).Result()
 				if err != nil || len(inputData) == 0 {
 					// Skip inputs that don't exist in our system
 					continue
 				}
-				
+
 				// Parse satoshis
 				var satoshis uint64
 				if satoshisStr, ok := inputData["st"]; ok {
 					satoshis, _ = strconv.ParseUint(satoshisStr, 10, 64)
 				}
-				
+
 				// Parse script (stored as raw bytes, not base64)
 				var script []byte
 				if scriptStr, ok := inputData["sc"]; ok {
 					script = []byte(scriptStr)
 				}
-				
+
 				// Get data
 				var data interface{}
 				dataKey := "data:" + outpointStr
 				if dataJSON, err := s.DB.Get(ctx, dataKey).Result(); err == nil && dataJSON != "" {
 					json.Unmarshal([]byte(dataJSON), &data)
 				}
-				
+
 				// Create OutputData for input with source txid
 				sourceTxid := inputOutpoint.Txid
 				input := &OutputData{
@@ -525,14 +523,14 @@ func (s *RedisEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Cont
 					Script:   script,
 					Satoshis: satoshis,
 				}
-				
+
 				txData.Inputs = append(txData.Inputs, input)
 			}
 		}
-		
+
 		transactions = append(transactions, txData)
 	}
-	
+
 	return transactions, nil
 }
 
@@ -550,17 +548,17 @@ func (s *RedisEventDataStorage) SaveEvents(ctx context.Context, outpoint *transa
 	}
 
 	outpointStr := outpoint.String()
-	
+
 	_, err := s.DB.Pipelined(ctx, func(p redis.Pipeliner) error {
 		// Store events and score in the output hash
 		eventsJSON, _ := json.Marshal(events)
-		if err := p.HSet(ctx, outputKey(outpoint), 
+		if err := p.HSet(ctx, outputKey(outpoint),
 			"e", string(eventsJSON),
 			"score", score,
 		).Err(); err != nil {
 			return err
 		}
-		
+
 		// Store data as JSON if provided (keep separate due to size)
 		if data != nil {
 			dataKey := "data:" + outpointStr
@@ -572,7 +570,7 @@ func (s *RedisEventDataStorage) SaveEvents(ctx context.Context, outpoint *transa
 				return err
 			}
 		}
-		
+
 		// Add to event-based sorted sets for each event
 		for _, event := range events {
 			eventSetKey := "event:" + event
@@ -583,35 +581,52 @@ func (s *RedisEventDataStorage) SaveEvents(ctx context.Context, outpoint *transa
 				return err
 			}
 		}
-		
+
 		return nil
 	})
-	return err
+
+	if err != nil {
+		return err
+	}
+
+	// Publish events if publisher is available
+	if s.pub != nil {
+		for _, event := range events {
+			// Publish event with outpoint string as the message
+			if err := s.pub.Publish(ctx, event, outpointStr); err != nil {
+				// Log error but don't fail the operation
+				// Publishing is best-effort
+				continue
+			}
+		}
+	}
+
+	return nil
 }
 
 // FindEvents returns all events associated with a given outpoint
 func (s *RedisEventDataStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
 	eventsJSON, err := s.DB.HGet(ctx, outputKey(outpoint), "e").Result()
-	
+
 	if err == redis.Nil {
 		return []string{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var events []string
 	if err := json.Unmarshal([]byte(eventsJSON), &events); err != nil {
 		return nil, err
 	}
-	
+
 	return events, nil
 }
 
 // LookupOutpoints returns outpoints matching the given query criteria
 func (s *RedisEventDataStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
 	withData := len(includeData) > 0 && includeData[0]
-	
+
 	// Determine score range
 	var minScore, maxScore string
 	if question.Reverse {
@@ -629,10 +644,10 @@ func (s *RedisEventDataStorage) LookupOutpoints(ctx context.Context, question *E
 			maxScore = "+inf"
 		}
 	}
-	
+
 	var outpointStrs []string
 	var err error
-	
+
 	// Handle different event query types
 	if question.Event != "" {
 		// Single event query
@@ -690,12 +705,12 @@ func (s *RedisEventDataStorage) LookupOutpoints(ctx context.Context, question *E
 		// No event filter - this is complex in Redis without scanning all keys
 		return []*OutpointResult{}, nil
 	}
-	
+
 	// Apply limit
 	if question.Limit > 0 && len(outpointStrs) > question.Limit {
 		outpointStrs = outpointStrs[:question.Limit]
 	}
-	
+
 	// Build results
 	var results []*OutpointResult
 	for _, outpointStr := range outpointStrs {
@@ -703,7 +718,7 @@ func (s *RedisEventDataStorage) LookupOutpoints(ctx context.Context, question *E
 		if err != nil {
 			continue // Skip invalid outpoints
 		}
-		
+
 		// Get score from output hash
 		scoreStr, err := s.DB.HGet(ctx, outputKey(outpoint), "score").Result()
 		if err != nil {
@@ -713,19 +728,19 @@ func (s *RedisEventDataStorage) LookupOutpoints(ctx context.Context, question *E
 		if err != nil {
 			continue // Skip if invalid score
 		}
-		
+
 		// Check unspent filter if needed
 		if question.UnspentOnly {
 			if spent, err := s.DB.HExists(ctx, SpendsKey, outpointStr).Result(); err != nil || spent {
 				continue // Skip spent outputs
 			}
 		}
-		
+
 		result := &OutpointResult{
 			Outpoint: outpoint,
 			Score:    score,
 		}
-		
+
 		// Include data if requested
 		if withData {
 			dataKey := "data:" + outpointStr
@@ -737,10 +752,10 @@ func (s *RedisEventDataStorage) LookupOutpoints(ctx context.Context, question *E
 				}
 			}
 		}
-		
+
 		results = append(results, result)
 	}
-	
+
 	return results, nil
 }
 
@@ -754,15 +769,15 @@ func (s *RedisEventDataStorage) GetOutputData(ctx context.Context, outpoint *tra
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if dataJSON == "" {
 		return nil, nil
 	}
-	
+
 	var data interface{}
 	if err := json.Unmarshal([]byte(dataJSON), &data); err != nil {
 		return nil, err
 	}
-	
+
 	return data, nil
 }

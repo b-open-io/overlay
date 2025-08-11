@@ -21,32 +21,28 @@ import (
 )
 
 type MongoEventDataStorage struct {
-	DB        *mongo.Database
-	BeefStore beef.BeefStorage
-	pub       publish.Publisher
+	BaseEventDataStorage
+	DB *mongo.Database
 }
 
-// GetBeefStorage returns the underlying BEEF storage implementation
-func (s *MongoEventDataStorage) GetBeefStorage() beef.BeefStorage {
-	return s.BeefStore
-}
+// Methods GetBeefStorage and GetPublisher are inherited from BaseEventDataStorage
 
 func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, pub publish.Publisher) (*MongoEventDataStorage, error) {
 	// Parse the connection string to extract database name
 	clientOpts := options.Client().ApplyURI(connString)
-	
+
 	client, err := mongo.Connect(clientOpts)
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Extract database name from the connection string
 	// MongoDB connection strings can include the database as: mongodb://host/database
 	dbName := "overlay" // default
 	if cs, err := connstring.ParseAndValidate(connString); err == nil && cs.Database != "" {
 		dbName = cs.Database
 	}
-	
+
 	db := client.Database(dbName)
 
 	indexModel := mongo.IndexModel{
@@ -104,14 +100,13 @@ func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, pub
 	}
 
 	return &MongoEventDataStorage{
-		DB:        db,
-		BeefStore: beefStore,
-		pub:       pub,
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pub),
+		DB:                   db,
 	}, nil
 }
 
 func (s *MongoEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
-	if err := s.BeefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
+	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
 
@@ -156,7 +151,7 @@ func (s *MongoEventDataStorage) FindOutput(ctx context.Context, outpoint *transa
 	}
 	o = bo.ToEngineOutput()
 	if includeBEEF {
-		if o.Beef, err = s.BeefStore.LoadBeef(ctx, &outpoint.Txid); err != nil {
+		if o.Beef, err = s.beefStore.LoadBeef(ctx, &outpoint.Txid); err != nil {
 			return nil, err
 		}
 	}
@@ -183,7 +178,7 @@ func (s *MongoEventDataStorage) FindOutputs(ctx context.Context, outpoints []*tr
 			}
 			output := result.ToEngineOutput()
 			if includeBEEF {
-				if output.Beef, err = s.BeefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
+				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
 					return nil, err
 				}
 			}
@@ -216,7 +211,7 @@ func (s *MongoEventDataStorage) FindOutputsForTransaction(ctx context.Context, t
 			}
 			output := result.ToEngineOutput()
 			if includeBEEF {
-				if output.Beef, err = s.BeefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
+				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
 					return nil, err
 				}
 			}
@@ -250,7 +245,7 @@ func (s *MongoEventDataStorage) FindUTXOsForTopic(ctx context.Context, topic str
 			}
 			output := result.ToEngineOutput()
 			if includeBEEF {
-				if output.Beef, err = s.BeefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
+				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
 					return nil, err
 				}
 			}
@@ -310,7 +305,7 @@ func (s *MongoEventDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *
 }
 
 func (s *MongoEventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
-	return s.BeefStore.SaveBeef(ctx, txid, beef)
+	return s.beefStore.SaveBeef(ctx, txid, beef)
 }
 
 func (s *MongoEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
@@ -520,7 +515,24 @@ func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transa
 		bson.M{"outpoint": outpoint.String()},
 		update,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Publish events if publisher is available
+	if s.pub != nil {
+		outpointStr := outpoint.String()
+		for _, event := range events {
+			// Publish event with outpoint string as the message
+			if err := s.pub.Publish(ctx, event, outpointStr); err != nil {
+				// Log error but don't fail the operation
+				// Publishing is best-effort
+				continue
+			}
+		}
+	}
+
+	return nil
 }
 
 // FindEvents returns all events associated with a given outpoint
