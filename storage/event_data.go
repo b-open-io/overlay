@@ -83,7 +83,7 @@ const (
 
 // OutpointResult contains the result of an outpoint lookup
 type OutpointResult struct {
-	Outpoint *transaction.Outpoint
-	Score    float64
-	Data     interface{}
+	Outpoint *transaction.Outpoint `json:"outpoint"`
+	Score    float64              `json:"score"`
+	Data     interface{}          `json:"data,omitempty"`
 }
