@@ -99,30 +99,6 @@ func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, pub
 		return nil, err
 	}
 
-	// Queue Management Indexes
-	// Sorted sets - unique compound index on key+member
-	indexModel = mongo.IndexModel{
-		Keys: bson.D{
-			{Key: "key", Value: 1},
-			{Key: "member", Value: 1},
-		},
-		Options: options.Index().SetUnique(true),
-	}
-	if _, err = db.Collection("sorted_sets").Indexes().CreateOne(context.TODO(), indexModel); err != nil {
-		return nil, err
-	}
-
-	// Sorted sets - index for range queries
-	indexModel = mongo.IndexModel{
-		Keys: bson.D{
-			{Key: "key", Value: 1},
-			{Key: "score", Value: 1},
-		},
-	}
-	if _, err = db.Collection("sorted_sets").Indexes().CreateOne(context.TODO(), indexModel); err != nil {
-		return nil, err
-	}
-
 	return &MongoEventDataStorage{
 		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pubRedis),
 		DB:                   db,
