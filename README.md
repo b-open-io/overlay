@@ -250,12 +250,47 @@ question = &events.Question{
 
 ## Storage Package
 
-The storage package provides implementations of the `engine.Storage` interface from go-overlay-services for storing and retrieving transaction outputs.
+The storage package provides implementations of the `engine.Storage` interface from go-overlay-services for storing and retrieving transaction outputs. All storage backends now implement the `EventDataStorage` interface which extends `engine.Storage` with database-agnostic queue management operations.
+
+### EventDataStorage Interface
+
+The `EventDataStorage` interface provides Redis-like operations that work across all storage backends:
+
+```go
+// Queue Management Operations
+storage.ZAdd(ctx, "queue", storage.ZMember{Score: 1.5, Member: "item1"})  // Sorted sets
+storage.SAdd(ctx, "whitelist", "token1", "token2")                        // Sets
+storage.HSet(ctx, "config", "setting", "value")                           // Hashes
+storage.HMSet(ctx, "config", map[string]interface{}{                      // Multiple hash fields
+    "setting1": "value1",
+    "setting2": 123,
+})
+```
+
+### Storage Factory Configuration
+
+The easiest way to create storage is using the factory with connection strings:
+
+```go
+import "github.com/b-open-io/overlay/config"
+
+// Create storage from environment or flags
+storage, err := config.CreateEventStorage(
+    eventStorageURL,  // e.g., "mongodb://localhost:27017/mydb" 
+    beefStorageURL,   // e.g., "redis://localhost:6379?ttl=24h"
+    publisherURL,     // e.g., "redis://localhost:6379"
+)
+```
+
+Supported connection string formats:
+- **Redis**: `redis://[user:password@]host:port[?ttl=duration]`
+- **MongoDB**: `mongodb://[user:password@]host:port/database`
+- **SQLite**: `/path/to/database.db` or `file:database.db`
 
 ### Redis Storage
 
 ```go
-storage, err := storage.NewRedisStorage(
+storage, err := storage.NewRedisEventDataStorage(
     "redis://localhost:6379",
     beefStore,
     publisher
@@ -266,23 +301,34 @@ err = storage.InsertOutput(ctx, output)
 
 // Find outputs by topic
 outputs, err := storage.FindUTXOsForTopic(ctx, "my-topic", 0, 100)
+
+// Use queue management operations
+err = storage.ZAdd(ctx, "processing-queue", storage.ZMember{
+    Score: float64(blockHeight),
+    Member: txid,
+})
 ```
 
 ### MongoDB Storage
 
 ```go
-storage, err := storage.NewMongoStorage(
-    "mongodb://localhost:27017",
-    "mydb",
+storage, err := storage.NewMongoEventDataStorage(
+    "mongodb://localhost:27017/mydb",
     beefStore,
     publisher
 )
 ```
 
+MongoDB features:
+- Document-based storage with BSON
+- Built-in replication and sharding
+- Efficient compound indexes for queue operations
+- Ideal for complex queries and large datasets
+
 ### SQLite Storage
 
 ```go
-storage, err := storage.NewSQLiteStorage(
+storage, err := storage.NewSQLiteEventDataStorage(
     "/path/to/database.db",
     beefStore,
     publisher
@@ -293,25 +339,133 @@ SQLite storage features:
 - WAL mode for concurrent reads/writes
 - Full ACID compliance
 - Embedded database (no server required)
+- Separate tables for sorted_sets, sets, and hashes
 - Optimized for local development and smaller deployments
 
 ## BEEF Storage
 
-The beef package provides implementations of the `beef.BeefStorage` interface for storing and retrieving BEEF (Background Evaluation Extended Format) data.
+The beef package provides implementations of the `beef.BeefStorage` interface for storing and retrieving BEEF (Background Evaluation Extended Format) data. Multiple storage backends are available with support for caching and fallback chains.
+
+### Available BEEF Storage Backends
 
 ```go
-// Redis BEEF storage
-beefStore, err := beef.NewRedisBeefStorage("redis://localhost:6379")
+// Redis BEEF storage with optional TTL
+beefStore, err := beef.NewRedisBeefStorage(
+    "redis://localhost:6379?ttl=24h",  // TTL for cache expiration
+    fallbackStorage,                    // Optional fallback storage
+)
 
 // MongoDB BEEF storage
-beefStore, err := beef.NewMongoBeefStorage("mongodb://localhost:27017", "mydb")
+beefStore, err := beef.NewMongoBeefStorage("mongodb://localhost:27017/mydb")
 
+// SQLite BEEF storage
+beefStore, err := beef.NewSQLiteBeefStorage("/path/to/beef.db")
+
+// Filesystem storage
+beefStore, err := beef.NewFilesystemBeefStorage("/path/to/beef/directory")
+
+// LRU in-memory cache with size limit
+beefStore, err := beef.NewLRUBeefStorage(
+    100 * 1024 * 1024,  // 100MB cache size
+    fallbackStorage,     // Falls back to disk/database
+)
+
+// JungleBus integration for fetching from network
+beefStore, err := beef.NewJungleBusBeefStorage(
+    "https://junglebus.gorillapool.io",
+    fallbackStorage,  // Optional local cache
+)
+```
+
+### BEEF Storage Operations
+
+Note that `LoadTx` is now a standalone function, not a method:
+
+```go
 // Save BEEF data
 err = beefStore.SaveBeef(ctx, txid, beefBytes)
 
 // Load BEEF data
 beefBytes, err := beefStore.LoadBeef(ctx, txid)
+
+// Load a transaction with dependencies (standalone function)
+tx, err := beef.LoadTx(ctx, beefStore, txid, chaintracker)
 ```
+
+### Chaining BEEF Storage
+
+You can chain storage backends for caching and fallback:
+
+```go
+// Create a multi-tier storage system
+diskStorage := beef.NewFilesystemBeefStorage("/data/beef")
+redisCache := beef.NewRedisBeefStorage("redis://localhost:6379?ttl=1h", diskStorage)
+lruCache := beef.NewLRUBeefStorage(50*1024*1024, redisCache)  // 50MB LRU -> Redis -> Disk
+
+// Reads check LRU first, then Redis, then disk
+// Writes go to all layers
+beefBytes, err := lruCache.LoadBeef(ctx, txid)
+```
+
+## Queue Management
+
+The EventDataStorage interface provides database-agnostic queue management operations that work identically across Redis, MongoDB, and SQLite backends:
+
+### Sorted Sets (Priority Queues)
+
+```go
+// Add items to a priority queue
+err = storage.ZAdd(ctx, "processing-queue", 
+    storage.ZMember{Score: 850000.000000123, Member: "tx1"},
+    storage.ZMember{Score: 850000.000000124, Member: "tx2"},
+)
+
+// Get items by score range
+members, err := storage.ZRange(ctx, "processing-queue", 
+    850000, 851000,  // min, max scores
+    0, 100)          // offset, limit (0 = no limit)
+
+// Get score for a specific member
+score, err := storage.ZScore(ctx, "processing-queue", "tx1")
+
+// Remove processed items
+err = storage.ZRem(ctx, "processing-queue", "tx1", "tx2")
+```
+
+### Sets (Whitelists, Blacklists)
+
+```go
+// Add to whitelist
+err = storage.SAdd(ctx, "token-whitelist", "token1", "token2", "token3")
+
+// Check membership
+members, err := storage.SMembers(ctx, "token-whitelist")
+
+// Remove from whitelist
+err = storage.SRem(ctx, "token-whitelist", "token2")
+```
+
+### Hashes (Configuration, State)
+
+```go
+// Set individual field
+err = storage.HSet(ctx, "config", "max-size", "1000")
+
+// Set multiple fields at once
+err = storage.HMSet(ctx, "progress", map[string]interface{}{
+    "last-block": 850000,
+    "last-index": 123,
+    "timestamp": time.Now().Unix(),
+})
+
+// Get single field
+value, err := storage.HGet(ctx, "config", "max-size")
+
+// Get all fields
+allConfig, err := storage.HGetAll(ctx, "config")
+```
+
+These operations enable building complex queue-based processing systems without direct database dependencies.
 
 ## Publishing
 
