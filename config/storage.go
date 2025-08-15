@@ -14,9 +14,9 @@ import (
 // CreateEventStorage creates a fully configured event storage with BEEF storage and optional publisher.
 //
 // If empty strings are provided, falls back to environment variables:
-//   - eventURL: EVENT_STORAGE env var (defaults to ./overlay.db)
-//   - beefURL: BEEF_STORAGE env var (defaults to ./beef_storage/)
-//   - publisherURL: PUBLISHER_URL env var (optional - if not provided, no events will be published)
+//   - eventURL: EVENTS_URL env var (defaults to ./overlay.db)
+//   - beefURL: BEEF_URL env var (defaults to ./beef_storage/)
+//   - pubsubURL: PUBSUB_URL env var (optional - if not provided, no events will be published)
 //
 // The beefURL parameter can be:
 //   - A single connection string: "redis://localhost:6379"
@@ -38,7 +38,7 @@ import (
 //
 //  4. Use environment variables:
 //     CreateEventStorage("", "", "")
-func CreateEventStorage(eventURL, beefURL, publisherURL string) (storage.EventDataStorage, error) {
+func CreateEventStorage(eventURL, beefURL, pubsubURL string) (storage.EventDataStorage, error) {
 	// Parse beefURL to determine if it's a single string or array
 	var beefURLStrings []string
 
@@ -69,19 +69,19 @@ func CreateEventStorage(eventURL, beefURL, publisherURL string) (storage.EventDa
 
 	// Create publisher if URL is provided (optional)
 	var publisher publish.Publisher
-	if publisherURL == "" {
-		publisherURL = os.Getenv("PUBLISHER_URL")
+	if pubsubURL == "" {
+		pubsubURL = os.Getenv("PUBSUB_URL")
 	}
 	
-	if publisherURL != "" {
-		// Create publisher (always Redis for now)
+	if pubsubURL != "" {
+		// Create publisher (actually PubSub but storage only needs Publisher interface)
 		var err error
-		publisher, err = publish.NewRedisPublish(publisherURL)
+		publisher, err = publish.NewRedisPublish(pubsubURL)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create publisher: %w", err)
 		}
 	}
-	// If publisherURL is empty, publisher remains nil and no events will be published
+	// If pubsubURL is empty, publisher remains nil and no events will be published
 
 	// Create event storage from connection string (defaults to ./overlay.db if not set)
 	eventStorage, err := storage.CreateEventDataStorage(eventURL, beefStorage, publisher)
