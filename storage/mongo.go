@@ -807,7 +807,7 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 		// Parse spending txid if present
 		var spendTxid *chainhash.Hash
 		if doc.SpendingTxid != nil && *doc.SpendingTxid != "" {
-			if parsedSpendTxid, err := chainhash.NewHashFromStr(*doc.SpendingTxid); err == nil {
+			if parsedSpendTxid, err := chainhash.NewHashFromHex(*doc.SpendingTxid); err == nil {
 				spendTxid = parsedSpendTxid
 			}
 		}

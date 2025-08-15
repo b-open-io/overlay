@@ -904,7 +904,7 @@ func (s *RedisEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 		// Check if the output is spent to populate spend field
 		var spendTxid *chainhash.Hash
 		if spendTxidStr, err := s.DB.HGet(ctx, SpendsKey, outpointStr).Result(); err == nil && spendTxidStr != "" {
-			if parsedSpendTxid, err := chainhash.NewHashFromStr(spendTxidStr); err == nil {
+			if parsedSpendTxid, err := chainhash.NewHashFromHex(spendTxidStr); err == nil {
 				spendTxid = parsedSpendTxid
 			}
 		}

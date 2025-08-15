@@ -1302,7 +1302,7 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 		// Parse spending txid if present
 		var spendTxid *chainhash.Hash
 		if spendingTxidStr != nil && *spendingTxidStr != "" {
-			if parsedSpendTxid, err := chainhash.NewHashFromStr(*spendingTxidStr); err == nil {
+			if parsedSpendTxid, err := chainhash.NewHashFromHex(*spendingTxidStr); err == nil {
 				spendTxid = parsedSpendTxid
 			}
 		}
