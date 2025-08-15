@@ -49,12 +49,12 @@ func CreateBeefStorage(connectionStrings []string) (BeefStorage, error) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid LRU URL format: %w", err)
 			}
-			
+
 			sizeStr := u.Query().Get("size")
 			if sizeStr == "" {
 				return nil, fmt.Errorf("LRU size not specified, use format: lru://?size=100mb")
 			}
-			
+
 			size, err := ParseSize(sizeStr)
 			if err != nil {
 				return nil, fmt.Errorf("invalid LRU size format %s: %w", sizeStr, err)
@@ -147,19 +147,4 @@ func CreateBeefStorage(connectionStrings []string) (BeefStorage, error) {
 	}
 
 	return storage, nil
-}
-
-// parseQueryParams parses URL query parameters into a map
-func parseQueryParams(query string) map[string]string {
-	params := make(map[string]string)
-	values, err := url.ParseQuery(query)
-	if err != nil {
-		return params
-	}
-	for key, vals := range values {
-		if len(vals) > 0 {
-			params[key] = vals[0]
-		}
-	}
-	return params
 }
