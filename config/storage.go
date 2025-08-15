@@ -14,11 +14,11 @@ import (
 // CreateEventStorage creates a fully configured event storage with BEEF storage and publisher.
 //
 // If empty strings are provided, falls back to environment variables:
-//   - eventConnStr: EVENT_STORAGE env var (defaults to ./overlay.db)
-//   - beefConnStr: BEEF_STORAGE env var (defaults to ./beef_storage/)
-//   - redisURL: REDIS_URL env var (required for publisher)
+//   - eventURL: EVENT_STORAGE env var (defaults to ./overlay.db)
+//   - beefURL: BEEF_STORAGE env var (defaults to ./beef_storage/)
+//   - publisherURL: PUBLISHER_URL env var (required for publisher)
 //
-// The beefConnStr parameter can be:
+// The beefURL parameter can be:
 //   - A single connection string: "redis://localhost:6379"
 //   - A JSON array of connection strings: `["lru://100mb", "redis://localhost:6379", "junglebus://"]`
 //   - A comma-separated list: "lru://100mb,redis://localhost:6379,junglebus://"
@@ -38,51 +38,51 @@ import (
 //
 //  4. Use environment variables:
 //     CreateEventStorage("", "", "")
-func CreateEventStorage(eventConnStr, beefConnStr, redisURL string) (storage.EventDataStorage, error) {
-	// Parse beefConnStr to determine if it's a single string or array
-	var beefConnStrings []string
+func CreateEventStorage(eventURL, beefURL, publisherURL string) (storage.EventDataStorage, error) {
+	// Parse beefURL to determine if it's a single string or array
+	var beefURLStrings []string
 
-	if beefConnStr != "" {
+	if beefURL != "" {
 		// First try to parse as JSON array
-		if strings.HasPrefix(strings.TrimSpace(beefConnStr), "[") {
-			if err := json.Unmarshal([]byte(beefConnStr), &beefConnStrings); err != nil {
+		if strings.HasPrefix(strings.TrimSpace(beefURL), "[") {
+			if err := json.Unmarshal([]byte(beefURL), &beefURLStrings); err != nil {
 				return nil, fmt.Errorf("invalid JSON array for BEEF storage: %w", err)
 			}
-		} else if strings.Contains(beefConnStr, ",") {
+		} else if strings.Contains(beefURL, ",") {
 			// If it contains commas, split it
-			beefConnStrings = strings.Split(beefConnStr, ",")
+			beefURLStrings = strings.Split(beefURL, ",")
 			// Trim whitespace from each element
-			for i, s := range beefConnStrings {
-				beefConnStrings[i] = strings.TrimSpace(s)
+			for i, s := range beefURLStrings {
+				beefURLStrings[i] = strings.TrimSpace(s)
 			}
 		} else {
 			// Single connection string
-			beefConnStrings = []string{beefConnStr}
+			beefURLStrings = []string{beefURL}
 		}
 	}
 
 	// Create BEEF storage from connection strings (defaults to ./beef_storage/ if not set)
-	beefStorage, err := beef.CreateBeefStorage(beefConnStrings)
+	beefStorage, err := beef.CreateBeefStorage(beefURLStrings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create BEEF storage: %w", err)
 	}
 
-	// Get Redis URL for publisher
-	if redisURL == "" {
-		redisURL = os.Getenv("REDIS_URL")
-		if redisURL == "" {
-			return nil, fmt.Errorf("REDIS_URL not provided for publisher")
+	// Get publisher URL
+	if publisherURL == "" {
+		publisherURL = os.Getenv("PUBLISHER_URL")
+		if publisherURL == "" {
+			return nil, fmt.Errorf("PUBLISHER_URL not provided for publisher")
 		}
 	}
 
 	// Create publisher (always Redis for now)
-	publisher, err := publish.NewRedisPublish(redisURL)
+	publisher, err := publish.NewRedisPublish(publisherURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create publisher: %w", err)
 	}
 
 	// Create event storage from connection string (defaults to ./overlay.db if not set)
-	eventStorage, err := storage.CreateEventDataStorage(eventConnStr, beefStorage, publisher)
+	eventStorage, err := storage.CreateEventDataStorage(eventURL, beefStorage, publisher)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create event storage: %w", err)
 	}
