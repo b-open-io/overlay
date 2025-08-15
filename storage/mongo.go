@@ -706,6 +706,117 @@ func (s *MongoEventDataStorage) GetOutputData(ctx context.Context, outpoint *tra
 	return cleanData, nil
 }
 
+// FindOutputData returns outputs matching the given query criteria as OutputData objects
+func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error) {
+	// Build match pipeline
+	matchStage := bson.M{}
+
+	// Add event filtering
+	if question.Event != "" {
+		matchStage["events"] = question.Event
+	} else if len(question.Events) > 0 {
+		if question.JoinType != nil && *question.JoinType == JoinTypeIntersect {
+			// For intersection, all events must be present
+			matchStage["events"] = bson.M{"$all": question.Events}
+		} else {
+			// Default to union
+			matchStage["events"] = bson.M{"$in": question.Events}
+		}
+	}
+
+	// Add unspent filter
+	if question.UnspentOnly {
+		matchStage["spent"] = false
+	}
+
+	// Add score range filtering
+	scoreFilter := bson.M{}
+	if question.From > 0 {
+		if question.Reverse {
+			scoreFilter["$lte"] = question.From
+		} else {
+			scoreFilter["$gte"] = question.From
+		}
+	}
+	if question.Until > 0 {
+		if question.Reverse {
+			scoreFilter["$gte"] = question.Until
+		} else {
+			scoreFilter["$lte"] = question.Until
+		}
+	}
+	if len(scoreFilter) > 0 {
+		matchStage["score"] = scoreFilter
+	}
+
+	// Build aggregation pipeline
+	pipeline := []bson.M{
+		{"$match": matchStage},
+		{
+			"$project": bson.M{
+				"vout":     1,
+				"script":   1,
+				"satoshis": 1,
+				"data":     1,
+				"score":    1,
+			},
+		},
+	}
+
+	// Add sorting
+	if question.Reverse {
+		pipeline = append(pipeline, bson.M{"$sort": bson.M{"score": -1}})
+	} else {
+		pipeline = append(pipeline, bson.M{"$sort": bson.M{"score": 1}})
+	}
+
+	// Add limit
+	if question.Limit > 0 {
+		pipeline = append(pipeline, bson.M{"$limit": question.Limit})
+	}
+
+	cursor, err := s.DB.Collection("outputs").Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var results []*OutputData
+	for cursor.Next(ctx) {
+		var doc struct {
+			Vout     uint32      `bson:"vout"`
+			Script   []byte      `bson:"script"`
+			Satoshis uint64      `bson:"satoshis"`
+			Data     interface{} `bson:"data"`
+		}
+
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, err
+		}
+
+		result := &OutputData{
+			Vout:     doc.Vout,
+			Script:   doc.Script,
+			Satoshis: doc.Satoshis,
+		}
+
+		// Convert data through JSON to get clean types
+		if doc.Data != nil {
+			jsonBytes, err := json.Marshal(doc.Data)
+			if err == nil {
+				var cleanData interface{}
+				if err := json.Unmarshal(jsonBytes, &cleanData); err == nil {
+					result.Data = cleanData
+				}
+			}
+		}
+
+		results = append(results, result)
+	}
+
+	return results, cursor.Err()
+}
+
 
 
 

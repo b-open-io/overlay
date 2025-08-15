@@ -1197,6 +1197,119 @@ func (s *SQLiteEventDataStorage) GetOutputData(ctx context.Context, outpoint *tr
 	return data, nil
 }
 
+// FindOutputData returns outputs matching the given query criteria as OutputData objects
+func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error) {
+	var query strings.Builder
+	var args []interface{}
+
+	// Base query selecting OutputData fields
+	query.WriteString(`
+		SELECT DISTINCT o.vout, o.script, o.satoshis, o.data
+		FROM outputs o
+	`)
+
+	// Add event filtering if needed
+	if question.Event != "" || len(question.Events) > 0 {
+		query.WriteString(" JOIN output_events oe ON o.outpoint = oe.outpoint")
+	}
+
+	query.WriteString(" WHERE 1=1")
+
+	// Add event filters
+	if question.Event != "" {
+		query.WriteString(" AND oe.event = ?")
+		args = append(args, question.Event)
+	} else if len(question.Events) > 0 {
+		placeholders := make([]string, len(question.Events))
+		for i, event := range question.Events {
+			placeholders[i] = "?"
+			args = append(args, event)
+		}
+		
+		if question.JoinType != nil && *question.JoinType == JoinTypeIntersect {
+			// For intersection, we need all events to be present
+			query.WriteString(fmt.Sprintf(" AND oe.event IN (%s) GROUP BY o.outpoint HAVING COUNT(DISTINCT oe.event) = %d",
+				strings.Join(placeholders, ","), len(question.Events)))
+		} else {
+			// Default to union
+			query.WriteString(fmt.Sprintf(" AND oe.event IN (%s)", strings.Join(placeholders, ",")))
+		}
+	}
+
+	// Add unspent filter if needed
+	if question.UnspentOnly {
+		query.WriteString(" AND o.spent = 0")
+	}
+
+	// Add score range filtering
+	if question.From > 0 {
+		if question.Reverse {
+			query.WriteString(" AND o.score <= ?")
+		} else {
+			query.WriteString(" AND o.score >= ?")
+		}
+		args = append(args, question.From)
+	}
+
+	if question.Until > 0 {
+		if question.Reverse {
+			query.WriteString(" AND o.score >= ?")
+		} else {
+			query.WriteString(" AND o.score <= ?")
+		}
+		args = append(args, question.Until)
+	}
+
+	// Add ordering
+	if question.Reverse {
+		query.WriteString(" ORDER BY o.score DESC")
+	} else {
+		query.WriteString(" ORDER BY o.score ASC")
+	}
+
+	// Add limit
+	if question.Limit > 0 {
+		query.WriteString(" LIMIT ?")
+		args = append(args, question.Limit)
+	}
+
+	rows, err := s.rdb.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []*OutputData
+	for rows.Next() {
+		var vout uint32
+		var script []byte
+		var satoshis uint64
+		var dataJSON *string
+
+		if err := rows.Scan(&vout, &script, &satoshis, &dataJSON); err != nil {
+			return nil, err
+		}
+
+		result := &OutputData{
+			Vout:     vout,
+			Script:   script,
+			Satoshis: satoshis,
+		}
+
+		// Parse data if present
+		if dataJSON != nil && *dataJSON != "" {
+			var data interface{}
+			if err := json.Unmarshal([]byte(*dataJSON), &data); err == nil {
+				result.Data = data
+			}
+		}
+
+		results = append(results, result)
+	}
+
+	return results, rows.Err()
+}
+
 
 
 

@@ -772,6 +772,145 @@ func (s *RedisEventDataStorage) GetOutputData(ctx context.Context, outpoint *tra
 	return data, nil
 }
 
+// FindOutputData returns outputs matching the given query criteria as OutputData objects
+func (s *RedisEventDataStorage) FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error) {
+	// Determine score range
+	var minScore, maxScore string
+	if question.Reverse {
+		maxScore = fmt.Sprintf("%f", question.From)
+		if question.Until > 0 {
+			minScore = fmt.Sprintf("%f", question.Until)
+		} else {
+			minScore = "-inf"
+		}
+	} else {
+		minScore = fmt.Sprintf("%f", question.From)
+		if question.Until > 0 {
+			maxScore = fmt.Sprintf("%f", question.Until)
+		} else {
+			maxScore = "+inf"
+		}
+	}
+
+	var outpointStrs []string
+	var err error
+
+	// Handle different event query types
+	if question.Event != "" {
+		// Single event query
+		eventSetKey := "event:" + question.Event
+		if question.Reverse {
+			outpointStrs, err = s.DB.ZRevRangeByScore(ctx, eventSetKey, &redis.ZRangeBy{
+				Min: minScore,
+				Max: maxScore,
+			}).Result()
+		} else {
+			outpointStrs, err = s.DB.ZRangeByScore(ctx, eventSetKey, &redis.ZRangeBy{
+				Min: minScore,
+				Max: maxScore,
+			}).Result()
+		}
+		if err != nil {
+			return nil, err
+		}
+	} else if len(question.Events) > 0 {
+		// Multiple events query - need to handle join types
+		if question.JoinType == nil || *question.JoinType == JoinTypeUnion {
+			// Union: combine results from multiple event sets
+			outpointSet := make(map[string]bool)
+			for _, event := range question.Events {
+				eventSetKey := "event:" + event
+				var eventOutpoints []string
+				if question.Reverse {
+					eventOutpoints, err = s.DB.ZRevRangeByScore(ctx, eventSetKey, &redis.ZRangeBy{
+						Min: minScore,
+						Max: maxScore,
+					}).Result()
+				} else {
+					eventOutpoints, err = s.DB.ZRangeByScore(ctx, eventSetKey, &redis.ZRangeBy{
+						Min: minScore,
+						Max: maxScore,
+					}).Result()
+				}
+				if err != nil {
+					return nil, err
+				}
+				for _, op := range eventOutpoints {
+					outpointSet[op] = true
+				}
+			}
+			// Convert set to slice
+			for op := range outpointSet {
+				outpointStrs = append(outpointStrs, op)
+			}
+		} else {
+			// For intersection and difference, we'd need more complex Redis operations
+			// For now, return empty results for these complex queries
+			outpointStrs = []string{}
+		}
+	} else {
+		// No event filter - this is complex in Redis without scanning all keys
+		return []*OutputData{}, nil
+	}
+
+	// Apply limit
+	if question.Limit > 0 && len(outpointStrs) > question.Limit {
+		outpointStrs = outpointStrs[:question.Limit]
+	}
+
+	// Build OutputData results
+	var results []*OutputData
+	for _, outpointStr := range outpointStrs {
+		outpoint, err := transaction.OutpointFromString(outpointStr)
+		if err != nil {
+			continue // Skip invalid outpoints
+		}
+
+		// Check unspent filter if needed
+		if question.UnspentOnly {
+			if spent, err := s.DB.HExists(ctx, SpendsKey, outpointStr).Result(); err != nil || spent {
+				continue // Skip spent outputs
+			}
+		}
+
+		// Get the general output data
+		outputData, err := s.DB.HGetAll(ctx, outputKey(outpoint)).Result()
+		if err != nil || len(outputData) == 0 {
+			continue // Skip if no output data found
+		}
+
+		// Parse satoshis
+		var satoshis uint64
+		if satoshisStr, ok := outputData["st"]; ok {
+			satoshis, _ = strconv.ParseUint(satoshisStr, 10, 64)
+		}
+
+		// Parse script (stored as raw bytes, not base64)
+		var script []byte
+		if scriptStr, ok := outputData["sc"]; ok {
+			script = []byte(scriptStr)
+		}
+
+		// Get data
+		var data interface{}
+		dataKey := "data:" + outpointStr
+		if dataJSON, err := s.DB.Get(ctx, dataKey).Result(); err == nil && dataJSON != "" {
+			json.Unmarshal([]byte(dataJSON), &data)
+		}
+
+		result := &OutputData{
+			Vout:     outpoint.Index,
+			Data:     data,
+			Script:   script,
+			Satoshis: satoshis,
+		}
+
+		results = append(results, result)
+	}
+
+	return results, nil
+}
+
 
 
 

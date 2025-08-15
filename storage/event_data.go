@@ -56,6 +56,10 @@ type EventDataStorage interface {
 
 	// GetOutputData retrieves the data associated with a specific output
 	GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error)
+
+	// FindOutputData returns outputs matching the given query criteria as OutputData objects
+	// Supports paging with score-based 'from' parameter and can include spent outputs for history
+	FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error)
 }
 
 // EventQuestion defines query parameters for event-based lookups
