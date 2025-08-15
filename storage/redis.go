@@ -898,11 +898,24 @@ func (s *RedisEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 			json.Unmarshal([]byte(dataJSON), &data)
 		}
 
+		// Get the transaction ID for this output
+		txid := outpoint.Txid
+		
+		// Check if the output is spent to populate spend field
+		var spendTxid *chainhash.Hash
+		if spendTxidStr, err := s.DB.HGet(ctx, SpendsKey, outpointStr).Result(); err == nil && spendTxidStr != "" {
+			if parsedSpendTxid, err := chainhash.NewHashFromStr(spendTxidStr); err == nil {
+				spendTxid = parsedSpendTxid
+			}
+		}
+
 		result := &OutputData{
+			TxID:     &txid,
 			Vout:     outpoint.Index,
 			Data:     data,
 			Script:   script,
 			Satoshis: satoshis,
+			Spend:    spendTxid,
 		}
 
 		results = append(results, result)

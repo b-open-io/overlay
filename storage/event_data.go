@@ -12,11 +12,12 @@ import (
 
 // OutputData represents an input or output with its data
 type OutputData struct {
-	TxID     *chainhash.Hash `json:"txid,omitempty"` // Source transaction ID (only for inputs)
+	TxID     *chainhash.Hash `json:"txid,omitempty"` // Transaction ID (for inputs: source txid, for outputs: current txid)
 	Vout     uint32          `json:"vout"`
 	Data     interface{}     `json:"data,omitempty"`
 	Script   []byte          `json:"script"`
 	Satoshis uint64          `json:"satoshis"`
+	Spend    *chainhash.Hash `json:"spend,omitempty"` // Spending transaction ID (only populated if spent)
 }
 
 // TransactionData represents a transaction with its inputs and outputs

@@ -754,11 +754,13 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 		{"$match": matchStage},
 		{
 			"$project": bson.M{
-				"vout":     1,
-				"script":   1,
-				"satoshis": 1,
-				"data":     1,
-				"score":    1,
+				"outpoint":     1,
+				"vout":         1,
+				"script":       1,
+				"satoshis":     1,
+				"data":         1,
+				"score":        1,
+				"spending_txid": 1,
 			},
 		},
 	}
@@ -784,20 +786,38 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 	var results []*OutputData
 	for cursor.Next(ctx) {
 		var doc struct {
-			Vout     uint32      `bson:"vout"`
-			Script   []byte      `bson:"script"`
-			Satoshis uint64      `bson:"satoshis"`
-			Data     interface{} `bson:"data"`
+			Outpoint    string      `bson:"outpoint"`
+			Vout        uint32      `bson:"vout"`
+			Script      []byte      `bson:"script"`
+			Satoshis    uint64      `bson:"satoshis"`
+			Data        interface{} `bson:"data"`
+			SpendingTxid *string    `bson:"spending_txid"`
 		}
 
 		if err := cursor.Decode(&doc); err != nil {
 			return nil, err
 		}
 
+		// Parse outpoint to get txid
+		outpoint, err := transaction.OutpointFromString(doc.Outpoint)
+		if err != nil {
+			continue // Skip invalid outpoints
+		}
+
+		// Parse spending txid if present
+		var spendTxid *chainhash.Hash
+		if doc.SpendingTxid != nil && *doc.SpendingTxid != "" {
+			if parsedSpendTxid, err := chainhash.NewHashFromStr(*doc.SpendingTxid); err == nil {
+				spendTxid = parsedSpendTxid
+			}
+		}
+
 		result := &OutputData{
+			TxID:     &outpoint.Txid,
 			Vout:     doc.Vout,
 			Script:   doc.Script,
 			Satoshis: doc.Satoshis,
+			Spend:    spendTxid,
 		}
 
 		// Convert data through JSON to get clean types

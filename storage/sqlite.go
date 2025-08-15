@@ -1202,10 +1202,11 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 	var query strings.Builder
 	var args []interface{}
 
-	// Base query selecting OutputData fields
+	// Base query selecting OutputData fields including txid and spending txid
 	query.WriteString(`
-		SELECT DISTINCT o.vout, o.script, o.satoshis, o.data
+		SELECT DISTINCT o.outpoint, o.vout, o.script, o.satoshis, o.data, s.spending_txid
 		FROM outputs o
+		LEFT JOIN spends s ON o.outpoint = s.outpoint
 	`)
 
 	// Add event filtering if needed
@@ -1281,19 +1282,37 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 
 	var results []*OutputData
 	for rows.Next() {
+		var outpointStr string
 		var vout uint32
 		var script []byte
 		var satoshis uint64
 		var dataJSON *string
+		var spendingTxidStr *string
 
-		if err := rows.Scan(&vout, &script, &satoshis, &dataJSON); err != nil {
+		if err := rows.Scan(&outpointStr, &vout, &script, &satoshis, &dataJSON, &spendingTxidStr); err != nil {
 			return nil, err
 		}
 
+		// Parse outpoint to get txid
+		outpoint, err := transaction.OutpointFromString(outpointStr)
+		if err != nil {
+			continue // Skip invalid outpoints
+		}
+
+		// Parse spending txid if present
+		var spendTxid *chainhash.Hash
+		if spendingTxidStr != nil && *spendingTxidStr != "" {
+			if parsedSpendTxid, err := chainhash.NewHashFromStr(*spendingTxidStr); err == nil {
+				spendTxid = parsedSpendTxid
+			}
+		}
+
 		result := &OutputData{
+			TxID:     &outpoint.Txid,
 			Vout:     vout,
 			Script:   script,
 			Satoshis: satoshis,
+			Spend:    spendTxid,
 		}
 
 		// Parse data if present
