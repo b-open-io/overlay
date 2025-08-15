@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/publish"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
 	"github.com/bsv-blockchain/go-sdk/transaction"
+	"github.com/redis/go-redis/v9"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -25,9 +25,9 @@ type MongoEventDataStorage struct {
 	DB *mongo.Database
 }
 
-// Methods GetBeefStorage and GetPublisher are inherited from BaseEventDataStorage
+// GetBeefStorage is inherited from BaseEventDataStorage
 
-func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, pub publish.Publisher) (*MongoEventDataStorage, error) {
+func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, pubRedis *redis.Client) (*MongoEventDataStorage, error) {
 	// Parse the connection string to extract database name
 	clientOpts := options.Client().ApplyURI(connString)
 
@@ -124,7 +124,7 @@ func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, pub
 	}
 
 	return &MongoEventDataStorage{
-		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pub),
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pubRedis),
 		DB:                   db,
 	}, nil
 }
@@ -144,8 +144,8 @@ func (s *MongoEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 		return err
 	}
 
-	if s.pub != nil {
-		s.pub.Publish(ctx, utxo.Topic, base64.StdEncoding.EncodeToString(utxo.Beef))
+	if s.pubRedis != nil {
+		s.pubRedis.Publish(ctx, utxo.Topic, base64.StdEncoding.EncodeToString(utxo.Beef))
 	}
 
 	return nil
@@ -544,11 +544,11 @@ func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transa
 	}
 
 	// Publish events if publisher is available
-	if s.pub != nil {
+	if s.pubRedis != nil {
 		outpointStr := outpoint.String()
 		for _, event := range events {
 			// Publish event with outpoint string as the message
-			if err := s.pub.Publish(ctx, event, outpointStr); err != nil {
+			if err := s.pubRedis.Publish(ctx, event, outpointStr).Err(); err != nil {
 				// Log error but don't fail the operation
 				// Publishing is best-effort
 				continue
@@ -730,322 +730,14 @@ func (s *MongoEventDataStorage) GetOutputData(ctx context.Context, outpoint *tra
 	return cleanData, nil
 }
 
-// Queue Management Methods Implementation for MongoDB
 
-// ZAdd adds members with scores to a sorted set
-func (s *MongoEventDataStorage) ZAdd(ctx context.Context, key string, members ...ZMember) error {
-	if len(members) == 0 {
-		return nil
-	}
 
-	// Use bulk write for efficiency when adding multiple members
-	models := make([]mongo.WriteModel, len(members))
-	for i, m := range members {
-		filter := bson.M{
-			"key":    key,
-			"member": m.Member,
-		}
-		update := bson.M{
-			"$set": bson.M{
-				"key":    key,
-				"member": m.Member,
-				"score":  m.Score,
-			},
-		}
-		models[i] = mongo.NewUpdateOneModel().
-			SetFilter(filter).
-			SetUpdate(update).
-			SetUpsert(true)
-	}
 
-	_, err := s.DB.Collection("sorted_sets").BulkWrite(ctx, models)
-	return err
-}
 
-// ZRem removes members from a sorted set
-func (s *MongoEventDataStorage) ZRem(ctx context.Context, key string, members ...string) error {
-	if len(members) == 0 {
-		return nil
-	}
 
-	filter := bson.M{
-		"key":    key,
-		"member": bson.M{"$in": members},
-	}
 
-	_, err := s.DB.Collection("sorted_sets").DeleteMany(ctx, filter)
-	return err
-}
 
-// ZScore returns the score of a member in a sorted set
-func (s *MongoEventDataStorage) ZScore(ctx context.Context, key string, member string) (float64, error) {
-	filter := bson.M{
-		"key":    key,
-		"member": member,
-	}
 
-	var result struct {
-		Score float64 `bson:"score"`
-	}
 
-	err := s.DB.Collection("sorted_sets").FindOne(ctx, filter).Decode(&result)
-	if err == mongo.ErrNoDocuments {
-		return 0, nil // Return 0 for non-existent member
-	}
 
-	return result.Score, err
-}
 
-// ZRange returns members in a sorted set by score range (ascending)
-func (s *MongoEventDataStorage) ZRange(ctx context.Context, key string, min, max float64, offset, count int64) ([]ZMember, error) {
-	filter := bson.M{
-		"key": key,
-		"score": bson.M{
-			"$gte": min,
-			"$lte": max,
-		},
-	}
-
-	findOpts := options.Find().
-		SetSort(bson.D{{Key: "score", Value: 1}, {Key: "member", Value: 1}}).
-		SetSkip(offset)
-
-	if count > 0 {
-		findOpts.SetLimit(count)
-	}
-
-	cursor, err := s.DB.Collection("sorted_sets").Find(ctx, filter, findOpts)
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(ctx)
-
-	var members []ZMember
-	for cursor.Next(ctx) {
-		var doc struct {
-			Member string  `bson:"member"`
-			Score  float64 `bson:"score"`
-		}
-		if err := cursor.Decode(&doc); err != nil {
-			return nil, err
-		}
-		members = append(members, ZMember{
-			Score:  doc.Score,
-			Member: doc.Member,
-		})
-	}
-
-	return members, cursor.Err()
-}
-
-// ZRevRange returns members in a sorted set by score range (descending)
-func (s *MongoEventDataStorage) ZRevRange(ctx context.Context, key string, max, min float64, offset, count int64) ([]ZMember, error) {
-	filter := bson.M{
-		"key": key,
-		"score": bson.M{
-			"$gte": min,
-			"$lte": max,
-		},
-	}
-
-	findOpts := options.Find().
-		SetSort(bson.D{{Key: "score", Value: -1}, {Key: "member", Value: -1}}).
-		SetSkip(offset)
-
-	if count > 0 {
-		findOpts.SetLimit(count)
-	}
-
-	cursor, err := s.DB.Collection("sorted_sets").Find(ctx, filter, findOpts)
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(ctx)
-
-	var members []ZMember
-	for cursor.Next(ctx) {
-		var doc struct {
-			Member string  `bson:"member"`
-			Score  float64 `bson:"score"`
-		}
-		if err := cursor.Decode(&doc); err != nil {
-			return nil, err
-		}
-		members = append(members, ZMember{
-			Score:  doc.Score,
-			Member: doc.Member,
-		})
-	}
-
-	return members, cursor.Err()
-}
-
-// SAdd adds members to a set
-func (s *MongoEventDataStorage) SAdd(ctx context.Context, key string, members ...string) error {
-	if len(members) == 0 {
-		return nil
-	}
-
-	filter := bson.M{"_id": key}
-	update := bson.M{
-		"$addToSet": bson.M{
-			"members": bson.M{"$each": members},
-		},
-	}
-
-	_, err := s.DB.Collection("sets").UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true))
-	return err
-}
-
-// SRem removes members from a set
-func (s *MongoEventDataStorage) SRem(ctx context.Context, key string, members ...string) error {
-	if len(members) == 0 {
-		return nil
-	}
-
-	filter := bson.M{"_id": key}
-	update := bson.M{
-		"$pull": bson.M{
-			"members": bson.M{"$in": members},
-		},
-	}
-
-	_, err := s.DB.Collection("sets").UpdateOne(ctx, filter, update)
-	return err
-}
-
-// SMembers returns all members of a set
-func (s *MongoEventDataStorage) SMembers(ctx context.Context, key string) ([]string, error) {
-	filter := bson.M{"_id": key}
-
-	var result struct {
-		Members []string `bson:"members"`
-	}
-
-	err := s.DB.Collection("sets").FindOne(ctx, filter).Decode(&result)
-	if err == mongo.ErrNoDocuments {
-		return []string{}, nil // Return empty slice for non-existent set
-	}
-
-	return result.Members, err
-}
-
-// HSet sets a field in a hash
-func (s *MongoEventDataStorage) HSet(ctx context.Context, key string, field string, value interface{}) error {
-	// Convert value to a format that can be stored
-	var storedValue interface{}
-	switch v := value.(type) {
-	case string, int, int64, uint64, float64, bool:
-		storedValue = v
-	default:
-		// For complex types, store as JSON string
-		data, err := json.Marshal(value)
-		if err != nil {
-			return err
-		}
-		storedValue = string(data)
-	}
-
-	filter := bson.M{"_id": key}
-	update := bson.M{
-		"$set": bson.M{
-			"fields." + field: storedValue,
-		},
-	}
-
-	_, err := s.DB.Collection("hashes").UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true))
-	return err
-}
-
-// HGet gets a field from a hash
-func (s *MongoEventDataStorage) HGet(ctx context.Context, key string, field string) (string, error) {
-	filter := bson.M{"_id": key}
-	projection := bson.M{"fields." + field: 1}
-
-	var result bson.M
-	err := s.DB.Collection("hashes").FindOne(ctx, filter, options.FindOne().SetProjection(projection)).Decode(&result)
-	if err == mongo.ErrNoDocuments {
-		return "", nil // Return empty string for non-existent field
-	}
-	if err != nil {
-		return "", err
-	}
-
-	// Navigate to the field value
-	if fields, ok := result["fields"].(bson.M); ok {
-		if val, ok := fields[field]; ok {
-			return fmt.Sprintf("%v", val), nil
-		}
-	}
-
-	return "", nil // Field doesn't exist
-}
-
-// HMSet sets multiple fields in a hash
-func (s *MongoEventDataStorage) HMSet(ctx context.Context, key string, fields map[string]interface{}) error {
-	if len(fields) == 0 {
-		return nil
-	}
-
-	// Build update document
-	setFields := bson.M{}
-	for field, value := range fields {
-		// Convert value to a format that can be stored
-		var storedValue interface{}
-		switch v := value.(type) {
-		case string, int, int64, uint64, float64, bool:
-			storedValue = v
-		default:
-			// For complex types, store as JSON string
-			data, err := json.Marshal(value)
-			if err != nil {
-				return err
-			}
-			storedValue = string(data)
-		}
-		setFields["fields."+field] = storedValue
-	}
-
-	filter := bson.M{"_id": key}
-	update := bson.M{"$set": setFields}
-
-	_, err := s.DB.Collection("hashes").UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true))
-	return err
-}
-
-// HGetAll gets all fields from a hash
-func (s *MongoEventDataStorage) HGetAll(ctx context.Context, key string) (map[string]interface{}, error) {
-	filter := bson.M{"_id": key}
-
-	var result struct {
-		Fields bson.M `bson:"fields"`
-	}
-
-	err := s.DB.Collection("hashes").FindOne(ctx, filter).Decode(&result)
-	if err == mongo.ErrNoDocuments {
-		return make(map[string]interface{}), nil // Return empty map for non-existent hash
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert BSON map to interface map, parsing JSON strings
-	output := make(map[string]interface{})
-	for k, v := range result.Fields {
-		// Check if value is a JSON string (for complex types)
-		if strVal, ok := v.(string); ok {
-			var parsed interface{}
-			if err := json.Unmarshal([]byte(strVal), &parsed); err == nil {
-				output[k] = parsed
-			} else {
-				// If not JSON, use the string value directly
-				output[k] = strVal
-			}
-		} else {
-			// For non-string values, use directly
-			output[k] = v
-		}
-	}
-
-	return output, nil
-}

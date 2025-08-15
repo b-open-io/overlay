@@ -16,10 +16,7 @@
 // EventDataStorage Interface:
 //
 // All storage backends implement the EventDataStorage interface which extends
-// engine.Storage with Redis-like operations for queue management:
-//   - Sorted sets (ZAdd, ZRange, ZScore, ZRem) for priority queues
-//   - Sets (SAdd, SMembers, SRem) for whitelists and blacklists
-//   - Hashes (HSet, HGet, HMSet, HGetAll) for configuration and state
+// engine.Storage with event-based querying and data management.
 //
 // Storage implementations handle:
 //   - Output insertion and updates
@@ -27,7 +24,7 @@
 //   - Block height updates
 //   - Topic membership management
 //   - Applied transaction tracking
-//   - Queue management operations
+//   - Event management and querying
 //
 // Example Usage:
 //
@@ -44,11 +41,8 @@
 //	// Find outputs for a topic
 //	outputs, err := storage.FindUTXOsForTopic(ctx, "my-topic", 0, 100)
 //
-//	// Use queue management operations
-//	err = storage.ZAdd(ctx, "processing-queue", storage.ZMember{
-//	    Score: 850000.000000123,
-//	    Member: "tx1",
-//	})
+//	// Save events for an output
+//	err = storage.SaveEvents(ctx, outpoint, []string{"event1", "event2"}, 850000, 123, eventData)
 //
 //	// Create SQLite storage with EventDataStorage interface
 //	sqliteStorage, err := storage.NewSQLiteEventDataStorage(

@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/publish"
+	"github.com/redis/go-redis/v9"
 )
 
 // CreateEventDataStorage creates the appropriate EventDataStorage implementation
@@ -20,7 +20,7 @@ import (
 //   - ./overlay.db (inferred as SQLite)
 //
 // If no connection string is provided, defaults to ./overlay.db
-func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage, publisher publish.Publisher) (EventDataStorage, error) {
+func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage, pubRedis *redis.Client) (EventDataStorage, error) {
 	// If no connection string provided, try EVENT_STORAGE environment variable
 	if connectionString == "" {
 		connectionString = os.Getenv("EVENT_STORAGE")
@@ -33,11 +33,11 @@ func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage,
 	// Detect storage type from connection string
 	switch {
 	case strings.HasPrefix(connectionString, "redis://"):
-		return NewRedisEventDataStorage(connectionString, beefStore, publisher)
+		return NewRedisEventDataStorage(connectionString, beefStore, pubRedis)
 
 	case strings.HasPrefix(connectionString, "mongodb://"), strings.HasPrefix(connectionString, "mongo://"):
 		// MongoDB driver will extract database name from the connection string
-		return NewMongoEventDataStorage(connectionString, beefStore, publisher)
+		return NewMongoEventDataStorage(connectionString, beefStore, pubRedis)
 
 	case strings.HasPrefix(connectionString, "sqlite://"):
 		// Remove sqlite:// prefix (can be sqlite:// or sqlite:///path)
@@ -46,18 +46,18 @@ func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage,
 		if path == "" {
 			path = "./overlay.db"
 		}
-		return NewSQLiteEventDataStorage(path, beefStore, publisher)
+		return NewSQLiteEventDataStorage(path, beefStore, pubRedis)
 
 	case strings.HasSuffix(connectionString, ".db"), strings.HasSuffix(connectionString, ".sqlite"):
 		// Looks like a SQLite database file
-		return NewSQLiteEventDataStorage(connectionString, beefStore, publisher)
+		return NewSQLiteEventDataStorage(connectionString, beefStore, pubRedis)
 
 	case filepath.IsAbs(connectionString) || strings.HasPrefix(connectionString, "./") || strings.HasPrefix(connectionString, "../"):
 		// Looks like a filesystem path - assume SQLite
 		if !strings.HasSuffix(connectionString, ".db") {
 			connectionString = connectionString + "/overlay.db"
 		}
-		return NewSQLiteEventDataStorage(connectionString, beefStore, publisher)
+		return NewSQLiteEventDataStorage(connectionString, beefStore, pubRedis)
 
 	default:
 		return nil, fmt.Errorf("unable to determine storage type from connection string: %s", connectionString)

@@ -1,22 +1,22 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/publish"
 	"github.com/b-open-io/overlay/storage"
+	"github.com/redis/go-redis/v9"
 )
 
-// CreateEventStorage creates a fully configured event storage with BEEF storage and optional publisher.
+// CreateEventStorage creates a fully configured event storage with BEEF storage and optional Redis client.
 //
-// If empty strings are provided, falls back to environment variables:
-//   - eventURL: EVENTS_URL env var (defaults to ./overlay.db)
-//   - beefURL: BEEF_URL env var (defaults to ./beef_storage/)
-//   - pubsubURL: PUBSUB_URL env var (optional - if not provided, no events will be published)
+// Parameters:
+//   - eventURL: Event storage connection string (e.g., "redis://localhost:6379", "./overlay.db")
+//   - beefURL: BEEF storage connection string(s) (can be hierarchical)
+//   - redisURL: Redis connection string for pub/sub and queue operations (optional)
 //
 // The beefURL parameter can be:
 //   - A single connection string: "redis://localhost:6379"
@@ -36,9 +36,9 @@ import (
 //  3. SQLite for events, filesystem for BEEF (good for development):
 //     CreateEventStorage("./overlay.db", "./beef_storage/", "redis://localhost:6379")
 //
-//  4. Use environment variables:
-//     CreateEventStorage("", "", "")
-func CreateEventStorage(eventURL, beefURL, pubsubURL string) (storage.EventDataStorage, error) {
+//  4. Minimal development setup:
+//     CreateEventStorage("./overlay.db", "./beef_storage/", "")
+func CreateEventStorage(eventURL, beefURL, redisURL string) (storage.EventDataStorage, error) {
 	// Parse beefURL to determine if it's a single string or array
 	var beefURLStrings []string
 
@@ -67,24 +67,25 @@ func CreateEventStorage(eventURL, beefURL, pubsubURL string) (storage.EventDataS
 		return nil, fmt.Errorf("failed to create BEEF storage: %w", err)
 	}
 
-	// Create publisher if URL is provided (optional)
-	var publisher publish.Publisher
-	if pubsubURL == "" {
-		pubsubURL = os.Getenv("PUBSUB_URL")
-	}
-	
-	if pubsubURL != "" {
-		// Create publisher (actually PubSub but storage only needs Publisher interface)
-		var err error
-		publisher, err = publish.NewRedisPublish(pubsubURL)
+	// Create Redis client if URL is provided (optional)
+	var redisClient *redis.Client
+	if redisURL != "" {
+		opts, err := redis.ParseURL(redisURL)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create publisher: %w", err)
+			return nil, fmt.Errorf("failed to parse Redis URL: %w", err)
+		}
+		redisClient = redis.NewClient(opts)
+		
+		// Test connection
+		ctx := context.Background()
+		if err := redisClient.Ping(ctx).Err(); err != nil {
+			return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 		}
 	}
-	// If pubsubURL is empty, publisher remains nil and no events will be published
+	// If redisURL is empty, redisClient remains nil and no Redis operations will be available
 
-	// Create event storage from connection string (defaults to ./overlay.db if not set)
-	eventStorage, err := storage.CreateEventDataStorage(eventURL, beefStorage, publisher)
+	// Create event storage from connection string
+	eventStorage, err := storage.CreateEventDataStorage(eventURL, beefStorage, redisClient)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create event storage: %w", err)
 	}

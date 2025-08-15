@@ -4,10 +4,10 @@ import (
 	"context"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/publish"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/transaction"
+	"github.com/redis/go-redis/v9"
 )
 
 // OutputData represents an input or output with its data
@@ -26,12 +26,6 @@ type TransactionData struct {
 	Outputs []*OutputData  `json:"outputs"`
 }
 
-// ZMember represents a member of a sorted set with its score
-type ZMember struct {
-	Score  float64
-	Member string
-}
-
 // EventDataStorage extends the base Storage interface with event data and lookup capabilities
 // This consolidates all database operations into a single storage interface
 type EventDataStorage interface {
@@ -40,8 +34,9 @@ type EventDataStorage interface {
 	// GetBeefStorage returns the underlying BEEF storage implementation
 	GetBeefStorage() beef.BeefStorage
 
-	// GetPublisher returns the underlying publisher implementation
-	GetPublisher() publish.Publisher
+	// GetRedisClient returns the underlying Redis client for direct access
+	// Returns nil if the storage backend is not Redis
+	GetRedisClient() *redis.Client
 
 	// Block Data Methods
 	// GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height
@@ -61,25 +56,6 @@ type EventDataStorage interface {
 
 	// GetOutputData retrieves the data associated with a specific output
 	GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error)
-
-	// Queue Management Methods (Database-independent Redis-like operations)
-	// Sorted Set Operations
-	ZAdd(ctx context.Context, key string, members ...ZMember) error
-	ZRem(ctx context.Context, key string, members ...string) error
-	ZScore(ctx context.Context, key string, member string) (float64, error)                              // Get score for a member
-	ZRange(ctx context.Context, key string, min, max float64, offset, count int64) ([]ZMember, error)    // Ascending by score
-	ZRevRange(ctx context.Context, key string, max, min float64, offset, count int64) ([]ZMember, error) // Descending by score
-
-	// Set Operations
-	SAdd(ctx context.Context, key string, members ...string) error
-	SRem(ctx context.Context, key string, members ...string) error
-	SMembers(ctx context.Context, key string) ([]string, error)
-
-	// Hash Operations
-	HSet(ctx context.Context, key string, field string, value interface{}) error
-	HGet(ctx context.Context, key string, field string) (string, error)
-	HMSet(ctx context.Context, key string, fields map[string]interface{}) error
-	HGetAll(ctx context.Context, key string) (map[string]interface{}, error)
 }
 
 // EventQuestion defines query parameters for event-based lookups

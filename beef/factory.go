@@ -14,7 +14,7 @@ import (
 // and the last creates the bottom-level fallback (checked last).
 //
 // Supported formats:
-//   - lru://100mb or lru://1gb (in-memory LRU cache with size limit)
+//   - lru://?size=100mb or lru://?size=1gb (in-memory LRU cache with size limit)
 //   - redis://localhost:6379?ttl=24h (Redis with optional TTL parameter)
 //   - mongodb://localhost:27017/beef
 //   - sqlite:///path/to/beef.db or sqlite://beef.db
@@ -25,7 +25,7 @@ import (
 //
 // Example:
 //
-//	CreateBeefStorage([]string{"lru://100mb", "redis://localhost:6379", "sqlite://beef.db", "junglebus://"})
+//	CreateBeefStorage([]string{"lru://?size=100mb", "redis://localhost:6379", "sqlite://beef.db", "junglebus://"})
 //	Creates: LRU -> Redis -> SQLite -> JungleBus
 func CreateBeefStorage(connectionStrings []string) (BeefStorage, error) {
 	// Require at least one connection string
@@ -44,8 +44,17 @@ func CreateBeefStorage(connectionStrings []string) (BeefStorage, error) {
 		// Create the appropriate storage with current storage as fallback
 		switch {
 		case strings.HasPrefix(connectionString, "lru://"):
-			// Parse size from lru://100mb or lru://1gb format
-			sizeStr := strings.TrimPrefix(connectionString, "lru://")
+			// Parse size from query parameter: lru://?size=100mb
+			u, err := url.Parse(connectionString)
+			if err != nil {
+				return nil, fmt.Errorf("invalid LRU URL format: %w", err)
+			}
+			
+			sizeStr := u.Query().Get("size")
+			if sizeStr == "" {
+				return nil, fmt.Errorf("LRU size not specified, use format: lru://?size=100mb")
+			}
+			
 			size, err := ParseSize(sizeStr)
 			if err != nil {
 				return nil, fmt.Errorf("invalid LRU size format %s: %w", sizeStr, err)

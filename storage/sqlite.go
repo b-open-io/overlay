@@ -11,13 +11,13 @@ import (
 	"time"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/publish"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/redis/go-redis/v9"
 )
 
 type SQLiteEventDataStorage struct {
@@ -26,12 +26,12 @@ type SQLiteEventDataStorage struct {
 	rdb *sql.DB
 }
 
-// Methods GetBeefStorage and GetPublisher are inherited from BaseEventDataStorage
+// GetBeefStorage is inherited from BaseEventDataStorage
 
-func NewSQLiteEventDataStorage(dbPath string, beefStore beef.BeefStorage, pub publish.Publisher) (*SQLiteEventDataStorage, error) {
+func NewSQLiteEventDataStorage(dbPath string, beefStore beef.BeefStorage, pubRedis *redis.Client) (*SQLiteEventDataStorage, error) {
 	var err error
 	s := &SQLiteEventDataStorage{
-		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pub),
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pubRedis),
 	}
 
 	// Write database connection
@@ -258,8 +258,8 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 	}
 
 	// Publish if configured
-	if s.pub != nil {
-		s.pub.Publish(ctx, utxo.Topic, base64.StdEncoding.EncodeToString(utxo.Beef))
+	if s.pubRedis != nil {
+		s.pubRedis.Publish(ctx, utxo.Topic, base64.StdEncoding.EncodeToString(utxo.Beef))
 	}
 
 	return nil
@@ -931,10 +931,10 @@ func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 	}
 
 	// Publish events if publisher is available
-	if s.pub != nil {
+	if s.pubRedis != nil {
 		for _, event := range events {
 			// Publish event with outpoint string as the message
-			if err := s.pub.Publish(ctx, event, outpointStr); err != nil {
+			if err := s.pubRedis.Publish(ctx, event, outpointStr).Err(); err != nil {
 				// Log error but don't fail the operation
 				// Publishing is best-effort
 				continue
@@ -1197,353 +1197,14 @@ func (s *SQLiteEventDataStorage) GetOutputData(ctx context.Context, outpoint *tr
 	return data, nil
 }
 
-// Queue Management Methods Implementation for SQLite
 
-// ZAdd adds members with scores to a sorted set
-func (s *SQLiteEventDataStorage) ZAdd(ctx context.Context, key string, members ...ZMember) error {
-	if len(members) == 0 {
-		return nil
-	}
 
-	tx, err := s.wdb.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 
-	stmt, err := tx.Prepare(`
-		INSERT OR REPLACE INTO sorted_sets (key, member, score) 
-		VALUES (?, ?, ?)
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
 
-	for _, m := range members {
-		if _, err := stmt.Exec(key, m.Member, m.Score); err != nil {
-			return err
-		}
-	}
 
-	return tx.Commit()
-}
 
-// ZRem removes members from a sorted set
-func (s *SQLiteEventDataStorage) ZRem(ctx context.Context, key string, members ...string) error {
-	if len(members) == 0 {
-		return nil
-	}
 
-	tx, err := s.wdb.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 
-	stmt, err := tx.Prepare(`DELETE FROM sorted_sets WHERE key = ? AND member = ?`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
 
-	for _, member := range members {
-		if _, err := stmt.Exec(key, member); err != nil {
-			return err
-		}
-	}
 
-	return tx.Commit()
-}
 
-// ZScore returns the score of a member in a sorted set
-func (s *SQLiteEventDataStorage) ZScore(ctx context.Context, key string, member string) (float64, error) {
-	var score float64
-	err := s.rdb.QueryRowContext(ctx, `
-		SELECT score FROM sorted_sets WHERE key = ? AND member = ?
-	`, key, member).Scan(&score)
-
-	if err == sql.ErrNoRows {
-		return 0, nil // Return 0 for non-existent member
-	}
-
-	return score, err
-}
-
-// ZRange returns members in a sorted set by score range (ascending)
-func (s *SQLiteEventDataStorage) ZRange(ctx context.Context, key string, min, max float64, offset, count int64) ([]ZMember, error) {
-	var query string
-	var args []interface{}
-
-	if count > 0 {
-		query = `
-			SELECT member, score FROM sorted_sets 
-			WHERE key = ? AND score >= ? AND score <= ?
-			ORDER BY score ASC, member ASC
-			LIMIT ? OFFSET ?
-		`
-		args = []interface{}{key, min, max, count, offset}
-	} else {
-		query = `
-			SELECT member, score FROM sorted_sets 
-			WHERE key = ? AND score >= ? AND score <= ?
-			ORDER BY score ASC, member ASC
-		`
-		args = []interface{}{key, min, max}
-	}
-
-	rows, err := s.rdb.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var members []ZMember
-	for rows.Next() {
-		var member string
-		var score float64
-		if err := rows.Scan(&member, &score); err != nil {
-			return nil, err
-		}
-		members = append(members, ZMember{
-			Score:  score,
-			Member: member,
-		})
-	}
-
-	return members, rows.Err()
-}
-
-// ZRevRange returns members in a sorted set by score range (descending)
-func (s *SQLiteEventDataStorage) ZRevRange(ctx context.Context, key string, max, min float64, offset, count int64) ([]ZMember, error) {
-	var query string
-	var args []interface{}
-
-	if count > 0 {
-		query = `
-			SELECT member, score FROM sorted_sets 
-			WHERE key = ? AND score >= ? AND score <= ?
-			ORDER BY score DESC, member DESC
-			LIMIT ? OFFSET ?
-		`
-		args = []interface{}{key, min, max, count, offset}
-	} else {
-		query = `
-			SELECT member, score FROM sorted_sets 
-			WHERE key = ? AND score >= ? AND score <= ?
-			ORDER BY score DESC, member DESC
-		`
-		args = []interface{}{key, min, max}
-	}
-
-	rows, err := s.rdb.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var members []ZMember
-	for rows.Next() {
-		var member string
-		var score float64
-		if err := rows.Scan(&member, &score); err != nil {
-			return nil, err
-		}
-		members = append(members, ZMember{
-			Score:  score,
-			Member: member,
-		})
-	}
-
-	return members, rows.Err()
-}
-
-// SAdd adds members to a set
-func (s *SQLiteEventDataStorage) SAdd(ctx context.Context, key string, members ...string) error {
-	if len(members) == 0 {
-		return nil
-	}
-
-	tx, err := s.wdb.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO sets (key, member) VALUES (?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, member := range members {
-		if _, err := stmt.Exec(key, member); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
-
-// SRem removes members from a set
-func (s *SQLiteEventDataStorage) SRem(ctx context.Context, key string, members ...string) error {
-	if len(members) == 0 {
-		return nil
-	}
-
-	tx, err := s.wdb.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare(`DELETE FROM sets WHERE key = ? AND member = ?`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, member := range members {
-		if _, err := stmt.Exec(key, member); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
-
-// SMembers returns all members of a set
-func (s *SQLiteEventDataStorage) SMembers(ctx context.Context, key string) ([]string, error) {
-	rows, err := s.rdb.QueryContext(ctx, `SELECT member FROM sets WHERE key = ?`, key)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var members []string
-	for rows.Next() {
-		var member string
-		if err := rows.Scan(&member); err != nil {
-			return nil, err
-		}
-		members = append(members, member)
-	}
-
-	return members, rows.Err()
-}
-
-// HSet sets a field in a hash
-func (s *SQLiteEventDataStorage) HSet(ctx context.Context, key string, field string, value interface{}) error {
-	// Convert value to string
-	var valStr string
-	switch v := value.(type) {
-	case string:
-		valStr = v
-	case int, int64, uint64:
-		valStr = fmt.Sprintf("%v", v)
-	default:
-		// For complex types, use JSON encoding
-		data, err := json.Marshal(value)
-		if err != nil {
-			return err
-		}
-		valStr = string(data)
-	}
-
-	_, err := s.wdb.ExecContext(ctx, `
-		INSERT OR REPLACE INTO hashes (key, field, value) 
-		VALUES (?, ?, ?)
-	`, key, field, valStr)
-
-	return err
-}
-
-// HGet gets a field from a hash
-func (s *SQLiteEventDataStorage) HGet(ctx context.Context, key string, field string) (string, error) {
-	var value string
-	err := s.rdb.QueryRowContext(ctx, `
-		SELECT value FROM hashes WHERE key = ? AND field = ?
-	`, key, field).Scan(&value)
-
-	if err == sql.ErrNoRows {
-		return "", nil // Return empty string for non-existent field
-	}
-
-	return value, err
-}
-
-// HMSet sets multiple fields in a hash
-func (s *SQLiteEventDataStorage) HMSet(ctx context.Context, key string, fields map[string]interface{}) error {
-	if len(fields) == 0 {
-		return nil
-	}
-
-	tx, err := s.wdb.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT OR REPLACE INTO hashes (key, field, value) 
-		VALUES (?, ?, ?)
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for field, value := range fields {
-		// Convert value to string
-		var valStr string
-		switch v := value.(type) {
-		case string:
-			valStr = v
-		case int, int64, uint64, float64, bool:
-			valStr = fmt.Sprintf("%v", v)
-		default:
-			// For complex types, use JSON encoding
-			data, err := json.Marshal(value)
-			if err != nil {
-				return err
-			}
-			valStr = string(data)
-		}
-
-		if _, err := stmt.ExecContext(ctx, key, field, valStr); err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
-
-// HGetAll gets all fields from a hash
-func (s *SQLiteEventDataStorage) HGetAll(ctx context.Context, key string) (map[string]interface{}, error) {
-	rows, err := s.rdb.QueryContext(ctx, `
-		SELECT field, value FROM hashes WHERE key = ?
-	`, key)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	result := make(map[string]interface{})
-	for rows.Next() {
-		var field, value string
-		if err := rows.Scan(&field, &value); err != nil {
-			return nil, err
-		}
-
-		// Try to parse as JSON first (for complex types)
-		var parsed interface{}
-		if err := json.Unmarshal([]byte(value), &parsed); err == nil {
-			result[field] = parsed
-		} else {
-			// If not JSON, use the string value directly
-			result[field] = value
-		}
-	}
-
-	return result, rows.Err()
-}
