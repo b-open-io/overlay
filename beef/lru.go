@@ -7,13 +7,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 )
 
 type LRUBeefStorage struct {
-	maxBytes    int64 // Maximum total size in bytes
-	currentSize int64 // Current total size in bytes
+	maxBytes    int64        // Maximum total size in bytes
+	currentSize atomic.Int64 // Current total size in bytes (atomic for lock-free reads)
 	cache       map[chainhash.Hash][]byte
 	lruIndex    map[chainhash.Hash]*list.Element // Maps txid to list element for O(1) access
 	lru         *list.List                       // List of chainhash.Hash for LRU ordering
@@ -87,8 +88,9 @@ func (t *LRUBeefStorage) addToCache(txid chainhash.Hash, beefBytes []byte) {
 		}
 		oldSize := int64(len(oldBeef))
 
-		// Update size tracking
-		t.currentSize = t.currentSize - oldSize + beefSize
+		// Update size tracking atomically
+		sizeDelta := beefSize - oldSize
+		t.currentSize.Add(sizeDelta)
 
 		// Make a copy and update the cache
 		beefCopy := make([]byte, len(beefBytes))
@@ -108,21 +110,21 @@ func (t *LRUBeefStorage) addToCache(txid chainhash.Hash, beefBytes []byte) {
 	elem := t.lru.PushFront(txid)
 	t.cache[txid] = beefCopy
 	t.lruIndex[txid] = elem
-	t.currentSize += beefSize
+	t.currentSize.Add(beefSize)
 
 	// Evict oldest entries if over capacity
 	t.evictIfNeeded()
 }
 
 func (t *LRUBeefStorage) evictIfNeeded() {
-	for t.currentSize > t.maxBytes && t.lru.Len() > 0 {
+	for t.currentSize.Load() > t.maxBytes && t.lru.Len() > 0 {
 		oldest := t.lru.Back()
 		if oldest != nil {
 			txid := oldest.Value.(chainhash.Hash)
 
 			// Get the size of the beef we're about to evict
 			if beefBytes, exists := t.cache[txid]; exists {
-				t.currentSize -= int64(len(beefBytes))
+				t.currentSize.Add(-int64(len(beefBytes)))
 				delete(t.cache, txid)
 			}
 
@@ -135,9 +137,16 @@ func (t *LRUBeefStorage) evictIfNeeded() {
 
 // Stats returns cache statistics
 func (t *LRUBeefStorage) Stats() (currentBytes int64, maxBytes int64, entryCount int) {
+	// currentSize can be read atomically without a lock
+	currentBytes = t.currentSize.Load()
+	maxBytes = t.maxBytes
+	
+	// Only need lock for reading the LRU list length
 	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.currentSize, t.maxBytes, t.lru.Len()
+	entryCount = t.lru.Len()
+	t.mu.RUnlock()
+	
+	return currentBytes, maxBytes, entryCount
 }
 
 // ParseSize parses size strings like "100mb", "1gb", "512KB" into bytes
