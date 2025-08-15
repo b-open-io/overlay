@@ -726,7 +726,8 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 
 	// Add unspent filter
 	if question.UnspentOnly {
-		matchStage["spent"] = false
+		// If looking for unspent outputs, spend field must be nil
+		matchStage["spend"] = nil
 	}
 
 	// Add score range filtering
@@ -754,13 +755,13 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 		{"$match": matchStage},
 		{
 			"$project": bson.M{
-				"outpoint":     1,
-				"vout":         1,
-				"script":       1,
-				"satoshis":     1,
-				"data":         1,
-				"score":        1,
-				"spending_txid": 1,
+				"outpoint": 1,
+				"vout":     1,
+				"script":   1,
+				"satoshis": 1,
+				"data":     1,
+				"score":    1,
+				"spend":    1,
 			},
 		},
 	}
@@ -786,12 +787,12 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 	var results []*OutputData
 	for cursor.Next(ctx) {
 		var doc struct {
-			Outpoint    string      `bson:"outpoint"`
-			Vout        uint32      `bson:"vout"`
-			Script      []byte      `bson:"script"`
-			Satoshis    uint64      `bson:"satoshis"`
-			Data        interface{} `bson:"data"`
-			SpendingTxid *string    `bson:"spending_txid"`
+			Outpoint string      `bson:"outpoint"`
+			Vout     uint32      `bson:"vout"`
+			Script   []byte      `bson:"script"`
+			Satoshis uint64      `bson:"satoshis"`
+			Data     interface{} `bson:"data"`
+			Spend    *string     `bson:"spend"`
 		}
 
 		if err := cursor.Decode(&doc); err != nil {
@@ -806,8 +807,8 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 
 		// Parse spending txid if present
 		var spendTxid *chainhash.Hash
-		if doc.SpendingTxid != nil && *doc.SpendingTxid != "" {
-			if parsedSpendTxid, err := chainhash.NewHashFromHex(*doc.SpendingTxid); err == nil {
+		if doc.Spend != nil && *doc.Spend != "" {
+			if parsedSpendTxid, err := chainhash.NewHashFromHex(*doc.Spend); err == nil {
 				spendTxid = parsedSpendTxid
 			}
 		}
