@@ -12,7 +12,7 @@ import (
 
 // OutputData represents an input or output with its data
 type OutputData struct {
-	TxID     *chainhash.Hash `json:"txid,omitempty"`     // Source transaction ID (only for inputs)
+	TxID     *chainhash.Hash `json:"txid,omitempty"` // Source transaction ID (only for inputs)
 	Vout     uint32          `json:"vout"`
 	Data     interface{}     `json:"data,omitempty"`
 	Script   []byte          `json:"script"`
@@ -26,47 +26,72 @@ type TransactionData struct {
 	Outputs []*OutputData  `json:"outputs"`
 }
 
+// ZMember represents a member of a sorted set with its score
+type ZMember struct {
+	Score  float64
+	Member string
+}
+
 // EventDataStorage extends the base Storage interface with event data and lookup capabilities
 // This consolidates all database operations into a single storage interface
 type EventDataStorage interface {
 	engine.Storage
-	
+
 	// GetBeefStorage returns the underlying BEEF storage implementation
 	GetBeefStorage() beef.BeefStorage
-	
+
 	// GetPublisher returns the underlying publisher implementation
 	GetPublisher() publish.Publisher
-	
+
 	// Block Data Methods
 	// GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height
 	// Returns transaction structure with inputs/outputs but no protocol-specific data fields
 	GetTransactionsByTopicAndHeight(ctx context.Context, topic string, height uint32) ([]*TransactionData, error)
-	
+
 	// Event Management Methods
 	// SaveEvents associates multiple events with a single output, storing arbitrary data
 	SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64, data interface{}) error
-	
+
 	// FindEvents returns all events associated with a given outpoint
 	FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error)
-	
+
 	// Event Query Methods
 	// LookupOutpoints returns outpoints matching the given query criteria
 	LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error)
-	
+
 	// GetOutputData retrieves the data associated with a specific output
 	GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error)
+
+	// Queue Management Methods (Database-independent Redis-like operations)
+	// Sorted Set Operations
+	ZAdd(ctx context.Context, key string, members ...ZMember) error
+	ZRem(ctx context.Context, key string, members ...string) error
+	ZScore(ctx context.Context, key string, member string) (float64, error)                              // Get score for a member
+	ZRange(ctx context.Context, key string, min, max float64, offset, count int64) ([]ZMember, error)    // Ascending by score
+	ZRevRange(ctx context.Context, key string, max, min float64, offset, count int64) ([]ZMember, error) // Descending by score
+
+	// Set Operations
+	SAdd(ctx context.Context, key string, members ...string) error
+	SRem(ctx context.Context, key string, members ...string) error
+	SMembers(ctx context.Context, key string) ([]string, error)
+
+	// Hash Operations
+	HSet(ctx context.Context, key string, field string, value interface{}) error
+	HGet(ctx context.Context, key string, field string) (string, error)
+	HMSet(ctx context.Context, key string, fields map[string]interface{}) error
+	HGetAll(ctx context.Context, key string) (map[string]interface{}, error)
 }
 
 // EventQuestion defines query parameters for event-based lookups
 type EventQuestion struct {
-	Event       string     `json:"event"`
-	Events      []string   `json:"events"`
-	JoinType    *JoinType  `json:"join"`
-	From        float64    `json:"from"`
-	Until       float64    `json:"until"`
-	Limit       int        `json:"limit"`
-	UnspentOnly bool       `json:"unspentOnly"`
-	Reverse     bool       `json:"rev"`
+	Event       string    `json:"event"`
+	Events      []string  `json:"events"`
+	JoinType    *JoinType `json:"join"`
+	From        float64   `json:"from"`
+	Until       float64   `json:"until"`
+	Limit       int       `json:"limit"`
+	UnspentOnly bool      `json:"unspentOnly"`
+	Reverse     bool      `json:"rev"`
 }
 
 // JoinType defines how multiple events are combined in queries
@@ -84,6 +109,6 @@ const (
 // OutpointResult contains the result of an outpoint lookup
 type OutpointResult struct {
 	Outpoint *transaction.Outpoint `json:"outpoint"`
-	Score    float64              `json:"score"`
-	Data     interface{}          `json:"data,omitempty"`
+	Score    float64               `json:"score"`
+	Data     interface{}           `json:"data,omitempty"`
 }

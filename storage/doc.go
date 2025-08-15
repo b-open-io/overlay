@@ -27,10 +27,10 @@
 //	    beefStore,
 //	    publisher
 //	)
-//	
+//
 //	// Insert an output
 //	err = storage.InsertOutput(ctx, output)
-//	
+//
 //	// Find outputs for a topic
 //	outputs, err := storage.FindUTXOsForTopic(ctx, "my-topic", 0, 100)
 //

@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	
+
 	"github.com/b-open-io/overlay/beef"
 	"github.com/b-open-io/overlay/publish"
 )
@@ -29,16 +29,16 @@ func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage,
 			connectionString = "./overlay.db"
 		}
 	}
-	
+
 	// Detect storage type from connection string
 	switch {
 	case strings.HasPrefix(connectionString, "redis://"):
 		return NewRedisEventDataStorage(connectionString, beefStore, publisher)
-		
+
 	case strings.HasPrefix(connectionString, "mongodb://"), strings.HasPrefix(connectionString, "mongo://"):
 		// MongoDB driver will extract database name from the connection string
 		return NewMongoEventDataStorage(connectionString, beefStore, publisher)
-		
+
 	case strings.HasPrefix(connectionString, "sqlite://"):
 		// Remove sqlite:// prefix (can be sqlite:// or sqlite:///path)
 		path := strings.TrimPrefix(connectionString, "sqlite://")
@@ -47,18 +47,18 @@ func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage,
 			path = "./overlay.db"
 		}
 		return NewSQLiteEventDataStorage(path, beefStore, publisher)
-		
+
 	case strings.HasSuffix(connectionString, ".db"), strings.HasSuffix(connectionString, ".sqlite"):
 		// Looks like a SQLite database file
 		return NewSQLiteEventDataStorage(connectionString, beefStore, publisher)
-		
+
 	case filepath.IsAbs(connectionString) || strings.HasPrefix(connectionString, "./") || strings.HasPrefix(connectionString, "../"):
 		// Looks like a filesystem path - assume SQLite
 		if !strings.HasSuffix(connectionString, ".db") {
 			connectionString = connectionString + "/overlay.db"
 		}
 		return NewSQLiteEventDataStorage(connectionString, beefStore, publisher)
-		
+
 	default:
 		return nil, fmt.Errorf("unable to determine storage type from connection string: %s", connectionString)
 	}

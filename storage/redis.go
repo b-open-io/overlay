@@ -248,15 +248,6 @@ func (s *RedisEventDataStorage) DeleteOutput(ctx context.Context, outpoint *tran
 	return err
 }
 
-// func (s *RedisEventDataStorage) DeleteOutputs(ctx context.Context, outpoints []*transaction.Outpoint, topic string) error {
-// 	for _, outpoint := range outpoints {
-// 		if err := s.DeleteOutput(ctx, outpoint, topic); err != nil {
-// 			return err
-// 		}
-// 	}
-// 	return nil
-// }
-
 func (s *RedisEventDataStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *transaction.Outpoint, topic string, beef []byte) error {
 	if _, _, spendTxid, err := transaction.ParseBeef(beef); err != nil {
 		return err
@@ -424,12 +415,6 @@ func (s *RedisEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Cont
 		if err != nil {
 			continue
 		}
-
-		// Get the output topic data (currently not needed for transaction data)
-		// _, err = s.DB.HGetAll(ctx, OutputTopicKey(outpoint, topic)).Result()
-		// if err != nil {
-		// 	continue
-		// }
 
 		// Get the general output data
 		outputData, err := s.DB.HGetAll(ctx, outputKey(outpoint)).Result()
@@ -780,4 +765,225 @@ func (s *RedisEventDataStorage) GetOutputData(ctx context.Context, outpoint *tra
 	}
 
 	return data, nil
+}
+
+// Queue Management Methods Implementation
+
+// ZAdd adds members with scores to a sorted set
+func (s *RedisEventDataStorage) ZAdd(ctx context.Context, key string, members ...ZMember) error {
+	if len(members) == 0 {
+		return nil
+	}
+
+	z := make([]redis.Z, len(members))
+	for i, m := range members {
+		z[i] = redis.Z{
+			Score:  m.Score,
+			Member: m.Member,
+		}
+	}
+
+	return s.DB.ZAdd(ctx, key, z...).Err()
+}
+
+// ZRem removes members from a sorted set
+func (s *RedisEventDataStorage) ZRem(ctx context.Context, key string, members ...string) error {
+	if len(members) == 0 {
+		return nil
+	}
+
+	// Convert strings to []interface{} for Redis client
+	ifaces := make([]interface{}, len(members))
+	for i, m := range members {
+		ifaces[i] = m
+	}
+
+	return s.DB.ZRem(ctx, key, ifaces...).Err()
+}
+
+// ZScore returns the score of a member in a sorted set
+func (s *RedisEventDataStorage) ZScore(ctx context.Context, key string, member string) (float64, error) {
+	score, err := s.DB.ZScore(ctx, key, member).Result()
+	if err == redis.Nil {
+		return 0, nil // Return 0 for non-existent member
+	}
+	return score, err
+}
+
+// ZRange returns members in a sorted set by score range (ascending)
+func (s *RedisEventDataStorage) ZRange(ctx context.Context, key string, min, max float64, offset, count int64) ([]ZMember, error) {
+	opt := &redis.ZRangeBy{
+		Min:    fmt.Sprintf("%f", min),
+		Max:    fmt.Sprintf("%f", max),
+		Offset: offset,
+	}
+
+	// count <= 0 means no limit
+	if count > 0 {
+		opt.Count = count
+	}
+
+	result, err := s.DB.ZRangeByScoreWithScores(ctx, key, opt).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	members := make([]ZMember, len(result))
+	for i, z := range result {
+		members[i] = ZMember{
+			Score:  z.Score,
+			Member: z.Member.(string),
+		}
+	}
+
+	return members, nil
+}
+
+// ZRevRange returns members in a sorted set by score range (descending)
+func (s *RedisEventDataStorage) ZRevRange(ctx context.Context, key string, max, min float64, offset, count int64) ([]ZMember, error) {
+	opt := &redis.ZRangeBy{
+		Min:    fmt.Sprintf("%f", min),
+		Max:    fmt.Sprintf("%f", max),
+		Offset: offset,
+	}
+
+	// count <= 0 means no limit
+	if count > 0 {
+		opt.Count = count
+	}
+
+	result, err := s.DB.ZRevRangeByScoreWithScores(ctx, key, opt).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	members := make([]ZMember, len(result))
+	for i, z := range result {
+		members[i] = ZMember{
+			Score:  z.Score,
+			Member: z.Member.(string),
+		}
+	}
+
+	return members, nil
+}
+
+// SAdd adds members to a set
+func (s *RedisEventDataStorage) SAdd(ctx context.Context, key string, members ...string) error {
+	if len(members) == 0 {
+		return nil
+	}
+
+	// Convert strings to []interface{} for Redis client
+	ifaces := make([]interface{}, len(members))
+	for i, m := range members {
+		ifaces[i] = m
+	}
+
+	return s.DB.SAdd(ctx, key, ifaces...).Err()
+}
+
+// SRem removes members from a set
+func (s *RedisEventDataStorage) SRem(ctx context.Context, key string, members ...string) error {
+	if len(members) == 0 {
+		return nil
+	}
+
+	// Convert strings to []interface{} for Redis client
+	ifaces := make([]interface{}, len(members))
+	for i, m := range members {
+		ifaces[i] = m
+	}
+
+	return s.DB.SRem(ctx, key, ifaces...).Err()
+}
+
+// SMembers returns all members of a set
+func (s *RedisEventDataStorage) SMembers(ctx context.Context, key string) ([]string, error) {
+	return s.DB.SMembers(ctx, key).Result()
+}
+
+// HSet sets a field in a hash
+func (s *RedisEventDataStorage) HSet(ctx context.Context, key string, field string, value interface{}) error {
+	// Convert value to string
+	var valStr string
+	switch v := value.(type) {
+	case string:
+		valStr = v
+	case int, int64, uint64:
+		valStr = fmt.Sprintf("%v", v)
+	default:
+		// For complex types, use JSON encoding
+		data, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		valStr = string(data)
+	}
+
+	return s.DB.HSet(ctx, key, field, valStr).Err()
+}
+
+// HGet gets a field from a hash
+func (s *RedisEventDataStorage) HGet(ctx context.Context, key string, field string) (string, error) {
+	result, err := s.DB.HGet(ctx, key, field).Result()
+	if err == redis.Nil {
+		return "", nil // Return empty string for non-existent field
+	}
+	return result, err
+}
+
+// HMSet sets multiple fields in a hash
+func (s *RedisEventDataStorage) HMSet(ctx context.Context, key string, fields map[string]interface{}) error {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	// Convert map to format expected by Redis
+	args := make([]interface{}, 0, len(fields)*2)
+	for field, value := range fields {
+		args = append(args, field)
+
+		// Convert value to string
+		var valStr string
+		switch v := value.(type) {
+		case string:
+			valStr = v
+		case int, int64, uint64, float64, bool:
+			valStr = fmt.Sprintf("%v", v)
+		default:
+			// For complex types, use JSON encoding
+			data, err := json.Marshal(value)
+			if err != nil {
+				return err
+			}
+			valStr = string(data)
+		}
+		args = append(args, valStr)
+	}
+
+	return s.DB.HMSet(ctx, key, args...).Err()
+}
+
+// HGetAll gets all fields from a hash
+func (s *RedisEventDataStorage) HGetAll(ctx context.Context, key string) (map[string]interface{}, error) {
+	result, err := s.DB.HGetAll(ctx, key).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert string map to interface{} map
+	output := make(map[string]interface{}, len(result))
+	for k, v := range result {
+		// Try to parse as JSON first (for complex types)
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(v), &parsed); err == nil {
+			output[k] = parsed
+		} else {
+			// If not JSON, use the string value directly
+			output[k] = v
+		}
+	}
+
+	return output, nil
 }

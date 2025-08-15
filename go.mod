@@ -8,7 +8,7 @@ require (
 	github.com/bsv-blockchain/go-sdk v1.2.6
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-sqlite3 v1.14.30
-	github.com/redis/go-redis/v9 v9.11.0
+	github.com/redis/go-redis/v9 v9.12.1
 	go.mongodb.org/mongo-driver/v2 v2.2.2
 )
 

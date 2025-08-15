@@ -19,10 +19,10 @@
 //
 //	// Create Redis BEEF storage
 //	beefStore, err := beef.NewRedisBeefStorage("redis://localhost:6379")
-//	
+//
 //	// Save BEEF data
 //	err = beefStore.SaveBeef(ctx, &txid, beefBytes)
-//	
+//
 //	// Load BEEF data
 //	beefData, err := beefStore.LoadBeef(ctx, &txid)
 //

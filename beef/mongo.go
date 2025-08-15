@@ -5,8 +5,6 @@ import (
 	"io"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
-	"github.com/bsv-blockchain/go-sdk/transaction"
-	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker/headers_client"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -14,28 +12,29 @@ import (
 )
 
 type MongoBeefStorage struct {
-	BaseBeefStorage
-	db     *mongo.Database
-	bucket *mongo.GridFSBucket
+	db       *mongo.Database
+	bucket   *mongo.GridFSBucket
+	fallback BeefStorage
 }
 
-func NewMongoBeefStorage(connString string) (*MongoBeefStorage, error) {
+func NewMongoBeefStorage(connString string, fallback BeefStorage) (*MongoBeefStorage, error) {
 	client, err := mongo.Connect(nil, options.Client().ApplyURI(connString))
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Extract database name from the connection string
 	// MongoDB connection strings can include the database as: mongodb://host/database
 	dbName := "beef" // default
 	if cs, err := connstring.ParseAndValidate(connString); err == nil && cs.Database != "" {
 		dbName = cs.Database
 	}
-	
+
 	db := client.Database(dbName)
 	return &MongoBeefStorage{
-		db:     db,
-		bucket: db.GridFSBucket(),
+		db:       db,
+		bucket:   db.GridFSBucket(),
+		fallback: fallback,
 	}, nil
 }
 
@@ -46,11 +45,18 @@ func (t *MongoBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) (
 			return io.ReadAll(downloadStream)
 		}
 	}
-	beefBytes, err := t.BaseBeefStorage.LoadBeef(ctx, txid)
-	if err == nil {
-		t.SaveBeef(ctx, txid, beefBytes)
+
+	// Not found in MongoDB, try fallback
+	if t.fallback != nil {
+		beefBytes, err := t.fallback.LoadBeef(ctx, txid)
+		if err == nil {
+			// Cache the result from fallback
+			t.SaveBeef(ctx, txid, beefBytes)
+		}
+		return beefBytes, err
 	}
-	return beefBytes, err
+
+	return nil, ErrNotFound
 }
 
 func (t *MongoBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
@@ -68,15 +74,4 @@ func (t *MongoBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, b
 		_, err = uploadStream.Write(beefBytes)
 		return err
 	}
-}
-
-// LoadTx loads a transaction from BEEF storage with optional merkle path validation
-func (t *MongoBeefStorage) LoadTx(ctx context.Context, txid *chainhash.Hash, chaintracker *headers_client.Client) (*transaction.Transaction, error) {
-	// Load BEEF from storage - this will use MongoBeefStorage.LoadBeef
-	beefBytes, err := t.LoadBeef(ctx, txid)
-	if err != nil {
-		return nil, err
-	}
-
-	return LoadTxFromBeef(ctx, beefBytes, txid, chaintracker)
 }

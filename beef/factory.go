@@ -2,82 +2,155 @@ package beef
 
 import (
 	"fmt"
-	"os"
+	"net/url"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
-// CreateBeefStorage creates the appropriate BeefStorage implementation
-// from a connection string. Auto-detects the storage type from the URL scheme.
+// CreateBeefStorage creates a hierarchical stack of BeefStorage implementations
+// from a slice of connection strings. Each storage layer uses the next as its fallback.
+//
+// The first connection string creates the top-level storage (checked first),
+// and the last creates the bottom-level fallback (checked last).
 //
 // Supported formats:
-//   - redis://localhost:6379
+//   - lru://100mb or lru://1gb (in-memory LRU cache with size limit)
+//   - redis://localhost:6379?ttl=24h (Redis with optional TTL parameter)
 //   - mongodb://localhost:27017/beef
 //   - sqlite:///path/to/beef.db or sqlite://beef.db
 //   - file:///path/to/storage/dir
+//   - junglebus:// (fetches from JungleBus API)
 //   - ./beef.db (inferred as SQLite)
 //   - ./beef_storage/ (inferred as filesystem)
 //
-// If no connection string is provided, defaults to ./beef_storage/ directory
-func CreateBeefStorage(connectionString string) (BeefStorage, error) {
-	// If no connection string provided, try BEEF_STORAGE environment variable
-	if connectionString == "" {
-		connectionString = os.Getenv("BEEF_STORAGE")
-		if connectionString == "" {
-			// Default to local filesystem storage
-			connectionString = "./beef_storage"
+// Example:
+//
+//	CreateBeefStorage([]string{"lru://100mb", "redis://localhost:6379", "sqlite://beef.db", "junglebus://"})
+//	Creates: LRU -> Redis -> SQLite -> JungleBus
+func CreateBeefStorage(connectionStrings []string) (BeefStorage, error) {
+	// Require at least one connection string
+	if len(connectionStrings) == 0 {
+		return nil, fmt.Errorf("no storage configurations provided")
+	}
+
+	// Build the storage stack from bottom to top
+	// Start with nil fallback for the bottom layer
+	var storage BeefStorage
+
+	// Process connection strings in reverse order (bottom to top)
+	for i := len(connectionStrings) - 1; i >= 0; i-- {
+		connectionString := strings.TrimSpace(connectionStrings[i])
+
+		// Create the appropriate storage with current storage as fallback
+		switch {
+		case strings.HasPrefix(connectionString, "lru://"):
+			// Parse size from lru://100mb or lru://1gb format
+			sizeStr := strings.TrimPrefix(connectionString, "lru://")
+			size, err := ParseSize(sizeStr)
+			if err != nil {
+				return nil, fmt.Errorf("invalid LRU size format %s: %w", sizeStr, err)
+			}
+			storage = NewLRUBeefStorage(size, storage)
+
+		case strings.HasPrefix(connectionString, "redis://"):
+			// TTL is now parsed inside NewRedisBeefStorage
+			var err error
+			storage, err = NewRedisBeefStorage(connectionString, storage)
+			if err != nil {
+				return nil, err
+			}
+
+		case strings.HasPrefix(connectionString, "mongodb://"), strings.HasPrefix(connectionString, "mongo://"):
+			var err error
+			storage, err = NewMongoBeefStorage(connectionString, storage)
+			if err != nil {
+				return nil, err
+			}
+
+		case strings.HasPrefix(connectionString, "junglebus://"):
+			// Convert junglebus://host to https://host
+			// If no host specified (just "junglebus://"), use default
+			host := strings.TrimPrefix(connectionString, "junglebus://")
+			if host == "" {
+				host = "junglebus.gorillapool.io"
+			}
+			junglebusURL := "https://" + host
+			storage = NewJunglebusBeefStorage(junglebusURL, storage)
+
+		case strings.HasPrefix(connectionString, "sqlite://"):
+			// Remove sqlite:// prefix (can be sqlite:// or sqlite:///path)
+			path := strings.TrimPrefix(connectionString, "sqlite://")
+			path = strings.TrimPrefix(path, "/") // Handle sqlite:///path format
+			if path == "" {
+				path = "./beef.db"
+			}
+			var err error
+			storage, err = NewSQLiteBeefStorage(path, storage)
+			if err != nil {
+				return nil, err
+			}
+
+		case strings.HasPrefix(connectionString, "file://"):
+			// Remove file:// prefix
+			path := strings.TrimPrefix(connectionString, "file://")
+			if path == "" {
+				path = "./beef_storage"
+			}
+			var err error
+			storage, err = NewFilesystemBeefStorage(path, storage)
+			if err != nil {
+				return nil, err
+			}
+
+		case strings.HasSuffix(connectionString, ".db"), strings.HasSuffix(connectionString, ".sqlite"):
+			// Looks like a SQLite database file
+			var err error
+			storage, err = NewSQLiteBeefStorage(connectionString, storage)
+			if err != nil {
+				return nil, err
+			}
+
+		case filepath.IsAbs(connectionString) || strings.HasPrefix(connectionString, "./") || strings.HasPrefix(connectionString, "../"):
+			// Looks like a filesystem path
+			// If it ends with a known DB extension, treat as SQLite
+			if strings.HasSuffix(connectionString, ".db") || strings.HasSuffix(connectionString, ".sqlite") {
+				var err error
+				storage, err = NewSQLiteBeefStorage(connectionString, storage)
+				if err != nil {
+					return nil, err
+				}
+			} else {
+				// Otherwise treat as filesystem storage directory
+				var err error
+				storage, err = NewFilesystemBeefStorage(connectionString, storage)
+				if err != nil {
+					return nil, err
+				}
+			}
+
+		default:
+			return nil, fmt.Errorf("unable to determine storage type from connection string: %s", connectionString)
 		}
 	}
-	
-	// Parse cache TTL from environment if using Redis
-	var cacheTTL time.Duration
-	if ttlStr := os.Getenv("BEEF_CACHE_TTL"); ttlStr != "" {
-		if ttl, err := time.ParseDuration(ttlStr); err == nil {
-			cacheTTL = ttl
+
+	if storage == nil {
+		return nil, fmt.Errorf("no valid storage configurations provided")
+	}
+
+	return storage, nil
+}
+
+// parseQueryParams parses URL query parameters into a map
+func parseQueryParams(query string) map[string]string {
+	params := make(map[string]string)
+	values, err := url.ParseQuery(query)
+	if err != nil {
+		return params
+	}
+	for key, vals := range values {
+		if len(vals) > 0 {
+			params[key] = vals[0]
 		}
 	}
-	
-	// Detect storage type from connection string
-	switch {
-	case strings.HasPrefix(connectionString, "redis://"):
-		return NewRedisBeefStorage(connectionString, cacheTTL)
-		
-	case strings.HasPrefix(connectionString, "mongodb://"), strings.HasPrefix(connectionString, "mongo://"):
-		// MongoDB driver will extract database name from the connection string
-		return NewMongoBeefStorage(connectionString)
-		
-	case strings.HasPrefix(connectionString, "sqlite://"):
-		// Remove sqlite:// prefix (can be sqlite:// or sqlite:///path)
-		path := strings.TrimPrefix(connectionString, "sqlite://")
-		path = strings.TrimPrefix(path, "/") // Handle sqlite:///path format
-		if path == "" {
-			path = "./beef.db"
-		}
-		return NewSQLiteBeefStorage(path)
-		
-	case strings.HasPrefix(connectionString, "file://"):
-		// Remove file:// prefix
-		path := strings.TrimPrefix(connectionString, "file://")
-		if path == "" {
-			path = "./beef_storage"
-		}
-		return NewFilesystemBeefStorage(path)
-		
-	case strings.HasSuffix(connectionString, ".db"), strings.HasSuffix(connectionString, ".sqlite"):
-		// Looks like a SQLite database file
-		return NewSQLiteBeefStorage(connectionString)
-		
-	case filepath.IsAbs(connectionString) || strings.HasPrefix(connectionString, "./") || strings.HasPrefix(connectionString, "../"):
-		// Looks like a filesystem path
-		// If it ends with a known DB extension, treat as SQLite
-		if strings.HasSuffix(connectionString, ".db") || strings.HasSuffix(connectionString, ".sqlite") {
-			return NewSQLiteBeefStorage(connectionString)
-		}
-		// Otherwise treat as filesystem storage directory
-		return NewFilesystemBeefStorage(connectionString)
-		
-	default:
-		return nil, fmt.Errorf("unable to determine storage type from connection string: %s", connectionString)
-	}
+	return params
 }
