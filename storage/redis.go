@@ -909,6 +909,12 @@ func (s *RedisEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 			}
 		}
 
+		// Get score from output data
+		var score float64
+		if scoreStr, ok := outputData["score"]; ok {
+			score, _ = strconv.ParseFloat(scoreStr, 64)
+		}
+
 		result := &OutputData{
 			TxID:     &txid,
 			Vout:     outpoint.Index,
@@ -916,6 +922,7 @@ func (s *RedisEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 			Script:   script,
 			Satoshis: satoshis,
 			Spend:    spendTxid,
+			Score:    score,
 		}
 
 		results = append(results, result)

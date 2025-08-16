@@ -1204,7 +1204,7 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 
 	// Base query selecting OutputData fields including txid and spending txid
 	query.WriteString(`
-		SELECT DISTINCT o.outpoint, o.vout, o.script, o.satoshis, o.data, s.spending_txid
+		SELECT DISTINCT o.outpoint, o.vout, o.script, o.satoshis, o.data, s.spending_txid, o.score
 		FROM outputs o
 		LEFT JOIN spends s ON o.outpoint = s.outpoint
 	`)
@@ -1288,8 +1288,9 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 		var satoshis uint64
 		var dataJSON *string
 		var spendingTxidStr *string
+		var score float64
 
-		if err := rows.Scan(&outpointStr, &vout, &script, &satoshis, &dataJSON, &spendingTxidStr); err != nil {
+		if err := rows.Scan(&outpointStr, &vout, &script, &satoshis, &dataJSON, &spendingTxidStr, &score); err != nil {
 			return nil, err
 		}
 
@@ -1313,6 +1314,7 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 			Script:   script,
 			Satoshis: satoshis,
 			Spend:    spendTxid,
+			Score:    score,
 		}
 
 		// Parse data if present

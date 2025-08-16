@@ -793,6 +793,7 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 			Satoshis uint64      `bson:"satoshis"`
 			Data     interface{} `bson:"data"`
 			Spend    *string     `bson:"spend"`
+			Score    float64     `bson:"score"`
 		}
 
 		if err := cursor.Decode(&doc); err != nil {
@@ -819,6 +820,7 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 			Script:   doc.Script,
 			Satoshis: doc.Satoshis,
 			Spend:    spendTxid,
+			Score:    doc.Score,
 		}
 
 		// Convert data through JSON to get clean types

@@ -18,6 +18,7 @@ type OutputData struct {
 	Script   []byte          `json:"script"`
 	Satoshis uint64          `json:"satoshis"`
 	Spend    *chainhash.Hash `json:"spend,omitempty"` // Spending transaction ID (only populated if spent)
+	Score    float64         `json:"score"`           // Sort score for ordering/pagination
 }
 
 // TransactionData represents a transaction with its inputs and outputs
