@@ -339,7 +339,7 @@ SQLite storage features:
 - WAL mode for concurrent reads/writes
 - Full ACID compliance
 - Embedded database (no server required)
-- Separate tables for sorted_sets, sets, and hashes
+- Event-based indexing with score-based pagination
 - Optimized for local development and smaller deployments
 
 ## BEEF Storage

@@ -152,20 +152,6 @@ func (s *SQLiteEventDataStorage) createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_output_rel_consuming ON output_relationships(consuming_outpoint, topic)`,
 		`CREATE INDEX IF NOT EXISTS idx_output_rel_consumed ON output_relationships(consumed_outpoint, topic)`,
 
-		// Queue Management Tables
-		`CREATE TABLE IF NOT EXISTS sorted_sets (
-			key TEXT NOT NULL,
-			member TEXT NOT NULL,
-			score REAL NOT NULL,
-			PRIMARY KEY (key, member)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_sorted_sets_score ON sorted_sets(key, score)`,
-
-		`CREATE TABLE IF NOT EXISTS sets (
-			key TEXT NOT NULL,
-			member TEXT NOT NULL,
-			PRIMARY KEY (key, member)
-		)`,
 
 		`CREATE TABLE IF NOT EXISTS hashes (
 			key TEXT NOT NULL,
