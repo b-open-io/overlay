@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -121,7 +120,7 @@ func (s *MongoEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 	}
 
 	if s.pubRedis != nil {
-		s.pubRedis.Publish(ctx, utxo.Topic, base64.StdEncoding.EncodeToString(utxo.Beef))
+		s.pubRedis.Publish(ctx, utxo.Topic, utxo.Outpoint.String())
 	}
 
 	return nil
@@ -839,15 +838,3 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 
 	return results, cursor.Err()
 }
-
-
-
-
-
-
-
-
-
-
-
-

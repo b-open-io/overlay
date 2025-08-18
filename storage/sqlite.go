@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -152,7 +151,6 @@ func (s *SQLiteEventDataStorage) createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_output_rel_consuming ON output_relationships(consuming_outpoint, topic)`,
 		`CREATE INDEX IF NOT EXISTS idx_output_rel_consumed ON output_relationships(consumed_outpoint, topic)`,
 
-
 		`CREATE TABLE IF NOT EXISTS hashes (
 			key TEXT NOT NULL,
 			field TEXT NOT NULL,
@@ -245,7 +243,7 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 
 	// Publish if configured
 	if s.pubRedis != nil {
-		s.pubRedis.Publish(ctx, utxo.Topic, base64.StdEncoding.EncodeToString(utxo.Beef))
+		s.pubRedis.Publish(ctx, utxo.Topic, utxo.Outpoint.String())
 	}
 
 	return nil
@@ -1212,7 +1210,7 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 			placeholders[i] = "?"
 			args = append(args, event)
 		}
-		
+
 		if question.JoinType != nil && *question.JoinType == JoinTypeIntersect {
 			// For intersection, we need all events to be present
 			query.WriteString(fmt.Sprintf(" AND oe.event IN (%s) GROUP BY o.outpoint HAVING COUNT(DISTINCT oe.event) = %d",
@@ -1316,15 +1314,3 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 
 	return results, rows.Err()
 }
-
-
-
-
-
-
-
-
-
-
-
-

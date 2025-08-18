@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -79,7 +78,7 @@ func (s *RedisEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 		}
 		// Publish event to Redis if publisher is configured
 		if s.pubRedis != nil {
-			s.pubRedis.Publish(ctx, utxo.Topic, base64.StdEncoding.EncodeToString(utxo.Beef))
+			s.pubRedis.Publish(ctx, utxo.Topic, utxo.Outpoint.String())
 		}
 		return nil
 	})
@@ -900,7 +899,7 @@ func (s *RedisEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 
 		// Get the transaction ID for this output
 		txid := outpoint.Txid
-		
+
 		// Check if the output is spent to populate spend field
 		var spendTxid *chainhash.Hash
 		if spendTxidStr, err := s.DB.HGet(ctx, SpendsKey, outpointStr).Result(); err == nil && spendTxidStr != "" {
@@ -930,15 +929,3 @@ func (s *RedisEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 
 	return results, nil
 }
-
-
-
-
-
-
-
-
-
-
-
-
