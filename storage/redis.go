@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -77,8 +78,10 @@ func (s *RedisEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 			return err
 		}
 		// Publish event to Redis if publisher is configured
-		if s.pubRedis != nil {
-			s.pubRedis.Publish(ctx, utxo.Topic, utxo.Outpoint.String())
+		if s.publisher != nil {
+			if err = s.publisher.Publish(ctx, utxo.Topic, utxo.Outpoint.String()); err != nil {
+				slog.Warn("failed to publish output event", "error", err, "topic", utxo.Topic, "outpoint", utxo.Outpoint.String())
+			}
 		}
 		return nil
 	})
@@ -579,10 +582,10 @@ func (s *RedisEventDataStorage) SaveEvents(ctx context.Context, outpoint *transa
 	}
 
 	// Publish events if publisher is available
-	if s.pubRedis != nil {
+	if s.publisher != nil {
 		for _, event := range events {
 			// Publish event with outpoint string as the message
-			if err := s.pubRedis.Publish(ctx, event, outpointStr).Err(); err != nil {
+			if err := s.publisher.Publish(ctx, event, outpointStr); err != nil {
 				// Log error but don't fail the operation
 				// Publishing is best-effort
 				continue
