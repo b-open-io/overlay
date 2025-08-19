@@ -16,7 +16,6 @@ import (
 // Supported formats:
 //   - lru://?size=100mb or lru://?size=1gb (in-memory LRU cache with size limit)
 //   - redis://localhost:6379?ttl=24h (Redis with optional TTL parameter)
-//   - mongodb://localhost:27017/beef
 //   - sqlite:///path/to/beef.db or sqlite://beef.db
 //   - file:///path/to/storage/dir
 //   - junglebus:// (fetches from JungleBus API)
@@ -65,13 +64,6 @@ func CreateBeefStorage(connectionStrings []string) (BeefStorage, error) {
 			// TTL is now parsed inside NewRedisBeefStorage
 			var err error
 			storage, err = NewRedisBeefStorage(connectionString, storage)
-			if err != nil {
-				return nil, err
-			}
-
-		case strings.HasPrefix(connectionString, "mongodb://"), strings.HasPrefix(connectionString, "mongo://"):
-			var err error
-			storage, err = NewMongoBeefStorage(connectionString, storage)
 			if err != nil {
 				return nil, err
 			}

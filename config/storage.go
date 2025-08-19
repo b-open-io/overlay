@@ -11,12 +11,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// CreateEventStorage creates a fully configured event storage with BEEF storage and optional Redis client.
+// CreateEventStorage creates a fully configured event storage with BEEF storage and optional PubSub.
 //
 // Parameters:
 //   - eventURL: Event storage connection string (e.g., "redis://localhost:6379", "./overlay.db")
 //   - beefURL: BEEF storage connection string(s) (can be hierarchical)
-//   - redisURL: Redis connection string for pub/sub and queue operations (optional)
+//   - pubsubURL: PubSub connection string (e.g., "redis://localhost:6379", "channels://")
 //
 // The beefURL parameter can be:
 //   - A single connection string: "redis://localhost:6379"
@@ -30,15 +30,15 @@ import (
 //  1. All Redis:
 //     CreateEventStorage("redis://localhost:6379", "redis://localhost:6379", "redis://localhost:6379")
 //
-//  2. MongoDB for events, hierarchical BEEF storage:
+//  2. MongoDB for events, hierarchical BEEF storage, Redis pubsub:
 //     CreateEventStorage("mongodb://localhost:27017/bsv21", `["lru://1gb", "redis://localhost:6379", "junglebus://"]`, "redis://localhost:6379")
 //
-//  3. SQLite for events, filesystem for BEEF (good for development):
-//     CreateEventStorage("./overlay.db", "./beef_storage/", "redis://localhost:6379")
+//  3. SQLite for events, filesystem for BEEF, channel pubsub:
+//     CreateEventStorage("./overlay.db", "./beef_storage/", "channels://")
 //
-//  4. Minimal development setup:
-//     CreateEventStorage("./overlay.db", "./beef_storage/", "")
-func CreateEventStorage(eventURL, beefURL, redisURL string) (storage.EventDataStorage, error) {
+//  4. Default no-dependency setup:
+//     CreateEventStorage("", "", "")  // Uses ./overlay.db, ./beef_storage/, channels://
+func CreateEventStorage(eventURL, beefURL, pubsubURL string) (storage.EventDataStorage, error) {
 	// Parse beefURL to determine if it's a single string or array
 	var beefURLStrings []string
 
@@ -69,23 +69,23 @@ func CreateEventStorage(eventURL, beefURL, redisURL string) (storage.EventDataSt
 
 	// Create Redis client if URL is provided (optional)
 	var redisClient *redis.Client
-	if redisURL != "" {
-		opts, err := redis.ParseURL(redisURL)
+	if pubsubURL != "" {
+		opts, err := redis.ParseURL(pubsubURL)
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse Redis URL: %w", err)
+			return nil, fmt.Errorf("failed to parse PubSub URL: %w", err)
 		}
 		redisClient = redis.NewClient(opts)
 		
 		// Test connection
 		ctx := context.Background()
 		if err := redisClient.Ping(ctx).Err(); err != nil {
-			return nil, fmt.Errorf("failed to connect to Redis: %w", err)
+			return nil, fmt.Errorf("failed to connect to PubSub Redis: %w", err)
 		}
 	}
-	// If redisURL is empty, redisClient remains nil and no Redis operations will be available
+	// If pubsubURL is empty, redisClient remains nil and no Redis operations will be available
 
-	// Create event storage from connection string
-	eventStorage, err := storage.CreateEventDataStorage(eventURL, beefStorage, redisClient)
+	// Create event storage from connection string  
+	eventStorage, err := storage.CreateEventDataStorage(eventURL, beefStorage, pubsubURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create event storage: %w", err)
 	}
