@@ -5,9 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	
+
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/publish"
+	"github.com/b-open-io/overlay/pubsub"
 )
 
 // CreateEventDataStorage creates the appropriate EventDataStorage implementation
@@ -20,7 +20,11 @@ import (
 //   - ./overlay.db (inferred as SQLite)
 //
 // If no connection string is provided, defaults to ./overlay.db
-func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage, publisher publish.Publisher) (EventDataStorage, error) {
+// The pubSubURL parameter is optional and specifies the pub/sub backend:
+//   - redis://localhost:6379 (for Redis pub/sub)
+//   - channels:// (for in-memory channel-based pub/sub)
+//   - "" (defaults to channels://)
+func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage, pubSubURL string) (EventDataStorage, error) {
 	// If no connection string provided, try EVENT_STORAGE environment variable
 	if connectionString == "" {
 		connectionString = os.Getenv("EVENT_STORAGE")
@@ -29,16 +33,42 @@ func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage,
 			connectionString = "./overlay.db"
 		}
 	}
-	
-	// Detect storage type from connection string
+
+	// Create PubSub implementation
+	var pubSubImpl pubsub.PubSub
+	if pubSubURL == "" {
+		pubSubURL = os.Getenv("PUBSUB_URL")
+		if pubSubURL == "" {
+			pubSubURL = "channels://" // Default to channel-based pub/sub
+		}
+	}
+
+	switch {
+	case strings.HasPrefix(pubSubURL, "redis://"):
+		// Create Redis-based pub/sub
+		if redisPubSub, err := pubsub.NewRedisPubSub(pubSubURL); err != nil {
+			return nil, fmt.Errorf("failed to create Redis pub/sub: %w", err)
+		} else {
+			pubSubImpl = redisPubSub
+		}
+
+	case strings.HasPrefix(pubSubURL, "channels://"), pubSubURL == "":
+		// Create channel-based pub/sub (no dependencies)
+		pubSubImpl = pubsub.NewChannelPubSub()
+
+	default:
+		return nil, fmt.Errorf("unsupported pub/sub URL scheme: %s", pubSubURL)
+	}
+
+	// Detect storage type from connection string and create storage with pub/sub
 	switch {
 	case strings.HasPrefix(connectionString, "redis://"):
-		return NewRedisEventDataStorage(connectionString, beefStore, publisher)
-		
+		return NewRedisEventDataStorage(connectionString, beefStore, pubSubImpl)
+
 	case strings.HasPrefix(connectionString, "mongodb://"), strings.HasPrefix(connectionString, "mongo://"):
 		// MongoDB driver will extract database name from the connection string
-		return NewMongoEventDataStorage(connectionString, beefStore, publisher)
-		
+		return NewMongoEventDataStorage(connectionString, beefStore, pubSubImpl)
+
 	case strings.HasPrefix(connectionString, "sqlite://"):
 		// Remove sqlite:// prefix (can be sqlite:// or sqlite:///path)
 		path := strings.TrimPrefix(connectionString, "sqlite://")
@@ -46,19 +76,19 @@ func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage,
 		if path == "" {
 			path = "./overlay.db"
 		}
-		return NewSQLiteEventDataStorage(path, beefStore, publisher)
-		
+		return NewSQLiteEventDataStorage(path, beefStore, pubSubImpl)
+
 	case strings.HasSuffix(connectionString, ".db"), strings.HasSuffix(connectionString, ".sqlite"):
 		// Looks like a SQLite database file
-		return NewSQLiteEventDataStorage(connectionString, beefStore, publisher)
-		
+		return NewSQLiteEventDataStorage(connectionString, beefStore, pubSubImpl)
+
 	case filepath.IsAbs(connectionString) || strings.HasPrefix(connectionString, "./") || strings.HasPrefix(connectionString, "../"):
 		// Looks like a filesystem path - assume SQLite
 		if !strings.HasSuffix(connectionString, ".db") {
 			connectionString = connectionString + "/overlay.db"
 		}
-		return NewSQLiteEventDataStorage(connectionString, beefStore, publisher)
-		
+		return NewSQLiteEventDataStorage(connectionString, beefStore, pubSubImpl)
+
 	default:
 		return nil, fmt.Errorf("unable to determine storage type from connection string: %s", connectionString)
 	}

@@ -3,15 +3,15 @@ package storage
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/publish"
+	"github.com/b-open-io/overlay/pubsub"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
@@ -26,12 +26,12 @@ type SQLiteEventDataStorage struct {
 	rdb *sql.DB
 }
 
-// Methods GetBeefStorage and GetPublisher are inherited from BaseEventDataStorage
+// GetBeefStorage is inherited from BaseEventDataStorage
 
-func NewSQLiteEventDataStorage(dbPath string, beefStore beef.BeefStorage, pub publish.Publisher) (*SQLiteEventDataStorage, error) {
+func NewSQLiteEventDataStorage(dbPath string, beefStore beef.BeefStorage, pubsub pubsub.PubSub) (*SQLiteEventDataStorage, error) {
 	var err error
 	s := &SQLiteEventDataStorage{
-		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pub),
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pubsub),
 	}
 
 	// Write database connection
@@ -151,6 +151,29 @@ func (s *SQLiteEventDataStorage) createTables() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_output_rel_consuming ON output_relationships(consuming_outpoint, topic)`,
 		`CREATE INDEX IF NOT EXISTS idx_output_rel_consumed ON output_relationships(consumed_outpoint, topic)`,
+
+		`CREATE TABLE IF NOT EXISTS hashes (
+			key_name TEXT NOT NULL,
+			field TEXT NOT NULL,
+			value TEXT NOT NULL,
+			PRIMARY KEY (key_name, field)
+		)`,
+
+		`CREATE TABLE IF NOT EXISTS sets (
+			key_name TEXT NOT NULL,
+			member TEXT NOT NULL,
+			PRIMARY KEY (key_name, member)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sets_key ON sets(key_name)`,
+
+		`CREATE TABLE IF NOT EXISTS sorted_sets (
+			key_name TEXT NOT NULL,
+			member TEXT NOT NULL,
+			score REAL NOT NULL,
+			created_at INTEGER DEFAULT (unixepoch()),
+			PRIMARY KEY (key_name, member)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sorted_sets_key_score ON sorted_sets(key_name, score)`,
 	}
 
 	for _, query := range queries {
@@ -236,8 +259,10 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 	}
 
 	// Publish if configured
-	if s.pub != nil {
-		s.pub.Publish(ctx, utxo.Topic, base64.StdEncoding.EncodeToString(utxo.Beef))
+	if s.pubsub != nil {
+		if err = s.pubsub.Publish(ctx, utxo.Topic, utxo.Outpoint.String()); err != nil {
+			slog.Warn("failed to publish output event", "error", err, "topic", utxo.Topic, "outpoint", utxo.Outpoint.String())
+		}
 	}
 
 	return nil
@@ -909,10 +934,10 @@ func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 	}
 
 	// Publish events if publisher is available
-	if s.pub != nil {
+	if s.pubsub != nil {
 		for _, event := range events {
 			// Publish event with outpoint string as the message
-			if err := s.pub.Publish(ctx, event, outpointStr); err != nil {
+			if err := s.pubsub.Publish(ctx, event, outpointStr); err != nil {
 				// Log error but don't fail the operation
 				// Publishing is best-effort
 				continue
@@ -1173,4 +1198,381 @@ func (s *SQLiteEventDataStorage) GetOutputData(ctx context.Context, outpoint *tr
 	}
 
 	return data, nil
+}
+
+// FindOutputData returns outputs matching the given query criteria as OutputData objects
+func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error) {
+	var query strings.Builder
+	var args []interface{}
+
+	// Base query selecting OutputData fields including txid and spending txid
+	query.WriteString(`
+		SELECT DISTINCT o.outpoint, o.vout, o.script, o.satoshis, o.data, s.spending_txid, o.score
+		FROM outputs o
+		LEFT JOIN spends s ON o.outpoint = s.outpoint
+	`)
+
+	// Add event filtering if needed
+	if question.Event != "" || len(question.Events) > 0 {
+		query.WriteString(" JOIN output_events oe ON o.outpoint = oe.outpoint")
+	}
+
+	query.WriteString(" WHERE 1=1")
+
+	// Add event filters
+	if question.Event != "" {
+		query.WriteString(" AND oe.event = ?")
+		args = append(args, question.Event)
+	} else if len(question.Events) > 0 {
+		placeholders := make([]string, len(question.Events))
+		for i, event := range question.Events {
+			placeholders[i] = "?"
+			args = append(args, event)
+		}
+
+		if question.JoinType != nil && *question.JoinType == JoinTypeIntersect {
+			// For intersection, we need all events to be present
+			query.WriteString(fmt.Sprintf(" AND oe.event IN (%s) GROUP BY o.outpoint HAVING COUNT(DISTINCT oe.event) = %d",
+				strings.Join(placeholders, ","), len(question.Events)))
+		} else {
+			// Default to union
+			query.WriteString(fmt.Sprintf(" AND oe.event IN (%s)", strings.Join(placeholders, ",")))
+		}
+	}
+
+	// Add unspent filter if needed
+	if question.UnspentOnly {
+		query.WriteString(" AND o.spent = 0")
+	}
+
+	// Add score range filtering
+	if question.From > 0 {
+		if question.Reverse {
+			query.WriteString(" AND o.score <= ?")
+		} else {
+			query.WriteString(" AND o.score >= ?")
+		}
+		args = append(args, question.From)
+	}
+
+	if question.Until > 0 {
+		if question.Reverse {
+			query.WriteString(" AND o.score >= ?")
+		} else {
+			query.WriteString(" AND o.score <= ?")
+		}
+		args = append(args, question.Until)
+	}
+
+	// Add ordering
+	if question.Reverse {
+		query.WriteString(" ORDER BY o.score DESC")
+	} else {
+		query.WriteString(" ORDER BY o.score ASC")
+	}
+
+	// Add limit
+	if question.Limit > 0 {
+		query.WriteString(" LIMIT ?")
+		args = append(args, question.Limit)
+	}
+
+	rows, err := s.rdb.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []*OutputData
+	for rows.Next() {
+		var outpointStr string
+		var vout uint32
+		var script []byte
+		var satoshis uint64
+		var dataJSON *string
+		var spendingTxidStr *string
+		var score float64
+
+		if err := rows.Scan(&outpointStr, &vout, &script, &satoshis, &dataJSON, &spendingTxidStr, &score); err != nil {
+			return nil, err
+		}
+
+		// Parse outpoint to get txid
+		outpoint, err := transaction.OutpointFromString(outpointStr)
+		if err != nil {
+			continue // Skip invalid outpoints
+		}
+
+		// Parse spending txid if present
+		var spendTxid *chainhash.Hash
+		if spendingTxidStr != nil && *spendingTxidStr != "" {
+			if parsedSpendTxid, err := chainhash.NewHashFromHex(*spendingTxidStr); err == nil {
+				spendTxid = parsedSpendTxid
+			}
+		}
+
+		result := &OutputData{
+			TxID:     &outpoint.Txid,
+			Vout:     vout,
+			Script:   script,
+			Satoshis: satoshis,
+			Spend:    spendTxid,
+			Score:    score,
+		}
+
+		// Parse data if present
+		if dataJSON != nil && *dataJSON != "" {
+			var data interface{}
+			if err := json.Unmarshal([]byte(*dataJSON), &data); err == nil {
+				result.Data = data
+			}
+		}
+
+		results = append(results, result)
+	}
+
+	return results, rows.Err()
+}
+
+// LookupEventScores returns lightweight event scores for simple queries
+func (s *SQLiteEventDataStorage) LookupEventScores(ctx context.Context, event string, fromScore float64) ([]ScoredMember, error) {
+	// Query the events table directly without joining to outputs
+	rows, err := s.rdb.QueryContext(ctx, `
+		SELECT outpoint, score 
+		FROM events 
+		WHERE event = ? AND score > ? 
+		ORDER BY score ASC`,
+		event, fromScore)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var members []ScoredMember
+	for rows.Next() {
+		var outpointStr string
+		var score float64
+		if err := rows.Scan(&outpointStr, &score); err != nil {
+			return nil, err
+		}
+		members = append(members, ScoredMember{
+			Member: outpointStr,
+			Score:  score,
+		})
+	}
+
+	return members, rows.Err()
+}
+
+// Set Operations - implemented using SQLite tables
+func (s *SQLiteEventDataStorage) SAdd(ctx context.Context, key string, members ...string) error {
+	if len(members) == 0 {
+		return nil
+	}
+
+	// Insert members, ignoring duplicates
+	query := "INSERT OR IGNORE INTO sets (key_name, member) VALUES "
+	args := make([]interface{}, 0, len(members)*2)
+	placeholders := make([]string, len(members))
+	
+	for i, member := range members {
+		placeholders[i] = "(?, ?)"
+		args = append(args, key, member)
+	}
+	
+	query += strings.Join(placeholders, ", ")
+	_, err := s.wdb.ExecContext(ctx, query, args...)
+	return err
+}
+
+func (s *SQLiteEventDataStorage) SMembers(ctx context.Context, key string) ([]string, error) {
+	rows, err := s.rdb.QueryContext(ctx, "SELECT member FROM sets WHERE key_name = ?", key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	var members []string
+	for rows.Next() {
+		var member string
+		if err := rows.Scan(&member); err != nil {
+			return nil, err
+		}
+		members = append(members, member)
+	}
+	
+	return members, rows.Err()
+}
+
+func (s *SQLiteEventDataStorage) SRem(ctx context.Context, key string, members ...string) error {
+	if len(members) == 0 {
+		return nil
+	}
+
+	placeholders := make([]string, len(members))
+	args := []interface{}{key}
+	for i, member := range members {
+		placeholders[i] = "?"
+		args = append(args, member)
+	}
+	
+	query := fmt.Sprintf("DELETE FROM sets WHERE key_name = ? AND member IN (%s)", 
+		strings.Join(placeholders, ", "))
+	_, err := s.wdb.ExecContext(ctx, query, args...)
+	return err
+}
+
+func (s *SQLiteEventDataStorage) SIsMember(ctx context.Context, key, member string) (bool, error) {
+	var count int
+	err := s.rdb.QueryRowContext(ctx, 
+		"SELECT COUNT(*) FROM sets WHERE key_name = ? AND member = ?", 
+		key, member).Scan(&count)
+	return count > 0, err
+}
+
+// Hash Operations - implemented using SQLite tables
+func (s *SQLiteEventDataStorage) HSet(ctx context.Context, key, field, value string) error {
+	_, err := s.wdb.ExecContext(ctx, 
+		"INSERT OR REPLACE INTO hashes (key_name, field, value) VALUES (?, ?, ?)",
+		key, field, value)
+	return err
+}
+
+func (s *SQLiteEventDataStorage) HGet(ctx context.Context, key, field string) (string, error) {
+	var value string
+	err := s.rdb.QueryRowContext(ctx, 
+		"SELECT value FROM hashes WHERE key_name = ? AND field = ?",
+		key, field).Scan(&value)
+	
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("redis: nil") // Mimic Redis nil error
+	}
+	return value, err
+}
+
+func (s *SQLiteEventDataStorage) HGetAll(ctx context.Context, key string) (map[string]string, error) {
+	rows, err := s.rdb.QueryContext(ctx, 
+		"SELECT field, value FROM hashes WHERE key_name = ?", key)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	result := make(map[string]string)
+	for rows.Next() {
+		var field, value string
+		if err := rows.Scan(&field, &value); err != nil {
+			return nil, err
+		}
+		result[field] = value
+	}
+	
+	return result, rows.Err()
+}
+
+func (s *SQLiteEventDataStorage) HDel(ctx context.Context, key string, fields ...string) error {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	placeholders := make([]string, len(fields))
+	args := []interface{}{key}
+	for i, field := range fields {
+		placeholders[i] = "?"
+		args = append(args, field)
+	}
+	
+	query := fmt.Sprintf("DELETE FROM hashes WHERE key_name = ? AND field IN (%s)", 
+		strings.Join(placeholders, ", "))
+	_, err := s.wdb.ExecContext(ctx, query, args...)
+	return err
+}
+
+// Sorted Set Operations - implemented using SQLite tables
+func (s *SQLiteEventDataStorage) ZAdd(ctx context.Context, key string, members ...ScoredMember) error {
+	if len(members) == 0 {
+		return nil
+	}
+
+	query := "INSERT OR REPLACE INTO sorted_sets (key_name, member, score) VALUES "
+	args := make([]interface{}, 0, len(members)*3)
+	placeholders := make([]string, len(members))
+	
+	for i, member := range members {
+		placeholders[i] = "(?, ?, ?)"
+		args = append(args, key, member.Member, member.Score)
+	}
+	
+	query += strings.Join(placeholders, ", ")
+	_, err := s.wdb.ExecContext(ctx, query, args...)
+	return err
+}
+
+func (s *SQLiteEventDataStorage) ZRem(ctx context.Context, key string, members ...string) error {
+	if len(members) == 0 {
+		return nil
+	}
+
+	placeholders := make([]string, len(members))
+	args := []interface{}{key}
+	for i, member := range members {
+		placeholders[i] = "?"
+		args = append(args, member)
+	}
+	
+	query := fmt.Sprintf("DELETE FROM sorted_sets WHERE key_name = ? AND member IN (%s)", 
+		strings.Join(placeholders, ", "))
+	_, err := s.wdb.ExecContext(ctx, query, args...)
+	return err
+}
+
+func (s *SQLiteEventDataStorage) ZRangeByScore(ctx context.Context, key string, min, max float64, offset, count int64) ([]ScoredMember, error) {
+	query := "SELECT member, score FROM sorted_sets WHERE key_name = ? AND score >= ? AND score <= ? ORDER BY score ASC"
+	args := []interface{}{key, min, max}
+	
+	if count > 0 {
+		query += " LIMIT ?"
+		args = append(args, count)
+		if offset > 0 {
+			query += " OFFSET ?"
+			args = append(args, offset)
+		}
+	}
+	
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	var members []ScoredMember
+	for rows.Next() {
+		var member string
+		var score float64
+		if err := rows.Scan(&member, &score); err != nil {
+			return nil, err
+		}
+		members = append(members, ScoredMember{Member: member, Score: score})
+	}
+	
+	return members, rows.Err()
+}
+
+func (s *SQLiteEventDataStorage) ZScore(ctx context.Context, key, member string) (float64, error) {
+	var score float64
+	err := s.rdb.QueryRowContext(ctx, 
+		"SELECT score FROM sorted_sets WHERE key_name = ? AND member = ?",
+		key, member).Scan(&score)
+	
+	if err == sql.ErrNoRows {
+		return 0, fmt.Errorf("redis: nil") // Mimic Redis nil error
+	}
+	return score, err
+}
+
+func (s *SQLiteEventDataStorage) ZCard(ctx context.Context, key string) (int64, error) {
+	var count int64
+	err := s.rdb.QueryRowContext(ctx, 
+		"SELECT COUNT(*) FROM sorted_sets WHERE key_name = ?", key).Scan(&count)
+	return count, err
 }

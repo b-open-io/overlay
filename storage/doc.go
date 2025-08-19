@@ -11,6 +11,12 @@
 //   - Topic-based output organization
 //   - Interaction tracking between hosts and topics
 //   - Integration with BEEF storage and event publishing
+//   - Database-agnostic queue management operations
+//
+// EventDataStorage Interface:
+//
+// All storage backends implement the EventDataStorage interface which extends
+// engine.Storage with event-based querying and data management.
 //
 // Storage implementations handle:
 //   - Output insertion and updates
@@ -18,24 +24,28 @@
 //   - Block height updates
 //   - Topic membership management
 //   - Applied transaction tracking
+//   - Event management and querying
 //
 // Example Usage:
 //
-//	// Create Redis storage
-//	storage, err := storage.NewRedisStorage(
+//	// Create Redis storage with EventDataStorage interface
+//	storage, err := storage.NewRedisEventDataStorage(
 //	    "redis://localhost:6379",
 //	    beefStore,
 //	    publisher
 //	)
-//	
+//
 //	// Insert an output
 //	err = storage.InsertOutput(ctx, output)
-//	
+//
 //	// Find outputs for a topic
 //	outputs, err := storage.FindUTXOsForTopic(ctx, "my-topic", 0, 100)
 //
-//	// Create SQLite storage
-//	sqliteStorage, err := storage.NewSQLiteStorage(
+//	// Save events for an output
+//	err = storage.SaveEvents(ctx, outpoint, []string{"event1", "event2"}, 850000, 123, eventData)
+//
+//	// Create SQLite storage with EventDataStorage interface
+//	sqliteStorage, err := storage.NewSQLiteEventDataStorage(
 //	    "/path/to/database.db",
 //	    beefStore,
 //	    publisher

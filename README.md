@@ -1,28 +1,19 @@
 # Overlay
 
-A Go library providing infrastructure components for building BSV overlay services. This library includes event-based lookup services, storage abstractions, BEEF (Background Evaluation Extended Format) handling, publishing capabilities, and transaction processing infrastructure.
+A Go library providing infrastructure components for building BSV overlay services. This library includes event-based lookup services, storage abstractions, BEEF handling, and transaction processing infrastructure.
 
 ## Overview
 
-The overlay library provides a complete set of infrastructure components for building BSV overlay services. These components implement the core interfaces defined in [go-overlay-services](https://github.com/bsv-blockchain/go-overlay-services):
-
-### Core Components
+The overlay library provides infrastructure components for building BSV overlay services that implement the core interfaces defined in [go-overlay-services](https://github.com/bsv-blockchain/go-overlay-services):
 
 - **`lookup/events`** - Event-based lookup services implementing `engine.LookupService`
 - **`storage`** - Storage backends implementing `engine.Storage` (Redis, MongoDB, SQLite)
 - **`beef`** - BEEF storage implementing `beef.BeefStorage`
-- **`publish`** - Event publishing implementing `publish.Publisher`
+- **`pubsub`** - Pub/sub system with Redis publishing and SSE broadcasting
 - **`subscriber`** - JungleBus subscription management for transaction streaming
 - **`processor`** - Transaction processing utilities with Redis queue integration
-- **`purse`** - Payment purse for funding transactions with UTXO management
 
-### Interface Compatibility
-
-When building overlay services with go-overlay-services, you'll implement:
-- **`engine.TopicManager`** - Your custom logic for admitting outputs (not provided by this library)
-- **`engine.LookupService`** - Provided by embedding this library's event lookup implementations
-
-This library focuses on the storage and indexing infrastructure, while you define the protocol-specific admission and indexing logic.
+When building overlay services, you implement `engine.TopicManager` for your protocol-specific admission logic, while this library provides the storage and indexing infrastructure through `engine.LookupService` implementations.
 
 ## Installation
 
@@ -30,14 +21,332 @@ This library focuses on the storage and indexing infrastructure, while you defin
 go get github.com/b-open-io/overlay
 ```
 
-## How Overlay Services Work
+## BEEF Storage
 
-Overlay services process Bitcoin transactions according to protocol-specific rules. The processing flow has two main stages:
+The beef package provides implementations of the `beef.BeefStorage` interface with support for caching and fallback chains.
 
-1. **Topic Management** - Determines which outputs should be admitted to your topic
-2. **Lookup Services** - Indexes admitted outputs and makes them searchable
+### Available BEEF Storage Backends
 
-### Building Your Topic Manager
+```go
+// Filesystem storage (default, no dependencies)
+beefStore, err := beef.NewFilesystemBeefStorage("/path/to/beef/directory")
+
+// SQLite BEEF storage
+beefStore, err := beef.NewSQLiteBeefStorage("/path/to/beef.db")
+
+// Redis BEEF storage with optional TTL
+beefStore, err := beef.NewRedisBeefStorage(
+    "redis://localhost:6379?ttl=24h",  // TTL for cache expiration
+    fallbackStorage,                    // Optional fallback storage
+)
+
+// LRU in-memory cache with size limit
+beefStore, err := beef.NewLRUBeefStorage(
+    100 * 1024 * 1024,  // 100MB cache size
+    fallbackStorage,     // Falls back to disk/database
+)
+
+// JungleBus integration for fetching from network
+beefStore, err := beef.NewJungleBusBeefStorage(
+    "https://junglebus.gorillapool.io",
+    fallbackStorage,  // Optional local cache
+)
+```
+
+### BEEF Storage Operations
+
+```go
+// Save BEEF data
+err = beefStore.SaveBeef(ctx, txid, beefBytes)
+
+// Load BEEF data
+beefBytes, err := beefStore.LoadBeef(ctx, txid)
+
+// Load a transaction with dependencies (standalone function)
+tx, err := beef.LoadTx(ctx, beefStore, txid, chaintracker)
+```
+
+### Chaining BEEF Storage
+
+Chain storage backends for caching and fallback:
+
+```go
+// Create a multi-tier storage system
+diskStorage := beef.NewFilesystemBeefStorage("/data/beef")
+redisCache := beef.NewRedisBeefStorage("redis://localhost:6379?ttl=1h", diskStorage)
+lruCache := beef.NewLRUBeefStorage(50*1024*1024, redisCache)  // 50MB LRU -> Redis -> Disk
+
+// Reads check LRU first, then Redis, then disk
+// Writes go to all layers
+beefBytes, err := lruCache.LoadBeef(ctx, txid)
+```
+
+## Storage
+
+The storage package provides implementations of the `engine.Storage` interface for storing and retrieving transaction outputs. All storage backends implement the `EventDataStorage` interface which extends `engine.Storage` with database-agnostic queue management operations.
+
+### Storage Factory Configuration
+
+The easiest way to create storage is using the factory with connection strings:
+
+```go
+import "github.com/b-open-io/overlay/config"
+
+// Create storage from environment or flags
+storage, err := config.CreateEventStorage(
+    eventStorageURL,  // Event storage: "mongodb://localhost:27017/mydb", "./overlay.db" 
+    beefStorageURL,   // BEEF storage: "lru://1gb,redis://localhost:6379,junglebus://"
+    pubsubURL,        // PubSub: "redis://localhost:6379", "channels://" (default)
+)
+```
+
+**Default Configuration** (no dependencies):
+- Event Storage: `./overlay.db` (SQLite)
+- BEEF Storage: `./beef_storage/` (filesystem)  
+- PubSub: `channels://` (in-memory Go channels)
+
+**Connection String Formats**:
+- **Redis**: `redis://[user:password@]host:port`
+- **MongoDB**: `mongodb://[user:password@]host:port/database`
+- **SQLite**: `./database.db` or `sqlite://path/to/db`
+- **Channels**: `channels://` (no external dependencies)
+
+### Storage Backend Examples
+
+```go
+// SQLite Storage (default)
+storage, err := storage.NewSQLiteEventDataStorage(
+    "/path/to/database.db",
+    beefStore,
+    publisher
+)
+
+// Redis Storage
+storage, err := storage.NewRedisEventDataStorage(
+    "redis://localhost:6379",
+    beefStore,
+    publisher
+)
+
+// MongoDB Storage
+storage, err := storage.NewMongoEventDataStorage(
+    "mongodb://localhost:27017/mydb",
+    beefStore,
+    publisher
+)
+```
+
+### Basic Storage Operations
+
+```go
+// Insert an output
+err = storage.InsertOutput(ctx, output)
+
+// Find outputs by topic
+outputs, err := storage.FindUTXOsForTopic(ctx, "my-topic", 0, 100)
+
+// Mark outputs as spent
+err = storage.MarkOutputsSpent(ctx, outpoints)
+```
+
+## Basic Querying
+
+Once your protocol is indexing events, you can query them using simple event-based lookups:
+
+### Single Event Queries
+
+```go
+// Query outputs by a single event type
+FALSE := false
+answer, err := tokenLookup.Lookup(ctx, &lookup.LookupQuestion{
+    Query: json.Marshal(&events.Question{
+        Event:    "type:mint",    // Single event query
+        From:     850000,         // Starting from block 850000
+        Limit:    100,
+        Spent:    &FALSE,         // Only unspent outputs
+        Reverse:  false,          // Forward chronological order
+    }),
+})
+
+// Find all tokens owned by a specific address
+answer, err := tokenLookup.Lookup(ctx, &lookup.LookupQuestion{
+    Query: json.Marshal(&events.Question{
+        Event:    "owner:1ABC...xyz",  // All tokens for this owner
+        From:     0,                   // From genesis
+        Limit:    50,
+    }),
+})
+```
+
+### Value Aggregation
+
+```go
+// Simple value aggregation for a single event
+totalSupply, count, err := tokenLookup.ValueSumUint64(ctx, "sym:GOLD", events.SpentStatusUnspent)
+
+// Find all events for a specific output
+events, err := tokenLookup.FindEvents(ctx, outpoint)
+// Returns: ["token:abc123", "type:transfer", "owner:1ABC...xyz:abc123"]
+```
+
+### Event Naming Patterns
+
+Design event names to support the queries your protocol needs. Events can be hierarchical (using colons as separators) to enable prefix-based searching:
+
+```go
+// BSV21 token protocol patterns
+"id:abc123"                    // Token by ID
+"sym:GOLD"                     // Token by symbol  
+"p2pkh:1ABC...xyz:abc123"      // Address-specific token events
+"list:1SELLER...xyz:abc123"    // Marketplace listings by seller
+"type:mint"                    // Operation type events
+
+// Example patterns for other protocols
+"nft:collection:abc"           // NFT by collection
+"vote:proposal:123"            // Governance votes
+"auction:item:456"             // Auction events
+"social:user:alice"            // Social protocol events
+```
+
+## Advanced Querying
+
+For complex queries, search for multiple events using join operations:
+
+```go
+// Find outputs with ANY of these token operations (Union)
+FALSE := false
+question := &events.Question{
+    Events:   []string{"type:mint", "type:transfer", "type:burn"},
+    JoinType: &events.JoinTypeUnion,
+    From:     850000,  // Starting from block 850000
+    Limit:    50,
+    Spent:    &FALSE, // Only unspent outputs
+}
+
+// Find tokens that have ALL of these events (Intersection)
+// Useful for finding tokens that meet multiple criteria
+question = &events.Question{
+    Events:   []string{"list:abc123", "verified:abc123"},
+    JoinType: &events.JoinTypeIntersect,
+    From:     850000.000000123, // Can specify exact position with block index
+    Limit:    20,
+}
+
+// Find tokens with first event but NOT the others (Difference)
+// Useful for exclusion queries
+question = &events.Question{
+    Events:   []string{"tradeable:abc123", "locked:abc123", "frozen:abc123"},
+    JoinType: &events.JoinTypeDifference, // Has "tradeable" but not "locked" or "frozen"
+    From:     0,
+    Limit:    100,
+}
+```
+
+## Queue Management
+
+The EventDataStorage interface provides database-agnostic queue management operations that work identically across Redis, MongoDB, and SQLite backends:
+
+### Sorted Sets (Priority Queues)
+
+```go
+// Add items to a priority queue
+err = storage.ZAdd(ctx, "processing-queue", 
+    storage.ZMember{Score: 850000.000000123, Member: "tx1"},
+    storage.ZMember{Score: 850000.000000124, Member: "tx2"},
+)
+
+// Get items by score range
+members, err := storage.ZRange(ctx, "processing-queue", 
+    850000, 851000,  // min, max scores
+    0, 100)          // offset, limit (0 = no limit)
+
+// Get score for a specific member
+score, err := storage.ZScore(ctx, "processing-queue", "tx1")
+
+// Remove processed items
+err = storage.ZRem(ctx, "processing-queue", "tx1", "tx2")
+```
+
+### Sets (Whitelists, Blacklists)
+
+```go
+// Add to whitelist
+err = storage.SAdd(ctx, "token-whitelist", "token1", "token2", "token3")
+
+// Check membership
+members, err := storage.SMembers(ctx, "token-whitelist")
+
+// Remove from whitelist
+err = storage.SRem(ctx, "token-whitelist", "token2")
+```
+
+### Hashes (Configuration, State)
+
+```go
+// Set individual field
+err = storage.HSet(ctx, "config", "max-size", "1000")
+
+// Set multiple fields at once
+err = storage.HMSet(ctx, "progress", map[string]interface{}{
+    "last-block": 850000,
+    "last-index": 123,
+    "timestamp": time.Now().Unix(),
+})
+
+// Get single field
+value, err := storage.HGet(ctx, "config", "max-size")
+
+// Get all fields
+allConfig, err := storage.HGetAll(ctx, "config")
+```
+
+## PubSub
+
+The pubsub package provides a unified publish/subscribe system for real-time events and SSE streaming:
+
+### RedisPubSub - Publishing and SSE Broadcasting
+
+```go
+// Create Redis pub/sub handler
+pubsub, err := pubsub.NewRedisPubSub("redis://localhost:6379")
+
+// Publish an event (automatically buffers for reconnection)
+err = pubsub.Publish(ctx, "topic", data)
+
+// Get recent events for SSE reconnection
+events, err := pubsub.GetRecentEvents(ctx, "topic", sinceScore)
+
+// Start broadcasting Redis events to SSE clients
+go pubsub.StartBroadcasting(ctx)
+```
+
+### SSESync - Peer Synchronization
+
+```go
+// Create SSE sync manager
+sseSync := pubsub.NewSSESync(engine, storage)
+
+// Start SSE sync with peer-to-topics mapping
+peerTopics := map[string][]string{
+    "https://peer1.com": {"topic1", "topic2"},
+    "https://peer2.com": {"topic3"},
+}
+err = sseSync.Start(ctx, peerTopics)
+```
+
+### PeerBroadcaster - Transaction Broadcasting
+
+```go
+// Create peer broadcaster with topic mapping
+broadcaster := pubsub.NewPeerBroadcaster(peerTopics)
+
+// Broadcast successful transactions to peers
+err = broadcaster.BroadcastTransaction(ctx, taggedBEEF)
+```
+
+## Building Overlay Services
+
+### Topic Manager Implementation
 
 Topic managers implement the `engine.TopicManager` interface from go-overlay-services. They examine incoming transactions and decide which outputs are relevant to your protocol:
 
@@ -92,7 +401,7 @@ func (tm *MyTokenTopicManager) GetMetaData() *overlay.MetaData {
 }
 ```
 
-### Building Your Lookup Service
+### Lookup Service Implementation
 
 After your topic manager admits outputs, the lookup service processes them to create searchable events. Implement the `engine.LookupService` interface by embedding one of the existing event lookup implementations:
 
@@ -138,61 +447,6 @@ func (l *TokenLookup) OutputAdmittedByTopic(ctx context.Context, payload *engine
 }
 ```
 
-### Event Naming Patterns
-
-The power of the event system comes from using compound event names that enable efficient prefix searching and hierarchical organization. Here are examples from real protocols:
-
-```go
-// BSV21 token protocol patterns
-"id:abc123"                    // Token by ID
-"sym:GOLD"                     // Token by symbol  
-"p2pkh:1ABC...xyz:abc123"      // Address-specific token events
-"list:1SELLER...xyz:abc123"    // Marketplace listings by seller
-"type:mint"                    // Operation type events
-
-// Example patterns for other protocols
-"nft:collection:abc"           // NFT by collection
-"vote:proposal:123"            // Governance votes
-"auction:item:456"             // Auction events
-"social:user:alice"            // Social protocol events
-```
-
-The key is to design your event names to support the queries your protocol needs. Events can be hierarchical (using colons as separators) to enable prefix-based searching.
-
-### Querying Your Events
-
-Once your protocol is indexing events, you can query them in several ways:
-
-```go
-// Simple value aggregation for a single event
-totalSupply, count, err := tokenLookup.ValueSumUint64(ctx, "sym:GOLD", events.SpentStatusUnspent)
-
-// Find all events for a specific output
-events, err := tokenLookup.FindEvents(ctx, outpoint)
-// Returns: ["token:abc123", "type:transfer", "owner:1ABC...xyz:abc123"]
-
-// Query outputs by a single event type
-FALSE := false
-answer, err := tokenLookup.Lookup(ctx, &lookup.LookupQuestion{
-    Query: json.Marshal(&events.Question{
-        Event:    "type:mint",    // Single event query
-        From:     850000,         // Starting from block 850000
-        Limit:    100,
-        Spent:    &FALSE,         // Only unspent outputs
-        Reverse:  false,          // Forward chronological order
-    }),
-})
-
-// Find all tokens owned by a specific address
-answer, err := tokenLookup.Lookup(ctx, &lookup.LookupQuestion{
-    Query: json.Marshal(&events.Question{
-        Event:    "owner:1ABC...xyz",  // All tokens for this owner
-        From:     0,                   // From genesis
-        Limit:    50,
-    }),
-})
-```
-
 ## Technical Details
 
 ### Scoring System
@@ -207,120 +461,8 @@ Events are sorted using a decimal notation score that combines block height and 
 
 ### Backend Options
 
-Choose the backend that best fits your deployment needs:
+All backends provide the same interface:
 
-- **Redis** - Best for high-performance production deployments with clustering support
-- **MongoDB** - Ideal for complex queries and large datasets with built-in replication
-- **SQLite** - Perfect for development, testing, and smaller deployments
-
-All backends provide the same interface, so you can switch between them without changing your protocol logic.
-
-### Advanced Multi-Event Queries
-
-For more complex queries, you can search for multiple events using join operations:
-
-```go
-// Find outputs with ANY of these token operations (Union)
-FALSE := false
-question := &events.Question{
-    Events:   []string{"type:mint", "type:transfer", "type:burn"},
-    JoinType: &events.JoinTypeUnion,
-    From:     850000,  // Starting from block 850000
-    Limit:    50,
-    Spent:    &FALSE, // Only unspent outputs
-}
-
-// Find tokens that have ALL of these events (Intersection)
-// Useful for finding tokens that meet multiple criteria
-question = &events.Question{
-    Events:   []string{"list:abc123", "verified:abc123"},
-    JoinType: &events.JoinTypeIntersect,
-    From:     850000.000000123, // Can specify exact position with block index
-    Limit:    20,
-}
-
-// Find tokens with first event but NOT the others (Difference)
-// Useful for exclusion queries
-question = &events.Question{
-    Events:   []string{"tradeable:abc123", "locked:abc123", "frozen:abc123"},
-    JoinType: &events.JoinTypeDifference, // Has "tradeable" but not "locked" or "frozen"
-    From:     0,
-    Limit:    100,
-}
-
-## Storage Package
-
-The storage package provides implementations of the `engine.Storage` interface from go-overlay-services for storing and retrieving transaction outputs.
-
-### Redis Storage
-
-```go
-storage, err := storage.NewRedisStorage(
-    "redis://localhost:6379",
-    beefStore,
-    publisher
-)
-
-// Insert an output
-err = storage.InsertOutput(ctx, output)
-
-// Find outputs by topic
-outputs, err := storage.FindUTXOsForTopic(ctx, "my-topic", 0, 100)
-```
-
-### MongoDB Storage
-
-```go
-storage, err := storage.NewMongoStorage(
-    "mongodb://localhost:27017",
-    "mydb",
-    beefStore,
-    publisher
-)
-```
-
-### SQLite Storage
-
-```go
-storage, err := storage.NewSQLiteStorage(
-    "/path/to/database.db",
-    beefStore,
-    publisher
-)
-```
-
-SQLite storage features:
-- WAL mode for concurrent reads/writes
-- Full ACID compliance
-- Embedded database (no server required)
-- Optimized for local development and smaller deployments
-
-## BEEF Storage
-
-The beef package provides implementations of the `beef.BeefStorage` interface for storing and retrieving BEEF (Background Evaluation Extended Format) data.
-
-```go
-// Redis BEEF storage
-beefStore, err := beef.NewRedisBeefStorage("redis://localhost:6379")
-
-// MongoDB BEEF storage
-beefStore, err := beef.NewMongoBeefStorage("mongodb://localhost:27017", "mydb")
-
-// Save BEEF data
-err = beefStore.SaveBeef(ctx, txid, beefBytes)
-
-// Load BEEF data
-beefBytes, err := beefStore.LoadBeef(ctx, txid)
-```
-
-## Publishing
-
-The publish package provides implementations of the `publish.Publisher` interface for real-time event notifications:
-
-```go
-// Redis publisher
-publisher, err := publish.NewRedisPublisher("redis://localhost:6379")
-
-// Publish an event
-err = publisher.Publish(ctx, "topic", data)
-```
+- **Redis** - `redis://localhost:6379`
+- **MongoDB** - `mongodb://localhost:27017/dbname`
+- **SQLite** - `./overlay.db` (default)

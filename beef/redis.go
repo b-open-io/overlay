@@ -3,73 +3,126 @@ package beef
 import (
 	"context"
 	"log"
-	"sync"
+	"strings"
 	"time"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
-	"github.com/bsv-blockchain/go-sdk/transaction"
-	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker/headers_client"
 	"github.com/redis/go-redis/v9"
 )
 
 type RedisBeefStorage struct {
-	BaseBeefStorage
-	db  *redis.Client
-	ttl time.Duration
+	db               *redis.Client
+	ttl              time.Duration
+	fallback         BeefStorage
+	hexpireSupported bool
 }
 
-func NewRedisBeefStorage(connString string, cacheTTL time.Duration) (*RedisBeefStorage, error) {
+func NewRedisBeefStorage(connString string, fallback BeefStorage) (*RedisBeefStorage, error) {
 	r := &RedisBeefStorage{
-		ttl: cacheTTL,
+		fallback: fallback,
 	}
-	log.Println("Connecting to Redis BeefStorage...", connString)
-	if opts, err := redis.ParseURL(connString); err != nil {
+
+	// Parse TTL from query parameters if present
+	// Example: redis://localhost:6379?ttl=24h
+	var cacheTTL time.Duration
+	cleanConnString := connString
+
+	if idx := strings.Index(connString, "?"); idx != -1 {
+		// Extract TTL from query string before parsing URL
+		queryStr := connString[idx+1:]
+		params := parseRedisQueryParams(queryStr)
+		if ttlStr, ok := params["ttl"]; ok {
+			if ttl, err := time.ParseDuration(ttlStr); err == nil {
+				cacheTTL = ttl
+			}
+		}
+		// Redis ParseURL doesn't understand ttl parameter, so remove it
+		cleanConnString = connString[:idx]
+	}
+
+	r.ttl = cacheTTL
+
+	log.Println("Connecting to Redis BeefStorage...", cleanConnString)
+	if opts, err := redis.ParseURL(cleanConnString); err != nil {
 		return nil, err
 	} else {
 		r.db = redis.NewClient(opts)
+
+		// Test if HEXPIRE is supported by trying it on a test key
+		if cacheTTL > 0 {
+			r.hexpireSupported = r.testHExpireSupport()
+			if !r.hexpireSupported {
+				log.Println("Warning: HEXPIRE not supported by this Redis server. TTL will not be set on individual entries.")
+			}
+		}
+
 		return r, nil
 	}
 }
 
 func (t *RedisBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	txidStr := txid.String()
+
+	// Try to load from Redis first
 	if beefBytes, err := t.db.HGet(ctx, BeefKey, txidStr).Bytes(); err != nil && err != redis.Nil {
 		return nil, err
 	} else if err == nil && beefBytes != nil {
 		return beefBytes, nil
 	}
-	var wg sync.WaitGroup
-	wg.Add(1)
-	defer wg.Done()
 
-	beefBytes, err := t.BaseBeefStorage.LoadBeef(ctx, txid)
-	if err == nil {
-		t.SaveBeef(ctx, txid, beefBytes)
+	// Not found in Redis, try fallback
+	if t.fallback != nil {
+		beefBytes, err := t.fallback.LoadBeef(ctx, txid)
+		if err == nil {
+			// Cache the result from fallback
+			t.SaveBeef(ctx, txid, beefBytes)
+		}
+		return beefBytes, err
 	}
-	return beefBytes, err
+
+	return nil, ErrNotFound
+}
+
+func (t *RedisBeefStorage) testHExpireSupport() bool {
+	ctx := context.Background()
+	testKey := "beef:test:hexpire"
+	testField := "test"
+
+	// Clean up test key when done
+	defer t.db.Del(ctx, testKey)
+
+	// Try to set a field and expire it
+	t.db.HSet(ctx, testKey, testField, "test")
+
+	// Try HEXPIRE command - if it fails, the command is not supported
+	err := t.db.HExpire(ctx, testKey, time.Second, testField).Err()
+
+	return err == nil
 }
 
 func (t *RedisBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
+	txidStr := txid.String()
 	_, err := t.db.Pipelined(ctx, func(p redis.Pipeliner) error {
-		if err := p.HSet(ctx, BeefKey, txid.String(), beefBytes).Err(); err != nil {
+		if err := p.HSet(ctx, BeefKey, txidStr, beefBytes).Err(); err != nil {
 			return err
-		} else if t.ttl > 0 {
-			if err := p.Expire(ctx, BeefKey, t.ttl).Err(); err != nil {
-				return err
-			}
+		}
+		// Set TTL on the individual hash field if configured and supported
+		if t.ttl > 0 && t.hexpireSupported {
+			// HExpire sets expiration on specific hash fields
+			p.HExpire(ctx, BeefKey, t.ttl, txidStr)
 		}
 		return nil
 	})
 	return err
 }
 
-// LoadTx loads a transaction from BEEF storage with optional merkle path validation
-func (t *RedisBeefStorage) LoadTx(ctx context.Context, txid *chainhash.Hash, chaintracker *headers_client.Client) (*transaction.Transaction, error) {
-	// Load BEEF from storage - this will use RedisBeefStorage.LoadBeef
-	beefBytes, err := t.LoadBeef(ctx, txid)
-	if err != nil {
-		return nil, err
+// parseRedisQueryParams extracts key-value pairs from a query string
+func parseRedisQueryParams(query string) map[string]string {
+	params := make(map[string]string)
+	for _, param := range strings.Split(query, "&") {
+		if kv := strings.SplitN(param, "=", 2); len(kv) == 2 {
+			params[kv[0]] = kv[1]
+		}
 	}
-
-	return LoadTxFromBeef(ctx, beefBytes, txid, chaintracker)
+	return params
 }

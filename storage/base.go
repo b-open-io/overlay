@@ -2,21 +2,21 @@ package storage
 
 import (
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/publish"
+	"github.com/b-open-io/overlay/pubsub"
 )
 
 // BaseEventDataStorage provides common fields and methods for all EventDataStorage implementations
 // This uses Go's struct embedding to achieve code reuse across different storage backends
 type BaseEventDataStorage struct {
 	beefStore beef.BeefStorage
-	pub       publish.Publisher
+	pubsub    pubsub.PubSub // Generic PubSub interface for event publishing and buffering
 }
 
 // NewBaseEventDataStorage creates a new BaseEventDataStorage with the given dependencies
-func NewBaseEventDataStorage(beefStore beef.BeefStorage, pub publish.Publisher) BaseEventDataStorage {
+func NewBaseEventDataStorage(beefStore beef.BeefStorage, pubsub pubsub.PubSub) BaseEventDataStorage {
 	return BaseEventDataStorage{
 		beefStore: beefStore,
-		pub:       pub,
+		pubsub:    pubsub,
 	}
 }
 
@@ -25,7 +25,8 @@ func (b *BaseEventDataStorage) GetBeefStorage() beef.BeefStorage {
 	return b.beefStore
 }
 
-// GetPublisher returns the underlying publisher implementation
-func (b *BaseEventDataStorage) GetPublisher() publish.Publisher {
-	return b.pub
+// GetPubSub returns the PubSub interface for event publishing and buffering
+// Returns nil if no pubsub is configured
+func (b *BaseEventDataStorage) GetPubSub() pubsub.PubSub {
+	return b.pubsub
 }

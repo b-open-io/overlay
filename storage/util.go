@@ -115,8 +115,8 @@ type BSONOutput struct {
 	Score           float64     `bson:"score"`
 	AncillaryTxids  []string    `bson:"ancillaryTxids"`
 	AncillaryBeef   []byte      `bson:"ancillaryBeef"`
-	Events          []string    `bson:"events"`          // Event names this output is associated with
-	Data            interface{} `bson:"data,omitempty"`  // Arbitrary data associated with the output
+	Events          []string    `bson:"events"`         // Event names this output is associated with
+	Data            interface{} `bson:"data,omitempty"` // Arbitrary data associated with the output
 }
 
 func NewBSONOutput(o *engine.Output) *BSONOutput {
