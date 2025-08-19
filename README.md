@@ -11,7 +11,7 @@ The overlay library provides a complete set of infrastructure components for bui
 - **`lookup/events`** - Event-based lookup services implementing `engine.LookupService`
 - **`storage`** - Storage backends implementing `engine.Storage` (Redis, MongoDB, SQLite)
 - **`beef`** - BEEF storage implementing `beef.BeefStorage`
-- **`publish`** - Event publishing implementing `publish.Publisher`
+- **`pubsub`** - Unified pub/sub system with Redis publishing, SSE broadcasting, and peer synchronization
 - **`subscriber`** - JungleBus subscription management for transaction streaming
 - **`processor`** - Transaction processing utilities with Redis queue integration
 - **`purse`** - Payment purse for funding transactions with UTXO management
@@ -467,14 +467,46 @@ allConfig, err := storage.HGetAll(ctx, "config")
 
 These operations enable building complex queue-based processing systems without direct database dependencies.
 
-## Publishing
+## PubSub
 
-The publish package provides implementations of the `publish.Publisher` interface for real-time event notifications:
+The pubsub package provides a unified publish/subscribe system for overlay services:
+
+### RedisPubSub - Publishing and SSE Broadcasting
 
 ```go
-// Redis publisher
-publisher, err := publish.NewRedisPublisher("redis://localhost:6379")
+// Create Redis pub/sub handler
+pubsub, err := pubsub.NewRedisPubSub("redis://localhost:6379")
 
-// Publish an event
-err = publisher.Publish(ctx, "topic", data)
+// Publish an event (automatically buffers for reconnection)
+err = pubsub.Publish(ctx, "topic", data)
+
+// Get recent events for SSE reconnection
+events, err := pubsub.GetRecentEvents(ctx, "topic", sinceScore)
+
+// Start broadcasting Redis events to SSE clients
+go pubsub.StartBroadcasting(ctx)
+```
+
+### SSESync - Peer Synchronization
+
+```go
+// Create SSE sync manager
+sseSync := pubsub.NewSSESync(engine, storage)
+
+// Start SSE sync with peer-to-topics mapping
+peerTopics := map[string][]string{
+    "https://peer1.com": {"topic1", "topic2"},
+    "https://peer2.com": {"topic3"},
+}
+err = sseSync.Start(ctx, peerTopics)
+```
+
+### PeerBroadcaster - Transaction Broadcasting
+
+```go
+// Create peer broadcaster with topic mapping
+broadcaster := pubsub.NewPeerBroadcaster(peerTopics)
+
+// Broadcast successful transactions to peers
+err = broadcaster.BroadcastTransaction(ctx, taggedBEEF)
 ```
