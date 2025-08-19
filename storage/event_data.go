@@ -4,7 +4,7 @@ import (
 	"context"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/publish"
+	"github.com/b-open-io/overlay/pubsub"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/transaction"
@@ -41,9 +41,9 @@ type EventDataStorage interface {
 	// Returns nil if the storage backend is not Redis
 	GetRedisClient() *redis.Client
 	
-	// GetPublisher returns the underlying Publisher for event publishing and buffering
-	// Returns nil if no publisher is configured
-	GetPublisher() publish.Publisher
+	// GetPubSub returns the underlying RedisPubSub for event publishing and buffering
+	// Returns nil if no pubsub is configured
+	GetPubSub() *pubsub.RedisPubSub
 
 	// Block Data Methods
 	// GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height

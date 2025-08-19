@@ -243,8 +243,8 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 	}
 
 	// Publish if configured
-	if s.publisher != nil {
-		if err = s.publisher.Publish(ctx, utxo.Topic, utxo.Outpoint.String()); err != nil {
+	if s.pubsub != nil {
+		if err = s.pubsub.Publish(ctx, utxo.Topic, utxo.Outpoint.String()); err != nil {
 			slog.Warn("failed to publish output event", "error", err, "topic", utxo.Topic, "outpoint", utxo.Outpoint.String())
 		}
 	}
@@ -918,10 +918,10 @@ func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 	}
 
 	// Publish events if publisher is available
-	if s.publisher != nil {
+	if s.pubsub != nil {
 		for _, event := range events {
 			// Publish event with outpoint string as the message
-			if err := s.publisher.Publish(ctx, event, outpointStr); err != nil {
+			if err := s.pubsub.Publish(ctx, event, outpointStr); err != nil {
 				// Log error but don't fail the operation
 				// Publishing is best-effort
 				continue
