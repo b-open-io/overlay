@@ -19,6 +19,9 @@ type SSERoutesConfig struct {
 	Context context.Context
 }
 
+// Global shared SSE manager
+var sharedSSEManager *pubsub.SSEManager
+
 // RegisterSSERoutes registers Server-Sent Events streaming routes
 func RegisterSSERoutes(group fiber.Router, config *SSERoutesConfig) {
 	if config == nil || config.Storage == nil || config.Context == nil {
@@ -27,6 +30,13 @@ func RegisterSSERoutes(group fiber.Router, config *SSERoutesConfig) {
 
 	store := config.Storage
 	ctx := config.Context
+
+	// Initialize shared SSE manager once with server context
+	if sharedSSEManager == nil {
+		if ps := store.GetPubSub(); ps != nil {
+			sharedSSEManager = pubsub.NewSSEManager(ctx, ps)
+		}
+	}
 
 	// SSE subscription route
 	group.Get("/subscribe/:events", func(c *fiber.Ctx) error {
@@ -92,27 +102,17 @@ func RegisterSSERoutes(group fiber.Router, config *SSERoutesConfig) {
 				return // Connection closed
 			}
 
-			// Register this client for each event with PubSub
-			if ps := store.GetPubSub(); ps != nil {
-				// Create SSE manager if needed and register client
-				sseManager := pubsub.NewSSEManager(ps)
+			// Register this client with the shared SSE manager
+			if sharedSSEManager != nil {
+				// Register client for each event
 				for _, event := range events {
-					sseManager.AddSSEClient(event, w)
+					sharedSSEManager.AddSSEClient(event, w)
 				}
 
-				// Start the SSE manager to listen for events
-				if err := sseManager.Start(ctx); err != nil {
-					fmt.Fprintf(w, "data: Error starting SSE manager: %v\n\n", err)
-					w.Flush()
-					return
-				}
-
-				// Cleanup function
+				// Cleanup function - remove client when connection closes
 				defer func() {
-					// Stop the SSE manager and remove the client when disconnected
-					sseManager.Stop()
 					for _, event := range events {
-						sseManager.RemoveSSEClient(event, w)
+						sharedSSEManager.RemoveSSEClient(event, w)
 					}
 					close(clientDone)
 				}()

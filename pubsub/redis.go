@@ -30,14 +30,19 @@ func NewRedisPubSub(redisURL string) (*RedisPubSub, error) {
 	redisClient := redis.NewClient(opts)
 	
 	// Test connection
-	ctx := context.Background()
-	if err := redisClient.Ping(ctx).Err(); err != nil {
+	testCtx := context.Background()
+	if err := redisClient.Ping(testCtx).Err(); err != nil {
 		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}
+	
+	// Create internal context for lifecycle management
+	ctx, cancel := context.WithCancel(context.Background())
 	
 	return &RedisPubSub{
 		redisClient: redisClient,
 		events:      make(chan Event, 1000),
+		ctx:         ctx,
+		cancel:      cancel,
 	}, nil
 }
 
@@ -56,13 +61,19 @@ func (r *RedisPubSub) Subscribe(ctx context.Context, topics []string) (<-chan Ev
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	
+	// If already subscribed, close old subscription and create new one
 	if r.pubsub != nil {
-		return nil, fmt.Errorf("already subscribed")
+		r.pubsub.Close()
 	}
 	
+	// Create new subscription with updated topic list
 	r.pubsub = r.redisClient.Subscribe(ctx, topics...)
 	
-	go r.listenLoop()
+	// Start listen loop if not already running
+	if r.events == nil {
+		r.events = make(chan Event, 1000)
+		go r.listenLoop()
+	}
 	
 	return r.events, nil
 }
@@ -123,14 +134,6 @@ func (r *RedisPubSub) Unsubscribe(topics []string) error {
 	return r.pubsub.Unsubscribe(r.ctx, topics...)
 }
 
-// Start starts the Redis pub/sub system
-func (r *RedisPubSub) Start(ctx context.Context) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	
-	r.ctx, r.cancel = context.WithCancel(ctx)
-	return nil
-}
 
 // Stop stops the Redis pub/sub system
 func (r *RedisPubSub) Stop() error {

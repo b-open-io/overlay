@@ -112,11 +112,6 @@ func (cp *ChannelPubSub) unsubscribeChannel(eventChan chan Event, topics []strin
 	}
 }
 
-// Start initializes the pub/sub system
-func (cp *ChannelPubSub) Start(ctx context.Context) error {
-	// Channel-based pub/sub doesn't need explicit startup
-	return nil
-}
 
 // Stop stops the pub/sub system
 func (cp *ChannelPubSub) Stop() error {
