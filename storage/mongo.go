@@ -9,6 +9,7 @@ import (
 
 	"github.com/b-open-io/overlay/beef"
 	"github.com/b-open-io/overlay/pubsub"
+	"github.com/b-open-io/overlay/queue"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
@@ -27,7 +28,7 @@ type MongoEventDataStorage struct {
 
 // GetBeefStorage is inherited from BaseEventDataStorage
 
-func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, pubsub pubsub.PubSub) (*MongoEventDataStorage, error) {
+func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) (*MongoEventDataStorage, error) {
 	// Parse the connection string to extract database name
 	clientOpts := options.Client().ApplyURI(connString)
 
@@ -148,7 +149,7 @@ func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, pub
 
 
 	return &MongoEventDataStorage{
-		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pubsub),
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub),
 		DB:                   db,
 	}, nil
 }
@@ -966,7 +967,7 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 }
 
 // LookupEventScores returns lightweight event scores for simple queries
-func (s *MongoEventDataStorage) LookupEventScores(ctx context.Context, topic string, event string, fromScore float64) ([]ScoredMember, error) {
+func (s *MongoEventDataStorage) LookupEventScores(ctx context.Context, topic string, event string, fromScore float64) ([]queue.ScoredMember, error) {
 	// Query the outputs collection for this event without loading additional data
 	filter := bson.M{
 		"topic":  topic,
@@ -981,7 +982,7 @@ func (s *MongoEventDataStorage) LookupEventScores(ctx context.Context, topic str
 	}
 	defer cursor.Close(ctx)
 
-	var members []ScoredMember
+	var members []queue.ScoredMember
 	for cursor.Next(ctx) {
 		var doc struct {
 			Outpoint string  `bson:"outpoint"`
@@ -990,305 +991,12 @@ func (s *MongoEventDataStorage) LookupEventScores(ctx context.Context, topic str
 		if err := cursor.Decode(&doc); err != nil {
 			return nil, err
 		}
-		members = append(members, ScoredMember{
+		members = append(members, queue.ScoredMember{
 			Member: doc.Outpoint,
 			Score:  doc.Score,
 		})
 	}
 
 	return members, cursor.Err()
-}
-
-// Set Operations - implemented using MongoDB's native $addToSet operations
-func (s *MongoEventDataStorage) SAdd(ctx context.Context, key string, members ...string) error {
-	if len(members) == 0 {
-		return nil
-	}
-
-	// Use $addToSet to add multiple members atomically, avoiding duplicates
-	_, err := s.DB.Collection("sets").UpdateOne(ctx,
-		bson.M{"_id": key},
-		bson.M{"$addToSet": bson.M{"members": bson.M{"$each": members}}},
-		options.UpdateOne().SetUpsert(true),
-	)
-	return err
-}
-
-func (s *MongoEventDataStorage) SMembers(ctx context.Context, key string) ([]string, error) {
-	var doc struct {
-		Members []string `bson:"members"`
-	}
-
-	err := s.DB.Collection("sets").FindOne(ctx, bson.M{"_id": key}).Decode(&doc)
-	if err == mongo.ErrNoDocuments {
-		return []string{}, nil // Empty set
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	if doc.Members == nil {
-		return []string{}, nil
-	}
-	return doc.Members, nil
-}
-
-func (s *MongoEventDataStorage) SRem(ctx context.Context, key string, members ...string) error {
-	if len(members) == 0 {
-		return nil
-	}
-
-	// Use $pullAll to remove multiple members atomically
-	_, err := s.DB.Collection("sets").UpdateOne(ctx,
-		bson.M{"_id": key},
-		bson.M{"$pullAll": bson.M{"members": members}},
-	)
-	return err
-}
-
-func (s *MongoEventDataStorage) SIsMember(ctx context.Context, key, member string) (bool, error) {
-	err := s.DB.Collection("sets").FindOne(ctx,
-		bson.M{
-			"_id":     key,
-			"members": member,
-		},
-		options.FindOne().SetProjection(bson.M{"_id": 1}), // Only return _id field
-	).Err()
-
-	if err == mongo.ErrNoDocuments {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// Hash Operations - store fields directly in document (no nested fields object)
-func (s *MongoEventDataStorage) HSet(ctx context.Context, key, field, value string) error {
-	// Use aggregation pipeline with $setField to handle field names with dots
-	pipeline := bson.A{
-		bson.M{
-			"$replaceRoot": bson.M{
-				"newRoot": bson.M{
-					"$setField": bson.M{
-						"field": field,
-						"input": bson.M{
-							"$ifNull": bson.A{"$$ROOT", bson.M{"_id": key}},
-						},
-						"value": value,
-					},
-				},
-			},
-		},
-	}
-	
-	// Use aggregation pipeline in UpdateOne (MongoDB 4.2+)
-	_, err := s.DB.Collection("hashes").UpdateOne(ctx,
-		bson.M{"_id": key},
-		pipeline,
-		options.UpdateOne().SetUpsert(true),
-	)
-	return err
-}
-
-func (s *MongoEventDataStorage) HGet(ctx context.Context, key, field string) (string, error) {
-	// Use aggregation pipeline with $getField to handle field names with dots
-	pipeline := bson.A{
-		bson.M{"$match": bson.M{"_id": key}},
-		bson.M{
-			"$project": bson.M{
-				"value": bson.M{
-					"$getField": bson.M{
-						"field": field,
-						"input": "$$ROOT",
-					},
-				},
-			},
-		},
-	}
-	
-	cursor, err := s.DB.Collection("hashes").Aggregate(ctx, pipeline)
-	if err != nil {
-		return "", err
-	}
-	defer cursor.Close(ctx)
-	
-	if cursor.Next(ctx) {
-		var result struct {
-			Value *string `bson:"value"`
-		}
-		if err := cursor.Decode(&result); err != nil {
-			return "", err
-		}
-		
-		if result.Value == nil {
-			return "", fmt.Errorf("redis: nil") // Field doesn't exist
-		}
-		return *result.Value, nil
-	}
-	
-	return "", fmt.Errorf("redis: nil") // Document doesn't exist
-}
-
-func (s *MongoEventDataStorage) HGetAll(ctx context.Context, key string) (map[string]string, error) {
-	var doc bson.M
-
-	err := s.DB.Collection("hashes").FindOne(ctx, bson.M{"_id": key}).Decode(&doc)
-	if err == mongo.ErrNoDocuments {
-		return map[string]string{}, nil // Empty hash
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	// Extract all fields except _id
-	result := make(map[string]string)
-	for fieldName, fieldValue := range doc {
-		if fieldName != "_id" {
-			if strValue, ok := fieldValue.(string); ok {
-				result[fieldName] = strValue
-			}
-		}
-	}
-	return result, nil
-}
-
-func (s *MongoEventDataStorage) HDel(ctx context.Context, key string, fields ...string) error {
-	if len(fields) == 0 {
-		return nil
-	}
-
-	// Use aggregation pipeline with $unsetField to handle field names with dots
-	// Start with the current document
-	pipeline := bson.A{
-		bson.M{
-			"$replaceRoot": bson.M{
-				"newRoot": "$$ROOT",
-			},
-		},
-	}
-	
-	// Chain multiple $unsetField operations for each field to delete
-	for _, field := range fields {
-		unsetStage := bson.M{
-			"$replaceRoot": bson.M{
-				"newRoot": bson.M{
-					"$unsetField": bson.M{
-						"field": field,
-						"input": "$$ROOT",
-					},
-				},
-			},
-		}
-		pipeline = append(pipeline, unsetStage)
-	}
-
-	_, err := s.DB.Collection("hashes").UpdateOne(ctx,
-		bson.M{"_id": key},
-		pipeline,
-	)
-	return err
-}
-
-// Sorted Set Operations - using individual documents with indexed scores
-func (s *MongoEventDataStorage) ZAdd(ctx context.Context, key string, members ...ScoredMember) error {
-	if len(members) == 0 {
-		return nil
-	}
-
-	var writes []mongo.WriteModel
-	for _, member := range members {
-		writes = append(writes, mongo.NewReplaceOneModel().
-			SetFilter(bson.M{
-				"key":    key,
-				"member": member.Member,
-			}).
-			SetReplacement(bson.M{
-				"key":    key,
-				"member": member.Member,
-				"score":  member.Score,
-			}).
-			SetUpsert(true))
-	}
-
-	_, err := s.DB.Collection("sorted_sets").BulkWrite(ctx, writes, options.BulkWrite().SetOrdered(false))
-	return err
-}
-
-func (s *MongoEventDataStorage) ZRem(ctx context.Context, key string, members ...string) error {
-	if len(members) == 0 {
-		return nil
-	}
-
-	filter := bson.M{
-		"key":    key,
-		"member": bson.M{"$in": members},
-	}
-
-	_, err := s.DB.Collection("sorted_sets").DeleteMany(ctx, filter)
-	return err
-}
-
-func (s *MongoEventDataStorage) ZRangeByScore(ctx context.Context, key string, min, max float64, offset, count int64) ([]ScoredMember, error) {
-	filter := bson.M{
-		"key": key,
-		"score": bson.M{
-			"$gte": min,
-			"$lte": max,
-		},
-	}
-
-	findOptions := options.Find().SetSort(bson.M{"score": 1})
-
-	if count > 0 {
-		findOptions = findOptions.SetLimit(count)
-		if offset > 0 {
-			findOptions = findOptions.SetSkip(offset)
-		}
-	}
-
-	cursor, err := s.DB.Collection("sorted_sets").Find(ctx, filter, findOptions)
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(ctx)
-
-	var members []ScoredMember
-	for cursor.Next(ctx) {
-		var doc struct {
-			Member string  `bson:"member"`
-			Score  float64 `bson:"score"`
-		}
-		if err := cursor.Decode(&doc); err != nil {
-			return nil, err
-		}
-		members = append(members, ScoredMember{
-			Member: doc.Member,
-			Score:  doc.Score,
-		})
-	}
-
-	return members, cursor.Err()
-}
-
-func (s *MongoEventDataStorage) ZScore(ctx context.Context, key, member string) (float64, error) {
-	var doc struct {
-		Score float64 `bson:"score"`
-	}
-
-	err := s.DB.Collection("sorted_sets").FindOne(ctx, bson.M{
-		"key":    key,
-		"member": member,
-	}).Decode(&doc)
-
-	if err == mongo.ErrNoDocuments {
-		return 0, fmt.Errorf("redis: nil") // Mimic Redis nil error
-	}
-	return doc.Score, err
-}
-
-func (s *MongoEventDataStorage) ZCard(ctx context.Context, key string) (int64, error) {
-	return s.DB.Collection("sorted_sets").CountDocuments(ctx, bson.M{"key": key})
 }
 

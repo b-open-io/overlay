@@ -11,6 +11,7 @@ import (
 
 	"github.com/b-open-io/overlay/beef"
 	"github.com/b-open-io/overlay/pubsub"
+	"github.com/b-open-io/overlay/queue"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
@@ -30,9 +31,10 @@ func (s *RedisEventDataStorage) GetRedisClient() *redis.Client {
 	return s.DB
 }
 
-func NewRedisEventDataStorage(connString string, beefStore beef.BeefStorage, pubsub pubsub.PubSub) (r *RedisEventDataStorage, err error) {
+
+func NewRedisEventDataStorage(connString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) (r *RedisEventDataStorage, err error) {
 	r = &RedisEventDataStorage{
-		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pubsub),
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub),
 	}
 	log.Println("Connecting to Redis Storage...", connString)
 	if opts, err := redis.ParseURL(connString); err != nil {
@@ -1001,7 +1003,7 @@ func (s *RedisEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 }
 
 // LookupEventScores returns lightweight event scores for simple queries
-func (s *RedisEventDataStorage) LookupEventScores(ctx context.Context, topic string, event string, fromScore float64) ([]ScoredMember, error) {
+func (s *RedisEventDataStorage) LookupEventScores(ctx context.Context, topic string, event string, fromScore float64) ([]queue.ScoredMember, error) {
 	eventSetKey := fmt.Sprintf("evt:%s:%s", topic, event)
 	
 	// Query the sorted set directly without parsing outpoints
@@ -1013,9 +1015,9 @@ func (s *RedisEventDataStorage) LookupEventScores(ctx context.Context, topic str
 		return nil, err
 	}
 
-	var members []ScoredMember
+	var members []queue.ScoredMember
 	for _, result := range results {
-		members = append(members, ScoredMember{
+		members = append(members, queue.ScoredMember{
 			Member: result.Member.(string),
 			Score:  result.Score,
 		})
@@ -1023,81 +1025,3 @@ func (s *RedisEventDataStorage) LookupEventScores(ctx context.Context, topic str
 	return members, nil
 }
 
-// Set Operations
-func (s *RedisEventDataStorage) SAdd(ctx context.Context, key string, members ...string) error {
-	return s.DB.SAdd(ctx, key, members).Err()
-}
-
-func (s *RedisEventDataStorage) SMembers(ctx context.Context, key string) ([]string, error) {
-	return s.DB.SMembers(ctx, key).Result()
-}
-
-func (s *RedisEventDataStorage) SRem(ctx context.Context, key string, members ...string) error {
-	return s.DB.SRem(ctx, key, members).Err()
-}
-
-func (s *RedisEventDataStorage) SIsMember(ctx context.Context, key, member string) (bool, error) {
-	return s.DB.SIsMember(ctx, key, member).Result()
-}
-
-// Hash Operations
-func (s *RedisEventDataStorage) HSet(ctx context.Context, key, field, value string) error {
-	return s.DB.HSet(ctx, key, field, value).Err()
-}
-
-func (s *RedisEventDataStorage) HGet(ctx context.Context, key, field string) (string, error) {
-	return s.DB.HGet(ctx, key, field).Result()
-}
-
-func (s *RedisEventDataStorage) HGetAll(ctx context.Context, key string) (map[string]string, error) {
-	return s.DB.HGetAll(ctx, key).Result()
-}
-
-func (s *RedisEventDataStorage) HDel(ctx context.Context, key string, fields ...string) error {
-	return s.DB.HDel(ctx, key, fields...).Err()
-}
-
-// Sorted Set Operations
-func (s *RedisEventDataStorage) ZAdd(ctx context.Context, key string, members ...ScoredMember) error {
-	var redisMembers []redis.Z
-	for _, member := range members {
-		redisMembers = append(redisMembers, redis.Z{
-			Score:  member.Score,
-			Member: member.Member,
-		})
-	}
-	return s.DB.ZAdd(ctx, key, redisMembers...).Err()
-}
-
-func (s *RedisEventDataStorage) ZRem(ctx context.Context, key string, members ...string) error {
-	return s.DB.ZRem(ctx, key, members).Err()
-}
-
-func (s *RedisEventDataStorage) ZRangeByScore(ctx context.Context, key string, min, max float64, offset, count int64) ([]ScoredMember, error) {
-	results, err := s.DB.ZRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
-		Min:    fmt.Sprintf("%f", min),
-		Max:    fmt.Sprintf("%f", max),
-		Offset: offset,
-		Count:  count,
-	}).Result()
-	if err != nil {
-		return nil, err
-	}
-
-	var members []ScoredMember
-	for _, result := range results {
-		members = append(members, ScoredMember{
-			Member: result.Member.(string),
-			Score:  result.Score,
-		})
-	}
-	return members, nil
-}
-
-func (s *RedisEventDataStorage) ZScore(ctx context.Context, key, member string) (float64, error) {
-	return s.DB.ZScore(ctx, key, member).Result()
-}
-
-func (s *RedisEventDataStorage) ZCard(ctx context.Context, key string) (int64, error) {
-	return s.DB.ZCard(ctx, key).Result()
-}

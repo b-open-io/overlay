@@ -5,16 +5,12 @@ import (
 
 	"github.com/b-open-io/overlay/beef"
 	"github.com/b-open-io/overlay/pubsub"
+	"github.com/b-open-io/overlay/queue"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
-// ScoredMember represents a member with its score in sorted set operations
-type ScoredMember struct {
-	Member string
-	Score  float64
-}
 
 // OutputData represents an input or output with its data
 type OutputData struct {
@@ -45,6 +41,9 @@ type EventDataStorage interface {
 	// GetPubSub returns the PubSub interface for event publishing and buffering
 	// Returns nil if no pubsub is configured
 	GetPubSub() pubsub.PubSub
+	
+	// GetQueueStorage returns the QueueStorage interface for Redis-like operations
+	GetQueueStorage() queue.QueueStorage
 
 	// LoadBeefByTxidAndTopic loads merged BEEF for a transaction within a topic context
 	// Finds any output for the txid in the topic, merges main BEEF with AncillaryBeef,
@@ -68,7 +67,7 @@ type EventDataStorage interface {
 	LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error)
 
 	// LookupEventScores returns lightweight event scores for simple queries (no parsing/data loading)
-	LookupEventScores(ctx context.Context, topic string, event string, fromScore float64) ([]ScoredMember, error)
+	LookupEventScores(ctx context.Context, topic string, event string, fromScore float64) ([]queue.ScoredMember, error)
 
 	// GetOutputData retrieves the data associated with a specific output
 	GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error)
@@ -76,25 +75,6 @@ type EventDataStorage interface {
 	// FindOutputData returns outputs matching the given query criteria as OutputData objects
 	// Supports paging with score-based 'from' parameter and can include spent outputs for history
 	FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error)
-
-	// Set Operations - for whitelists, topic management, etc.
-	SAdd(ctx context.Context, key string, members ...string) error
-	SMembers(ctx context.Context, key string) ([]string, error) 
-	SRem(ctx context.Context, key string, members ...string) error
-	SIsMember(ctx context.Context, key, member string) (bool, error)
-
-	// Hash Operations - for peer configurations, output data, etc.
-	HSet(ctx context.Context, key, field, value string) error
-	HGet(ctx context.Context, key, field string) (string, error)
-	HGetAll(ctx context.Context, key string) (map[string]string, error)
-	HDel(ctx context.Context, key string, fields ...string) error
-
-	// Sorted Set Operations - for queues, progress tracking, event scoring, etc.
-	ZAdd(ctx context.Context, key string, members ...ScoredMember) error
-	ZRem(ctx context.Context, key string, members ...string) error
-	ZRangeByScore(ctx context.Context, key string, min, max float64, offset, count int64) ([]ScoredMember, error)
-	ZScore(ctx context.Context, key, member string) (float64, error)
-	ZCard(ctx context.Context, key string) (int64, error)
 }
 
 // EventQuestion defines query parameters for event-based lookups
