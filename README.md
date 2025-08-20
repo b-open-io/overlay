@@ -389,6 +389,110 @@ if LIBP2P_SYNC {
 }
 ```
 
+## Routes Package
+
+The routes package provides reusable HTTP route handlers for common overlay service functionality.
+
+### Common Routes
+
+Register standard event, block, and BEEF serving endpoints:
+
+```go
+import "github.com/b-open-io/overlay/routes"
+
+// Create API group
+onesat := app.Group("/api/1sat")
+
+// Register common routes
+routes.RegisterCommonRoutes(onesat, &routes.CommonRoutesConfig{
+    Storage:      store,
+    ChainTracker: chaintracker,
+})
+```
+
+**Endpoints:**
+- `GET/POST /events/:topic/:event/(history|unspent)` - Event-based queries
+- `GET /block/(tip|:height)` - Block information
+- `GET /beef/:topic/:txid` - BEEF data serving
+
+**Utility:**
+- `routes.ParseEventQuery(c) *storage.EventQuestion` - Parse query parameters (`from`, `limit`)
+
+### SSE Streaming Routes
+
+Add Server-Sent Events streaming:
+
+```go
+routes.RegisterSSERoutes(onesat, &routes.SSERoutesConfig{
+    Storage: store,
+    Context: ctx,
+})
+```
+
+**Endpoints:**
+- `GET /subscribe/:events` - SSE stream with resumption support
+
+### Enhanced Submit Routes
+
+Register transaction submission with peer broadcasting:
+
+```go
+routes.RegisterSubmitRoutes(app, &routes.SubmitRoutesConfig{
+    Engine:          engine,
+    LibP2PSync:      libp2pSync,     // Optional
+    PeerBroadcaster: broadcaster,    // Optional
+})
+```
+
+**Endpoints:**
+- `POST /api/v1/submit` - Enhanced transaction submission
+
+## Sync Package
+
+The sync package provides peer synchronization management.
+
+### SSE Sync
+
+```go
+import "github.com/b-open-io/overlay/sync"
+
+// Configure peer-topic mapping
+peerTopics := map[string][]string{
+    "https://peer1.com": {"topic1", "topic2"},
+    "https://peer2.com": {"topic3"},
+}
+
+// Register SSE sync
+sseSyncManager, err := sync.RegisterSSESync(&sync.SSESyncConfig{
+    Engine:     engine,
+    Storage:    store,
+    PeerTopics: peerTopics,
+    Context:    ctx,
+})
+
+defer sseSyncManager.Stop()
+```
+
+### LibP2P Sync
+
+```go
+// Configure topics
+topics := []string{"tm_token1", "tm_token2"}
+
+// Register LibP2P sync
+libp2pSyncManager, err := sync.RegisterLibP2PSync(&sync.LibP2PSyncConfig{
+    Engine:  engine,
+    Storage: store,
+    Topics:  topics,
+    Context: ctx,
+})
+
+// Access LibP2P instance for other components
+libp2pSync := libp2pSyncManager.GetLibP2PSync()
+
+defer libp2pSyncManager.Stop()
+```
+
 ## Building Overlay Services
 
 ### Topic Manager Implementation
