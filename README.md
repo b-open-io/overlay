@@ -8,6 +8,7 @@ The overlay library provides infrastructure components for building BSV overlay 
 
 - **`lookup/events`** - Event-based lookup services implementing `engine.LookupService`
 - **`storage`** - Storage backends implementing `engine.Storage` (Redis, MongoDB, SQLite)
+- **`queue`** - Database-agnostic cache and queue operations (sets, hashes, sorted sets)
 - **`beef`** - BEEF storage implementing `beef.BeefStorage`
 - **`pubsub`** - Pub/sub system with Redis publishing and SSE broadcasting
 - **`subscriber`** - JungleBus subscription management for transaction streaming
@@ -83,7 +84,7 @@ beefBytes, err := lruCache.LoadBeef(ctx, txid)
 
 ## Storage
 
-The storage package provides implementations of the `engine.Storage` interface for storing and retrieving transaction outputs. All storage backends implement the `EventDataStorage` interface which extends `engine.Storage` with database-agnostic queue management operations.
+The storage package provides implementations of the `engine.Storage` interface for storing and retrieving transaction outputs. The `EventDataStorage` interface extends `engine.Storage` with event-specific operations and integrates with the separate `queue` package for cache and queue management.
 
 ### Storage Factory Configuration
 
@@ -96,13 +97,15 @@ import "github.com/b-open-io/overlay/config"
 storage, err := config.CreateEventStorage(
     eventStorageURL,  // Event storage: "mongodb://localhost:27017/mydb", "./overlay.db" 
     beefStorageURL,   // BEEF storage: "lru://1gb,redis://localhost:6379,junglebus://"
+    queueStorageURL,  // Queue storage: "redis://localhost:6379", "./queue.db"
     pubsubURL,        // PubSub: "redis://localhost:6379", "channels://" (default)
 )
 ```
 
 **Default Configuration** (no dependencies):
 - Event Storage: `~/.1sat/overlay.db` (SQLite)
-- BEEF Storage: `~/.1sat/beef/` (filesystem)  
+- BEEF Storage: `~/.1sat/beef/` (filesystem)
+- Queue Storage: `~/.1sat/queue.db` (SQLite)
 - PubSub: `channels://` (in-memory Go channels)
 
 **Connection String Formats**:
@@ -247,60 +250,60 @@ question = &events.Question{
 
 ## Queue Management
 
-The EventDataStorage interface provides database-agnostic queue management operations that work identically across Redis, MongoDB, and SQLite backends:
+The `queue` package provides database-agnostic cache and queue operations through the `QueueStorage` interface. Access queue operations via `storage.GetQueueStorage()`:
 
 ### Sorted Sets (Priority Queues)
 
 ```go
 // Add items to a priority queue
-err = storage.ZAdd(ctx, "processing-queue", 
-    storage.ZMember{Score: 850000.000000123, Member: "tx1"},
-    storage.ZMember{Score: 850000.000000124, Member: "tx2"},
+queueStore := storage.GetQueueStorage()
+err = queueStore.ZAdd(ctx, "processing-queue", 
+    queue.ScoredMember{Score: 850000.000000123, Member: "tx1"},
+    queue.ScoredMember{Score: 850000.000000124, Member: "tx2"},
 )
 
 // Get items by score range
-members, err := storage.ZRange(ctx, "processing-queue", 
+members, err := queueStore.ZRangeByScore(ctx, "processing-queue", 
     850000, 851000,  // min, max scores
-    0, 100)          // offset, limit (0 = no limit)
+    0, 100)         // offset, limit (0 = no limit)
 
 // Get score for a specific member
-score, err := storage.ZScore(ctx, "processing-queue", "tx1")
+score, err := queueStore.ZScore(ctx, "processing-queue", "tx1")
+
+// Increment score atomically
+newScore, err := queueStore.ZIncrBy(ctx, "processing-queue", "tx1", 0.001)
 
 // Remove processed items
-err = storage.ZRem(ctx, "processing-queue", "tx1", "tx2")
+err = queueStore.ZRem(ctx, "processing-queue", "tx1", "tx2")
 ```
 
 ### Sets (Whitelists, Blacklists)
 
 ```go
 // Add to whitelist
-err = storage.SAdd(ctx, "token-whitelist", "token1", "token2", "token3")
+err = queueStore.SAdd(ctx, "token-whitelist", "token1", "token2", "token3")
 
 // Check membership
-members, err := storage.SMembers(ctx, "token-whitelist")
+members, err := queueStore.SMembers(ctx, "token-whitelist")
 
 // Remove from whitelist
-err = storage.SRem(ctx, "token-whitelist", "token2")
+err = queueStore.SRem(ctx, "token-whitelist", "token2")
 ```
 
 ### Hashes (Configuration, State)
 
 ```go
 // Set individual field
-err = storage.HSet(ctx, "config", "max-size", "1000")
-
-// Set multiple fields at once
-err = storage.HMSet(ctx, "progress", map[string]interface{}{
-    "last-block": 850000,
-    "last-index": 123,
-    "timestamp": time.Now().Unix(),
-})
+err = queueStore.HSet(ctx, "config", "max-size", "1000")
 
 // Get single field
-value, err := storage.HGet(ctx, "config", "max-size")
+value, err := queueStore.HGet(ctx, "config", "max-size")
 
 // Get all fields
-allConfig, err := storage.HGetAll(ctx, "config")
+allConfig, err := queueStore.HGetAll(ctx, "config")
+
+// Delete fields
+err = queueStore.HDel(ctx, "config", "old-field")
 ```
 
 ## PubSub
