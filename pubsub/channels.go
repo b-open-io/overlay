@@ -3,6 +3,7 @@ package pubsub
 import (
 	"context"
 	"sync"
+	"time"
 )
 
 // ChannelPubSub implements the PubSub interface using Go channels
@@ -27,15 +28,22 @@ func NewChannelPubSub() *ChannelPubSub {
 }
 
 // Publish sends data to all subscribers of a topic
-func (cp *ChannelPubSub) Publish(ctx context.Context, topic string, data string) error {
+func (cp *ChannelPubSub) Publish(ctx context.Context, topic string, data string, score ...float64) error {
 	cp.mu.RLock()
 	subscribers := cp.subscribers[topic]
 	cp.mu.RUnlock()
 	
+	// Use provided score or generate timestamp
+	eventScore := float64(time.Now().UnixNano())
+	if len(score) > 0 {
+		eventScore = score[0]
+	}
+	
 	// Create event for real-time notification
 	event := Event{
 		Topic:  topic,
-		Member: data, // Store data as member (usually outpoint string)
+		Member: data, // Store data as member (usually txid string)
+		Score:  eventScore,
 		Source: "channels",
 	}
 	

@@ -46,6 +46,11 @@ type EventDataStorage interface {
 	// Returns nil if no pubsub is configured
 	GetPubSub() pubsub.PubSub
 
+	// LoadBeefByTxidAndTopic loads merged BEEF for a transaction within a topic context
+	// Finds any output for the txid in the topic, merges main BEEF with AncillaryBeef,
+	// and returns atomic BEEF bytes for the transaction
+	LoadBeefByTxidAndTopic(ctx context.Context, txid *chainhash.Hash, topic string) ([]byte, error)
+
 	// Block Data Methods
 	// GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height
 	// Returns transaction structure with inputs/outputs but no protocol-specific data fields

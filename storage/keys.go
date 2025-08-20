@@ -3,7 +3,7 @@ package storage
 import "github.com/bsv-blockchain/go-sdk/transaction"
 
 func OutputTopicKey(outpoint *transaction.Outpoint, topic string) string {
-	return "ot:" + outpoint.String() + ":" + topic
+	return "ot:" + topic + ":" + outpoint.String()
 }
 
 // func SpendTopicKey(topic string) string {

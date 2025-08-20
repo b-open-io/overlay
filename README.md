@@ -145,6 +145,9 @@ err = storage.InsertOutput(ctx, output)
 // Find outputs by topic
 outputs, err := storage.FindUTXOsForTopic(ctx, "my-topic", 0, 100)
 
+// Load topic-contextualized BEEF with merged AncillaryBeef
+beef, err := storage.LoadBeefByTxidAndTopic(ctx, txid, "my-topic")
+
 // Mark outputs as spent
 err = storage.MarkOutputsSpent(ctx, outpoints)
 ```
@@ -310,8 +313,8 @@ The pubsub package provides a unified publish/subscribe system for real-time eve
 // Create Redis pub/sub handler
 pubsub, err := pubsub.NewRedisPubSub("redis://localhost:6379")
 
-// Publish an event (automatically buffers for reconnection)
-err = pubsub.Publish(ctx, "topic", data)
+// Publish an event with optional score for consistency
+err = pubsub.Publish(ctx, "topic", data, score)
 
 // Get recent events for SSE reconnection
 events, err := pubsub.GetRecentEvents(ctx, "topic", sinceScore)
@@ -342,6 +345,48 @@ broadcaster := pubsub.NewPeerBroadcaster(peerTopics)
 
 // Broadcast successful transactions to peers
 err = broadcaster.BroadcastTransaction(ctx, taggedBEEF)
+```
+
+### LibP2PSync - Decentralized Peer Synchronization
+
+LibP2P provides decentralized transaction synchronization with automatic peer discovery:
+
+```go
+// Create LibP2P sync manager with Bitcoin identity
+libp2pSync, err := pubsub.NewLibP2PSync(engine, storage, beefStorage)
+
+// Start sync for specific topics
+topics := []string{"tm_tokenId1", "tm_tokenId2"}
+err = libp2pSync.Start(ctx, topics)
+
+// Publish transaction to LibP2P mesh
+err = libp2pSync.PublishTxid(ctx, "tm_tokenId", txid)
+```
+
+**Key Features:**
+- **Bitcoin Identity**: Uses secp256k1 keys stored in `~/.1sat/libp2p.key`
+- **Automatic Peer Discovery**: mDNS for local networks, DHT for global discovery
+- **Custom BEEF Protocol**: `/bsv-overlay/beef/1.0.0` for direct peer-to-peer BEEF requests
+- **Topic-Contextualized BEEF**: Serves merged BEEF with AncillaryBeef per topic
+- **Transaction-Level Sync**: Publishes txid (not outpoints) eliminating deduplication complexity
+
+**Bootstrap Node:**
+```bash
+# Run standalone bootstrap node for network connectivity
+./bootstrap -p 4001
+
+# Other overlay services can connect to bootstrap addresses for peer discovery
+```
+
+**Integration with Overlay Services:**
+```go
+// Enable LibP2P sync alongside existing SSESync
+if LIBP2P_SYNC {
+    libp2pSync, err := pubsub.NewLibP2PSync(engine, storage, beefStorage)
+    if err := libp2pSync.Start(ctx, topics); err != nil {
+        log.Printf("Failed to start LibP2P sync: %v", err)
+    }
+}
 ```
 
 ## Building Overlay Services

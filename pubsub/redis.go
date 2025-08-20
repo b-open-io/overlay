@@ -3,6 +3,8 @@ package pubsub
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -41,8 +43,13 @@ func NewRedisPubSub(redisURL string) (*RedisPubSub, error) {
 }
 
 // Publish publishes an event to Redis
-func (r *RedisPubSub) Publish(ctx context.Context, topic string, data string) error {
-	return r.redisClient.Publish(ctx, topic, data).Err()
+func (r *RedisPubSub) Publish(ctx context.Context, topic string, data string, score ...float64) error {
+	// Encode score in the message: {score}:{data}
+	message := data
+	if len(score) > 0 {
+		message = fmt.Sprintf("%.0f:%s", score[0], data)
+	}
+	return r.redisClient.Publish(ctx, topic, message).Err()
 }
 
 // Subscribe subscribes to multiple topics and returns a channel of events
@@ -70,11 +77,31 @@ func (r *RedisPubSub) listenLoop() {
 		case <-r.ctx.Done():
 			return
 		case msg := <-r.pubsub.Channel():
-			// Create event with message payload
+			// Parse score from message payload: {score}:{data} or just {data}
+			var member string
+			var score float64
+			
+			if colonIndex := strings.Index(msg.Payload, ":"); colonIndex > 0 {
+				// Score encoded in message
+				if parsedScore, err := strconv.ParseFloat(msg.Payload[:colonIndex], 64); err == nil {
+					score = parsedScore
+					member = msg.Payload[colonIndex+1:]
+				} else {
+					// Fallback if score parsing fails
+					member = msg.Payload
+					score = float64(time.Now().UnixNano())
+				}
+			} else {
+				// No score encoded, use current timestamp
+				member = msg.Payload
+				score = float64(time.Now().UnixNano())
+			}
+			
+			// Create event with parsed data
 			event := Event{
 				Topic:  msg.Channel,
-				Member: msg.Payload, // Store as string, client can parse if needed
-				Score:  float64(time.Now().UnixNano()),
+				Member: member,
+				Score:  score,
 				Source: "redis",
 			}
 			

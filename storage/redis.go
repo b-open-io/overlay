@@ -353,10 +353,26 @@ func (s *RedisEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, out
 }
 
 func (s *RedisEventDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
-	return s.DB.ZAdd(ctx, TxMembershipKey(tx.Topic), redis.Z{
+	score := float64(time.Now().UnixNano())
+	
+	// Add to transaction membership set
+	if err := s.DB.ZAdd(ctx, TxMembershipKey(tx.Topic), redis.Z{
 		Member: tx.Txid.String(),
-		Score:  float64(time.Now().UnixNano()),
-	}).Err()
+		Score:  score,
+	}).Err(); err != nil {
+		return err
+	}
+	
+	// Publish transaction to topic via PubSub (if available)
+	if s.pubsub != nil {
+		// For topic events (tm_*), publish the txid with the score
+		if err := s.pubsub.Publish(ctx, tx.Topic, tx.Txid.String(), score); err != nil {
+			// Log error but don't fail the transaction insertion
+			log.Printf("Failed to publish transaction to topic %s: %v", tx.Topic, err)
+		}
+	}
+	
+	return nil
 }
 
 func (s *RedisEventDataStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
@@ -771,6 +787,58 @@ func (s *RedisEventDataStorage) GetOutputData(ctx context.Context, outpoint *tra
 	}
 
 	return data, nil
+}
+
+// LoadBeefByTxidAndTopic loads merged BEEF for a transaction within a topic context
+func (s *RedisEventDataStorage) LoadBeefByTxidAndTopic(ctx context.Context, txid *chainhash.Hash, topic string) ([]byte, error) {
+	// Scan for any output key matching ot:{topic}:{txid}_*
+	pattern := "ot:" + topic + ":" + txid.String() + "_*"
+	iter := s.DB.Scan(ctx, 0, pattern, 1).Iterator() // Only need one match
+	
+	var targetKey string
+	if iter.Next(ctx) {
+		targetKey = iter.Val()
+	}
+	if err := iter.Err(); err != nil {
+		return nil, fmt.Errorf("failed to scan for outputs: %w", err)
+	}
+	
+	if targetKey == "" {
+		return nil, fmt.Errorf("transaction %s not found in topic %s", txid.String(), topic)
+	}
+	
+	// Get BEEF from beef storage
+	beefBytes, err := s.beefStore.LoadBeef(ctx, txid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load BEEF: %w", err)
+	}
+	
+	// Parse the main BEEF
+	beef, _, _, err := transaction.ParseBeef(beefBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse main BEEF: %w", err)
+	}
+	
+	// Get AncillaryBeef from the found output key (optional)
+	ancillaryBeef, err := s.DB.HGet(ctx, targetKey, "ab").Bytes()
+	if err != nil && err != redis.Nil {
+		return nil, fmt.Errorf("failed to get AncillaryBeef: %w", err)
+	}
+	
+	// Merge AncillaryBeef if present (field is optional)
+	if err == nil && len(ancillaryBeef) > 0 {
+		if err := beef.MergeBeefBytes(ancillaryBeef); err != nil {
+			return nil, fmt.Errorf("failed to merge AncillaryBeef: %w", err)
+		}
+	}
+	
+	// Get atomic BEEF bytes for the specific transaction
+	completeBeef, err := beef.AtomicBytes(txid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate atomic BEEF: %w", err)
+	}
+	
+	return completeBeef, nil
 }
 
 // FindOutputData returns outputs matching the given query criteria as OutputData objects

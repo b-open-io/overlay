@@ -322,7 +322,7 @@ func (s *SSESync) processTransaction(event SSEEvent) {
 // fetchAndSubmitTransaction fetches BEEF and submits to engine
 func (s *SSESync) fetchAndSubmitTransaction(event SSEEvent) error {
 	// Fetch BEEF from peer using topic-specific endpoint
-	beefURL := fmt.Sprintf("%s/api/v1/%s/beef/%s", event.PeerURL, event.Topic, event.Outpoint.String())
+	beefURL := fmt.Sprintf("%s/api/1sat/beef/%s/%s", event.PeerURL, event.Topic, event.Outpoint.Txid.String())
 	
 	resp, err := s.httpClient.Get(beefURL)
 	if err != nil {

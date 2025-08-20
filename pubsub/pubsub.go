@@ -27,7 +27,7 @@ type EventData struct {
 // PubSub interface for unified publishing and subscribing
 type PubSub interface {
 	// Publishing functionality
-	Publish(ctx context.Context, topic string, data string) error
+	Publish(ctx context.Context, topic string, data string, score ...float64) error
 
 	// Subscribing functionality
 	Subscribe(ctx context.Context, topics []string) (<-chan Event, error)
@@ -184,6 +184,6 @@ func (s *SSEManager) Close() error {
 }
 
 // Expose the underlying PubSub methods
-func (s *SSEManager) Publish(ctx context.Context, topic string, data string) error {
-	return s.pubsub.Publish(ctx, topic, data)
+func (s *SSEManager) Publish(ctx context.Context, topic string, data string, score ...float64) error {
+	return s.pubsub.Publish(ctx, topic, data, score...)
 }

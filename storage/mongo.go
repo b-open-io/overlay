@@ -378,15 +378,31 @@ func (s *MongoEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, out
 }
 
 func (s *MongoEventDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
+	score := float64(time.Now().UnixMilli())
+	
 	_, err := s.DB.Collection("tx-topics").UpdateOne(ctx,
 		bson.M{"_id": tx.Txid.String()},
 		bson.M{
 			"$addToSet":    bson.M{"topics": tx.Topic},
-			"$setOnInsert": bson.M{"firstSeen": time.Now().UnixMilli()},
+			"$setOnInsert": bson.M{"firstSeen": score},
 		},
 		options.UpdateOne().SetUpsert(true),
 	)
-	return err
+	
+	if err != nil {
+		return err
+	}
+	
+	// Publish transaction to topic via PubSub (if available)
+	if s.pubsub != nil {
+		// For topic events (tm_*), publish the txid with the score
+		if err := s.pubsub.Publish(ctx, tx.Topic, tx.Txid.String(), score); err != nil {
+			// Log error but don't fail the transaction insertion
+			log.Printf("Failed to publish transaction to topic %s: %v", tx.Topic, err)
+		}
+	}
+	
+	return nil
 }
 
 func (s *MongoEventDataStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
@@ -764,6 +780,50 @@ func (s *MongoEventDataStorage) GetOutputData(ctx context.Context, outpoint *tra
 	}
 
 	return cleanData, nil
+}
+
+// LoadBeefByTxidAndTopic loads merged BEEF for a transaction within a topic context
+func (s *MongoEventDataStorage) LoadBeefByTxidAndTopic(ctx context.Context, txid *chainhash.Hash, topic string) ([]byte, error) {
+	// Find any output for this txid in the specified topic
+	var result struct {
+		AncillaryBeef []byte `bson:"ancillaryBeef"`
+	}
+	
+	err := s.DB.Collection("outputs").FindOne(ctx, bson.M{
+		"txid":  txid.String(),
+		"topic": topic,
+	}).Decode(&result)
+	
+	if err != nil {
+		return nil, fmt.Errorf("transaction %s not found in topic %s: %w", txid.String(), topic, err)
+	}
+	
+	// Get BEEF from beef storage
+	beefBytes, err := s.beefStore.LoadBeef(ctx, txid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load BEEF: %w", err)
+	}
+	
+	// Parse the main BEEF
+	beef, _, _, err := transaction.ParseBeef(beefBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse main BEEF: %w", err)
+	}
+	
+	// Merge AncillaryBeef if present (field is optional)
+	if len(result.AncillaryBeef) > 0 {
+		if err := beef.MergeBeefBytes(result.AncillaryBeef); err != nil {
+			return nil, fmt.Errorf("failed to merge AncillaryBeef: %w", err)
+		}
+	}
+	
+	// Get atomic BEEF bytes for the specific transaction
+	completeBeef, err := beef.AtomicBytes(txid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate atomic BEEF: %w", err)
+	}
+	
+	return completeBeef, nil
 }
 
 // FindOutputData returns outputs matching the given query criteria as OutputData objects
