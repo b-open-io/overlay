@@ -160,8 +160,13 @@ func (s *SSEManager) broadcastToClients(event Event) {
 	// Broadcast to all clients for this topic
 	for _, client := range clients {
 		if writer, ok := client.(interface{ Write([]byte) (int, error); Flush() error }); ok {
-			// Write SSE format: data: <member>\nid: <score>\n\n
-			data := fmt.Sprintf("data: %s\nid: %.0f\n\n", event.Member, event.Score)
+			// Write SSE format: data: <member>\nid: <score>\n\n (only include id if score > 0)
+			var data string
+			if event.Score > 0 {
+				data = fmt.Sprintf("data: %s\nid: %.0f\n\n", event.Member, event.Score)
+			} else {
+				data = fmt.Sprintf("data: %s\n\n", event.Member)
+			}
 			if _, err := writer.Write([]byte(data)); err == nil {
 				writer.Flush()
 			}

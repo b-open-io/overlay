@@ -33,8 +33,8 @@ func (cp *ChannelPubSub) Publish(ctx context.Context, topic string, data string,
 	subscribers := cp.subscribers[topic]
 	cp.mu.RUnlock()
 	
-	// Use provided score or generate timestamp
-	eventScore := float64(time.Now().UnixNano())
+	// Use provided score or 0 if none provided
+	var eventScore float64 = 0
 	if len(score) > 0 {
 		eventScore = score[0]
 	}

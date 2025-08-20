@@ -79,29 +79,27 @@ func (r *RedisPubSub) listenLoop() {
 		case msg := <-r.pubsub.Channel():
 			// Parse score from message payload: {score}:{data} or just {data}
 			var member string
-			var score float64
+			var score float64 = 0 // Default to 0 (no score)
 			
 			if colonIndex := strings.Index(msg.Payload, ":"); colonIndex > 0 {
-				// Score encoded in message
+				// Check if first part is a valid score
 				if parsedScore, err := strconv.ParseFloat(msg.Payload[:colonIndex], 64); err == nil {
 					score = parsedScore
 					member = msg.Payload[colonIndex+1:]
 				} else {
-					// Fallback if score parsing fails
+					// Not a score, treat entire payload as member
 					member = msg.Payload
-					score = float64(time.Now().UnixNano())
 				}
 			} else {
-				// No score encoded, use current timestamp
+				// No colon, entire payload is member
 				member = msg.Payload
-				score = float64(time.Now().UnixNano())
 			}
 			
 			// Create event with parsed data
 			event := Event{
 				Topic:  msg.Channel,
 				Member: member,
-				Score:  score,
+				Score:  score, // 0 if no score provided
 				Source: "redis",
 			}
 			
