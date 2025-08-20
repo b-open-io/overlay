@@ -3,7 +3,6 @@ package pubsub
 import (
 	"context"
 	"sync"
-	"time"
 )
 
 // ChannelPubSub implements the PubSub interface using Go channels
