@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/b-open-io/overlay/beef"
@@ -37,7 +39,7 @@ import (
 //     CreateEventStorage("./overlay.db", "./beef_storage/", "channels://")
 //
 //  4. Default no-dependency setup:
-//     CreateEventStorage("", "", "")  // Uses ./overlay.db, ./beef_storage/, channels://
+//     CreateEventStorage("", "", "")  // Uses ~/.1sat/overlay.db, ~/.1sat/beef/, channels://
 func CreateEventStorage(eventURL, beefURL, pubsubURL string) (storage.EventDataStorage, error) {
 	// Parse beefURL to determine if it's a single string or array
 	var beefURLStrings []string
@@ -61,7 +63,20 @@ func CreateEventStorage(eventURL, beefURL, pubsubURL string) (storage.EventDataS
 		}
 	}
 
-	// Create BEEF storage from connection strings (defaults to ./beef_storage/ if not set)
+	// Create BEEF storage from connection strings (defaults to ~/.1sat/beef/ if not set)
+	if len(beefURLStrings) == 0 {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			beefURLStrings = []string{"./beef_storage/"} // Fallback
+		} else {
+			dotOneSatDir := filepath.Join(homeDir, ".1sat")
+			if err := os.MkdirAll(dotOneSatDir, 0755); err != nil {
+				beefURLStrings = []string{"./beef_storage/"} // Fallback if can't create dir
+			} else {
+				beefURLStrings = []string{filepath.Join(dotOneSatDir, "beef")}
+			}
+		}
+	}
 	beefStorage, err := beef.CreateBeefStorage(beefURLStrings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create BEEF storage: %w", err)

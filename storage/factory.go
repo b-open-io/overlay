@@ -29,8 +29,18 @@ func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage,
 	if connectionString == "" {
 		connectionString = os.Getenv("EVENT_STORAGE")
 		if connectionString == "" {
-			// Default to local SQLite database
-			connectionString = "./overlay.db"
+			// Default to ~/.1sat directory
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				connectionString = "./overlay.db" // Fallback
+			} else {
+				dotOneSatDir := filepath.Join(homeDir, ".1sat")
+				if err := os.MkdirAll(dotOneSatDir, 0755); err != nil {
+					connectionString = "./overlay.db" // Fallback if can't create dir
+				} else {
+					connectionString = filepath.Join(dotOneSatDir, "overlay.db")
+				}
+			}
 		}
 	}
 

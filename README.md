@@ -101,8 +101,8 @@ storage, err := config.CreateEventStorage(
 ```
 
 **Default Configuration** (no dependencies):
-- Event Storage: `./overlay.db` (SQLite)
-- BEEF Storage: `./beef_storage/` (filesystem)  
+- Event Storage: `~/.1sat/overlay.db` (SQLite)
+- BEEF Storage: `~/.1sat/beef/` (filesystem)  
 - PubSub: `channels://` (in-memory Go channels)
 
 **Connection String Formats**:
