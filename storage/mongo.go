@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/b-open-io/overlay/beef"
@@ -132,6 +133,20 @@ func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, pub
 		return nil, err
 	}
 
+	// Index for topic + events + score + spent queries (with topic filtering)
+	indexModel = mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "topic", Value: 1},
+			{Key: "events", Value: 1},
+			{Key: "score", Value: 1},
+			{Key: "spent", Value: 1},
+		},
+	}
+	if _, err = db.Collection("outputs").Indexes().CreateOne(context.TODO(), indexModel); err != nil {
+		return nil, err
+	}
+
+
 	return &MongoEventDataStorage{
 		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, pubsub),
 		DB:                   db,
@@ -145,12 +160,24 @@ func (s *MongoEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 
 	bo := NewBSONOutput(utxo)
 	// Insert or update the output in the "outputs" collection
+	update := bson.M{
+		"$set":      bo,
+		"$addToSet": bson.M{"events": utxo.Topic}, // Add topic as an event
+	}
+	
 	if _, err = s.DB.Collection("outputs").UpdateOne(ctx,
 		bson.M{"outpoint": utxo.Outpoint.String(), "topic": utxo.Topic},
-		bson.M{"$set": bo},
+		update,
 		options.UpdateOne().SetUpsert(true),
 	); err != nil {
 		return err
+	}
+
+	// Manually publish topic event to pubsub since we're not using SaveEvents
+	if s.pubsub != nil {
+		if err := s.pubsub.Publish(ctx, utxo.Topic, utxo.Outpoint.String()); err != nil {
+			log.Printf("Failed to publish topic event: %v", err)
+		}
 	}
 
 
@@ -517,7 +544,7 @@ func (s *MongoEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Cont
 }
 
 // SaveEvents associates multiple events with a single output, storing arbitrary data
-func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64, data interface{}) error {
+func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, height uint32, idx uint64, data interface{}) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -542,7 +569,7 @@ func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transa
 	}
 
 	_, err := s.DB.Collection("outputs").UpdateOne(ctx,
-		bson.M{"outpoint": outpoint.String()},
+		bson.M{"outpoint": outpoint.String(), "topic": topic},
 		update,
 	)
 	if err != nil {
@@ -594,6 +621,11 @@ func (s *MongoEventDataStorage) LookupOutpoints(ctx context.Context, question *E
 
 	// Build match criteria
 	match := bson.M{}
+
+	// Handle topic filtering
+	if question.Topic != "" {
+		match["topic"] = question.Topic
+	}
 
 	// Handle event filtering
 	if question.Event != "" {
@@ -739,6 +771,11 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 	// Build match pipeline
 	matchStage := bson.M{}
 
+	// Add topic filtering
+	if question.Topic != "" {
+		matchStage["topic"] = question.Topic
+	}
+
 	// Add event filtering
 	if question.Event != "" {
 		matchStage["events"] = question.Event
@@ -869,11 +906,12 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 }
 
 // LookupEventScores returns lightweight event scores for simple queries
-func (s *MongoEventDataStorage) LookupEventScores(ctx context.Context, event string, fromScore float64) ([]ScoredMember, error) {
+func (s *MongoEventDataStorage) LookupEventScores(ctx context.Context, topic string, event string, fromScore float64) ([]ScoredMember, error) {
 	// Query the outputs collection for this event without loading additional data
 	filter := bson.M{
+		"topic":  topic,
 		"events": event,
-		"score": bson.M{"$gt": fromScore},
+		"score":  bson.M{"$gt": fromScore},
 	}
 
 	cursor, err := s.DB.Collection("outputs").Find(ctx, filter, 

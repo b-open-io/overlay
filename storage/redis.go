@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -78,15 +77,14 @@ func (s *RedisEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 		}).Err(); err != nil {
 			return err
 		}
-		// Publish event to Redis if publisher is configured
-		if s.pubsub != nil {
-			if err = s.pubsub.Publish(ctx, utxo.Topic, utxo.Outpoint.String()); err != nil {
-				slog.Warn("failed to publish output event", "error", err, "topic", utxo.Topic, "outpoint", utxo.Outpoint.String())
-			}
-		}
 		return nil
 	})
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Add topic as an event using SaveEvents (handles pubsub publishing) 
+	return s.SaveEvents(ctx, &utxo.Outpoint, []string{utxo.Topic}, utxo.Topic, utxo.BlockHeight, utxo.BlockIdx, nil)
 }
 
 func (s *RedisEventDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, topic *string, spent *bool, includeBEEF bool) (o *engine.Output, err error) {
@@ -246,7 +244,7 @@ func (s *RedisEventDataStorage) DeleteOutput(ctx context.Context, outpoint *tran
 
 			// 6. Clean up event-based indexes
 			for _, event := range events {
-				eventSetKey := "event:" + event
+				eventSetKey := fmt.Sprintf("evt:%s:%s", topic, event)
 				p.ZRem(ctx, eventSetKey, outpointStr)
 			}
 		}
@@ -340,7 +338,7 @@ func (s *RedisEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, out
 
 		// Update scores in event sorted sets
 		for _, event := range events {
-			eventSetKey := "event:" + event
+			eventSetKey := fmt.Sprintf("evt:%s:%s", topic, event)
 			if err := p.ZAdd(ctx, eventSetKey, redis.Z{
 				Score:  score,
 				Member: outpointStr,
@@ -528,7 +526,7 @@ func (s *RedisEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Cont
 }
 
 // SaveEvents associates multiple events with a single output, storing arbitrary data
-func (s *RedisEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64, data interface{}) error {
+func (s *RedisEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, height uint32, idx uint64, data interface{}) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -566,7 +564,7 @@ func (s *RedisEventDataStorage) SaveEvents(ctx context.Context, outpoint *transa
 
 		// Add to event-based sorted sets for each event
 		for _, event := range events {
-			eventSetKey := "event:" + event
+			eventSetKey := fmt.Sprintf("evt:%s:%s", topic, event)
 			if err := p.ZAdd(ctx, eventSetKey, redis.Z{
 				Score:  score,
 				Member: outpointStr,
@@ -644,7 +642,7 @@ func (s *RedisEventDataStorage) LookupOutpoints(ctx context.Context, question *E
 	// Handle different event query types
 	if question.Event != "" {
 		// Single event query
-		eventSetKey := "event:" + question.Event
+		eventSetKey := fmt.Sprintf("evt:%s:%s", question.Topic, question.Event)
 		if question.Reverse {
 			outpointStrs, err = s.DB.ZRevRangeByScore(ctx, eventSetKey, &redis.ZRangeBy{
 				Min: minScore,
@@ -665,7 +663,7 @@ func (s *RedisEventDataStorage) LookupOutpoints(ctx context.Context, question *E
 			// Union: combine results from multiple event sets
 			outpointSet := make(map[string]bool)
 			for _, event := range question.Events {
-				eventSetKey := "event:" + event
+				eventSetKey := fmt.Sprintf("evt:%s:%s", question.Topic, event)
 				var eventOutpoints []string
 				if question.Reverse {
 					eventOutpoints, err = s.DB.ZRevRangeByScore(ctx, eventSetKey, &redis.ZRangeBy{
@@ -801,7 +799,7 @@ func (s *RedisEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 	// Handle different event query types
 	if question.Event != "" {
 		// Single event query
-		eventSetKey := "event:" + question.Event
+		eventSetKey := fmt.Sprintf("evt:%s:%s", question.Topic, question.Event)
 		if question.Reverse {
 			outpointStrs, err = s.DB.ZRevRangeByScore(ctx, eventSetKey, &redis.ZRangeBy{
 				Min: minScore,
@@ -822,7 +820,7 @@ func (s *RedisEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 			// Union: combine results from multiple event sets
 			outpointSet := make(map[string]bool)
 			for _, event := range question.Events {
-				eventSetKey := "event:" + event
+				eventSetKey := fmt.Sprintf("evt:%s:%s", question.Topic, event)
 				var eventOutpoints []string
 				if question.Reverse {
 					eventOutpoints, err = s.DB.ZRevRangeByScore(ctx, eventSetKey, &redis.ZRangeBy{
@@ -935,8 +933,8 @@ func (s *RedisEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 }
 
 // LookupEventScores returns lightweight event scores for simple queries
-func (s *RedisEventDataStorage) LookupEventScores(ctx context.Context, event string, fromScore float64) ([]ScoredMember, error) {
-	eventSetKey := "event:" + event
+func (s *RedisEventDataStorage) LookupEventScores(ctx context.Context, topic string, event string, fromScore float64) ([]ScoredMember, error) {
+	eventSetKey := fmt.Sprintf("evt:%s:%s", topic, event)
 	
 	// Query the sorted set directly without parsing outpoints
 	results, err := s.DB.ZRangeByScoreWithScores(ctx, eventSetKey, &redis.ZRangeBy{

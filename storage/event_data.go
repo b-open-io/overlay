@@ -53,7 +53,7 @@ type EventDataStorage interface {
 
 	// Event Management Methods
 	// SaveEvents associates multiple events with a single output, storing arbitrary data
-	SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64, data interface{}) error
+	SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, height uint32, idx uint64, data interface{}) error
 
 	// FindEvents returns all events associated with a given outpoint
 	FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error)
@@ -63,7 +63,7 @@ type EventDataStorage interface {
 	LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error)
 
 	// LookupEventScores returns lightweight event scores for simple queries (no parsing/data loading)
-	LookupEventScores(ctx context.Context, event string, fromScore float64) ([]ScoredMember, error)
+	LookupEventScores(ctx context.Context, topic string, event string, fromScore float64) ([]ScoredMember, error)
 
 	// GetOutputData retrieves the data associated with a specific output
 	GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error)
@@ -96,6 +96,7 @@ type EventDataStorage interface {
 type EventQuestion struct {
 	Event       string    `json:"event"`
 	Events      []string  `json:"events"`
+	Topic       string    `json:"topic"`           // Required topic scoping
 	JoinType    *JoinType `json:"join"`
 	From        float64   `json:"from"`
 	Until       float64   `json:"until"`

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -114,12 +113,12 @@ func (s *SQLiteEventDataStorage) createTables() error {
 		`CREATE TABLE IF NOT EXISTS events (
 			event TEXT NOT NULL,
 			outpoint TEXT NOT NULL,
+			topic TEXT NOT NULL,
 			score REAL NOT NULL,
 			spend TEXT,  -- Denormalized from outputs table for query performance
-			PRIMARY KEY (event, outpoint)
+			PRIMARY KEY (event, outpoint, topic)
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_events_event_score ON events(event, score)`,
-		`CREATE INDEX IF NOT EXISTS idx_events_event_spend_score ON events(event, spend, score)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_topic_event_score_spend ON events(topic, event, score, spend)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_outpoint ON events(outpoint)`,
 
 		`CREATE TABLE IF NOT EXISTS applied_transactions (
@@ -258,11 +257,9 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 		return err
 	}
 
-	// Publish if configured
-	if s.pubsub != nil {
-		if err = s.pubsub.Publish(ctx, utxo.Topic, utxo.Outpoint.String()); err != nil {
-			slog.Warn("failed to publish output event", "error", err, "topic", utxo.Topic, "outpoint", utxo.Outpoint.String())
-		}
+	// Add topic as an event using SaveEvents (handles pubsub publishing)
+	if err := s.SaveEvents(ctx, &utxo.Outpoint, []string{utxo.Topic}, utxo.Topic, utxo.BlockHeight, utxo.BlockIdx, nil); err != nil {
+		return err
 	}
 
 	return nil
@@ -869,7 +866,7 @@ func (s *SQLiteEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Con
 }
 
 // SaveEvents associates multiple events with a single output, storing arbitrary data
-func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64, data interface{}) error {
+func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, height uint32, idx uint64, data interface{}) error {
 	if len(events) == 0 && data == nil {
 		return nil
 	}
@@ -892,9 +889,9 @@ func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 	// Insert events into events table
 	for _, event := range events {
 		_, err = tx.ExecContext(ctx, `
-			INSERT OR REPLACE INTO events (event, outpoint, score)
-			VALUES (?, ?, ?)`,
-			event, outpointStr, score)
+			INSERT OR REPLACE INTO events (event, outpoint, topic, score)
+			VALUES (?, ?, ?, ?)`,
+			event, outpointStr, topic, score)
 		if err != nil {
 			return err
 		}
@@ -991,6 +988,12 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 		}
 		query.WriteString(" WHERE e.event = ?")
 		args = append(args, question.Event)
+		
+		// Add topic filtering if specified
+		if question.Topic != "" {
+			query.WriteString(" AND e.topic = ?")
+			args = append(args, question.Topic)
+		}
 	} else if len(question.Events) > 0 {
 		if question.JoinType == nil || *question.JoinType == JoinTypeUnion {
 			// Union: find outputs with ANY of the events
@@ -1010,6 +1013,12 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 			}
 			query.WriteString(strings.Join(placeholders, ","))
 			query.WriteString(")")
+			
+			// Add topic filtering if specified
+			if question.Topic != "" {
+				query.WriteString(" AND e.topic = ?")
+				args = append(args, question.Topic)
+			}
 		} else if *question.JoinType == JoinTypeIntersect {
 			// Intersection: find outputs that have ALL events
 			query.WriteString("SELECT e1.outpoint, e1.score")
@@ -1335,14 +1344,14 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 }
 
 // LookupEventScores returns lightweight event scores for simple queries
-func (s *SQLiteEventDataStorage) LookupEventScores(ctx context.Context, event string, fromScore float64) ([]ScoredMember, error) {
+func (s *SQLiteEventDataStorage) LookupEventScores(ctx context.Context, topic string, event string, fromScore float64) ([]ScoredMember, error) {
 	// Query the events table directly without joining to outputs
 	rows, err := s.rdb.QueryContext(ctx, `
 		SELECT outpoint, score 
 		FROM events 
-		WHERE event = ? AND score > ? 
+		WHERE topic = ? AND event = ? AND score > ? 
 		ORDER BY score ASC`,
-		event, fromScore)
+		topic, event, fromScore)
 	if err != nil {
 		return nil, err
 	}
