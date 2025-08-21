@@ -1,11 +1,7 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/b-open-io/overlay/beef"
 	"github.com/b-open-io/overlay/pubsub"
@@ -42,43 +38,8 @@ import (
 //  4. Default no-dependency setup:
 //     CreateEventStorage("", "", "", "")  // Uses ~/.1sat/overlay.db, ~/.1sat/beef/, ~/.1sat/queue.db, channels://
 func CreateEventStorage(eventURL, beefURL, queueURL, pubsubURL string) (storage.EventDataStorage, error) {
-	// Parse beefURL to determine if it's a single string or array
-	var beefURLStrings []string
-
-	if beefURL != "" {
-		// First try to parse as JSON array
-		if strings.HasPrefix(strings.TrimSpace(beefURL), "[") {
-			if err := json.Unmarshal([]byte(beefURL), &beefURLStrings); err != nil {
-				return nil, fmt.Errorf("invalid JSON array for BEEF storage: %w", err)
-			}
-		} else if strings.Contains(beefURL, ",") {
-			// If it contains commas, split it
-			beefURLStrings = strings.Split(beefURL, ",")
-			// Trim whitespace from each element
-			for i, s := range beefURLStrings {
-				beefURLStrings[i] = strings.TrimSpace(s)
-			}
-		} else {
-			// Single connection string
-			beefURLStrings = []string{beefURL}
-		}
-	}
-
-	// Create BEEF storage from connection strings (defaults to ~/.1sat/beef/ if not set)
-	if len(beefURLStrings) == 0 {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			beefURLStrings = []string{"./beef_storage/"} // Fallback
-		} else {
-			dotOneSatDir := filepath.Join(homeDir, ".1sat")
-			if err := os.MkdirAll(dotOneSatDir, 0755); err != nil {
-				beefURLStrings = []string{"./beef_storage/"} // Fallback if can't create dir
-			} else {
-				beefURLStrings = []string{filepath.Join(dotOneSatDir, "beef")}
-			}
-		}
-	}
-	beefStorage, err := beef.CreateBeefStorage(beefURLStrings)
+	// Create BEEF storage - let it handle parsing and defaults
+	beefStorage, err := beef.CreateBeefStorage(beefURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create BEEF storage: %w", err)
 	}
@@ -89,27 +50,10 @@ func CreateEventStorage(eventURL, beefURL, queueURL, pubsubURL string) (storage.
 		return nil, fmt.Errorf("failed to create queue storage: %w", err)
 	}
 
-	// Create PubSub implementation
-	var pubSubImpl pubsub.PubSub
-	if pubsubURL == "" {
-		pubsubURL = "channels://" // Default to channel-based pub/sub
-	}
-
-	switch {
-	case strings.HasPrefix(pubsubURL, "redis://"):
-		// Create Redis-based pub/sub
-		if redisPubSub, err := pubsub.NewRedisPubSub(pubsubURL); err != nil {
-			return nil, fmt.Errorf("failed to create Redis pub/sub: %w", err)
-		} else {
-			pubSubImpl = redisPubSub
-		}
-
-	case strings.HasPrefix(pubsubURL, "channels://"), pubsubURL == "":
-		// Create channel-based pub/sub (no dependencies)
-		pubSubImpl = pubsub.NewChannelPubSub()
-
-	default:
-		return nil, fmt.Errorf("unsupported pub/sub URL scheme: %s", pubsubURL)
+	// Create PubSub - let it handle defaults
+	pubSubImpl, err := pubsub.CreatePubSub(pubsubURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create pub/sub: %w", err)
 	}
 
 	// Create event storage from connection string  

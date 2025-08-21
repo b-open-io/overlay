@@ -1,35 +1,72 @@
 package beef
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 )
 
 // CreateBeefStorage creates a hierarchical stack of BeefStorage implementations
-// from a slice of connection strings. Each storage layer uses the next as its fallback.
+// from a connection string. The connection string can be:
+//   - A single connection string: "redis://localhost:6379"
+//   - A JSON array of connection strings: `["lru://100mb", "redis://localhost:6379", "junglebus://"]`
+//   - A comma-separated list: "lru://100mb,redis://localhost:6379,junglebus://"
+//   - Empty string: defaults to ~/.1sat/beef/ (falls back to ./beef/)
 //
-// The first connection string creates the top-level storage (checked first),
-// and the last creates the bottom-level fallback (checked last).
+// Note: If your connection strings contain commas, use the JSON array format.
 //
-// Supported formats:
+// Supported storage formats:
 //   - lru://?size=100mb or lru://?size=1gb (in-memory LRU cache with size limit)
 //   - redis://localhost:6379?ttl=24h (Redis with optional TTL parameter)
 //   - sqlite:///path/to/beef.db or sqlite://beef.db
 //   - file:///path/to/storage/dir
 //   - junglebus:// (fetches from JungleBus API)
 //   - ./beef.db (inferred as SQLite)
-//   - ./beef_storage/ (inferred as filesystem)
+//   - ./beef/ (inferred as filesystem)
 //
 // Example:
 //
-//	CreateBeefStorage([]string{"lru://?size=100mb", "redis://localhost:6379", "sqlite://beef.db", "junglebus://"})
+//	CreateBeefStorage(`["lru://?size=100mb", "redis://localhost:6379", "sqlite://beef.db", "junglebus://"]`)
 //	Creates: LRU -> Redis -> SQLite -> JungleBus
-func CreateBeefStorage(connectionStrings []string) (BeefStorage, error) {
-	// Require at least one connection string
+func CreateBeefStorage(connectionString string) (BeefStorage, error) {
+	// Parse connection string to determine if it's a single string or array
+	var connectionStrings []string
+
+	if connectionString != "" {
+		// First try to parse as JSON array
+		if strings.HasPrefix(strings.TrimSpace(connectionString), "[") {
+			if err := json.Unmarshal([]byte(connectionString), &connectionStrings); err != nil {
+				return nil, fmt.Errorf("invalid JSON array for BEEF storage: %w", err)
+			}
+		} else if strings.Contains(connectionString, ",") {
+			// If it contains commas, split it
+			connectionStrings = strings.Split(connectionString, ",")
+			// Trim whitespace from each element
+			for i, s := range connectionStrings {
+				connectionStrings[i] = strings.TrimSpace(s)
+			}
+		} else {
+			// Single connection string
+			connectionStrings = []string{connectionString}
+		}
+	}
+
+	// Create BEEF storage from connection strings (defaults to ~/.1sat/beef/ if not set)
 	if len(connectionStrings) == 0 {
-		return nil, fmt.Errorf("no storage configurations provided")
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			connectionStrings = []string{"./beef/"} // Fallback
+		} else {
+			dotOneSatDir := filepath.Join(homeDir, ".1sat")
+			if err := os.MkdirAll(dotOneSatDir, 0755); err != nil {
+				connectionStrings = []string{"./beef/"} // Fallback if can't create dir
+			} else {
+				connectionStrings = []string{filepath.Join(dotOneSatDir, "beef")}
+			}
+		}
 	}
 
 	// Build the storage stack from bottom to top
@@ -95,7 +132,7 @@ func CreateBeefStorage(connectionStrings []string) (BeefStorage, error) {
 			// Remove file:// prefix
 			path := strings.TrimPrefix(connectionString, "file://")
 			if path == "" {
-				path = "./beef_storage"
+				path = "./beef"
 			}
 			var err error
 			storage, err = NewFilesystemBeefStorage(path, storage)
@@ -111,7 +148,7 @@ func CreateBeefStorage(connectionStrings []string) (BeefStorage, error) {
 				return nil, err
 			}
 
-		case filepath.IsAbs(connectionString) || strings.HasPrefix(connectionString, "./") || strings.HasPrefix(connectionString, "../"):
+		case filepath.IsAbs(connectionString) || strings.HasPrefix(connectionString, "./") || strings.HasPrefix(connectionString, "../") || strings.HasPrefix(connectionString, "~/"):
 			// Looks like a filesystem path
 			// If it ends with a known DB extension, treat as SQLite
 			if strings.HasSuffix(connectionString, ".db") || strings.HasSuffix(connectionString, ".sqlite") {
