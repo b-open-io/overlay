@@ -485,33 +485,11 @@ func (s *SQLiteEventDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints
 }
 
 func (s *SQLiteEventDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, topic string, consumedBy []*transaction.Outpoint) error {
-	tx, err := s.wdb.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	// Delete existing relationships where this output is being consumed
-	_, err = tx.ExecContext(ctx,
-		"DELETE FROM output_relationships WHERE consumed_outpoint = ? AND topic = ?",
-		outpoint.String(), topic)
-	if err != nil {
-		return err
-	}
-
-	// Insert new relationships where other outputs consume this one
-	for _, cb := range consumedBy {
-		_, err = tx.ExecContext(ctx,
-			"INSERT INTO output_relationships (consuming_outpoint, consumed_outpoint, topic) VALUES (?, ?, ?)",
-			cb.String(),       // The other output is the consumer
-			outpoint.String(), // This output is being consumed
-			topic)
-		if err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
+	// No-op: Output relationships are already managed by InsertOutput method.
+	// InsertOutput handles both OutputsConsumed and ConsumedBy relationships atomically
+	// using INSERT OR IGNORE, which is safe for concurrent access.
+	// This method was causing UNIQUE constraint violations due to DELETE->INSERT race conditions.
+	return nil
 }
 
 func (s *SQLiteEventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
