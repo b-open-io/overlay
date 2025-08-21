@@ -878,26 +878,21 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 
 	// Process outputs
 	for rows.Next() {
-		var outpointStr, txidStr, scriptHex string
+		var outpointStr, txidStr string
+		var scriptBytes []byte
 		var satoshis uint64
 		var spendStr sql.NullString
 		var dataJSON sql.NullString
 
-		err := rows.Scan(&outpointStr, &txidStr, &scriptHex, &satoshis, &spendStr, &dataJSON)
+		err := rows.Scan(&outpointStr, &txidStr, &scriptBytes, &satoshis, &spendStr, &dataJSON)
 		if err != nil {
-			continue
+			return nil, err
 		}
 
 		// Parse outpoint to get vout
 		outpoint, err := transaction.OutpointFromString(outpointStr)
 		if err != nil {
-			continue
-		}
-
-		// Parse script from hex
-		script, err := hex.DecodeString(scriptHex)
-		if err != nil {
-			continue
+			return nil, err
 		}
 
 		// Parse spend if exists
@@ -918,7 +913,7 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 			TxID:     txid,
 			Vout:     outpoint.Index,
 			Data:     data,
-			Script:   script,
+			Script:   scriptBytes,
 			Satoshis: satoshis,
 			Spend:    spend,
 		}

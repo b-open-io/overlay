@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"github.com/b-open-io/overlay/storage"
+	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker/headers_client"
 	"github.com/gofiber/fiber/v2"
@@ -15,6 +16,7 @@ import (
 type CommonRoutesConfig struct {
 	Storage      storage.EventDataStorage
 	ChainTracker *headers_client.Client
+	Engine       *engine.Engine
 }
 
 // ParseEventQuery parses common query parameters for event endpoints
@@ -49,18 +51,26 @@ func ParseEventQuery(c *fiber.Ctx) *storage.EventQuestion {
 
 // RegisterCommonRoutes registers common 1sat API routes that are generic across overlay services
 func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
-	if config == nil || config.Storage == nil || config.ChainTracker == nil {
-		log.Fatal("RegisterCommonRoutes: config, storage, and chaintracker are required")
+	if config == nil || config.Storage == nil || config.ChainTracker == nil || config.Engine == nil {
+		log.Fatal("RegisterCommonRoutes: config, storage, chaintracker, and engine are required")
 	}
 
 	store := config.Storage
 	chaintracker := config.ChainTracker
+	eng := config.Engine
 
 	// Route for event history
 	group.Get("/events/:topic/:event/history", func(c *fiber.Ctx) error {
 		topic := c.Params("topic")
 		event := c.Params("event")
 		log.Printf("Received request for event history: %s (topic: %s)", event, topic)
+
+		// Validate topic is enabled
+		if _, exists := eng.Managers[topic]; !exists {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"message": "Topic not available",
+			})
+		}
 
 		// Build question and call FindOutputData for history
 		question := ParseEventQuery(c)
@@ -80,6 +90,15 @@ func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
 
 	// POST route for multiple events history
 	group.Post("/events/:topic/history", func(c *fiber.Ctx) error {
+		topic := c.Params("topic")
+
+		// Validate topic is enabled
+		if _, exists := eng.Managers[topic]; !exists {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"message": "Topic not available",
+			})
+		}
+
 		// Parse the request body - accept array of events directly
 		var events []string
 		if err := c.BodyParser(&events); err != nil {
@@ -101,7 +120,6 @@ func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
 			})
 		}
 
-		topic := c.Params("topic")
 		log.Printf("Received multi-event history request for %d events (topic: %s)", len(events), topic)
 
 		// Parse query parameters for paging
@@ -127,6 +145,13 @@ func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
 		event := c.Params("event")
 		log.Printf("Received request for unspent events: %s (topic: %s)", event, topic)
 
+		// Validate topic is enabled
+		if _, exists := eng.Managers[topic]; !exists {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"message": "Topic not available",
+			})
+		}
+
 		// Build question and call FindOutputData for unspent
 		question := ParseEventQuery(c)
 		question.Event = event
@@ -145,6 +170,15 @@ func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
 
 	// POST route for multiple events unspent
 	group.Post("/events/:topic/unspent", func(c *fiber.Ctx) error {
+		topic := c.Params("topic")
+
+		// Validate topic is enabled
+		if _, exists := eng.Managers[topic]; !exists {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"message": "Topic not available",
+			})
+		}
+
 		// Parse the request body - accept array of events directly
 		var events []string
 		if err := c.BodyParser(&events); err != nil {
@@ -166,7 +200,6 @@ func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
 			})
 		}
 
-		topic := c.Params("topic")
 		log.Printf("Received multi-event unspent request for %d events (topic: %s)", len(events), topic)
 
 		// Parse query parameters for paging
@@ -249,6 +282,13 @@ func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
 		txidStr := c.Params("txid")
 
 		log.Printf("BEEF request for topic %s, txid %s", topic, txidStr)
+
+		// Validate topic is enabled
+		if _, exists := eng.Managers[topic]; !exists {
+			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
+				"message": "Topic not available",
+			})
+		}
 
 		// Parse txid
 		txid, err := chainhash.NewHashFromHex(txidStr)
