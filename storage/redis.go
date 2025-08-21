@@ -543,6 +543,164 @@ func (s *RedisEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Cont
 	return transactions, nil
 }
 
+// GetTransactionByTopic returns a single transaction for a topic by txid
+func (s *RedisEventDataStorage) GetTransactionByTopic(ctx context.Context, topic string, txid *chainhash.Hash, includeBeef ...bool) (*TransactionData, error) {
+	// Scan for any output key matching ot:{topic}:{txid}_*
+	pattern := "ot:" + topic + ":" + txid.String() + "_*"
+	iter := s.DB.Scan(ctx, 0, pattern, 0).Iterator()
+	
+	var outputs []*OutputData
+	txOutputMap := make(map[chainhash.Hash][]*OutputData)
+	
+	// Process each output for this transaction
+	for iter.Next(ctx) {
+		key := iter.Val()
+		// Extract outpoint from key format: ot:{topic}:{txid}_{vout}
+		parts := strings.Split(key, ":")
+		if len(parts) < 3 {
+			continue
+		}
+		outpointStr := parts[2] // {txid}_{vout}
+		
+		outpoint, err := transaction.OutpointFromString(outpointStr)
+		if err != nil {
+			continue
+		}
+		
+		// Get the general output data
+		outputData, err := s.DB.HGetAll(ctx, outputKey(outpoint)).Result()
+		if err != nil {
+			continue
+		}
+		
+		// Parse satoshis
+		var satoshis uint64
+		if satoshisStr, ok := outputData["st"]; ok {
+			satoshis, _ = strconv.ParseUint(satoshisStr, 10, 64)
+		}
+		
+		// Parse script (stored as raw bytes, not base64)
+		var script []byte
+		if scriptStr, ok := outputData["sc"]; ok {
+			script = []byte(scriptStr)
+		}
+		
+		// Get data
+		var data interface{}
+		dataKey := "data:" + outpointStr
+		if dataJSON, err := s.DB.Get(ctx, dataKey).Result(); err == nil && dataJSON != "" {
+			json.Unmarshal([]byte(dataJSON), &data)
+		}
+		
+		// Parse spend if exists
+		var spend *chainhash.Hash
+		if spendStr, ok := outputData["sp"]; ok && spendStr != "" {
+			if spendHash, err := chainhash.NewHashFromHex(spendStr); err == nil {
+				spend = spendHash
+			}
+		}
+		
+		output := &OutputData{
+			TxID:     txid,
+			Vout:     outpoint.Index,
+			Data:     data,
+			Script:   script,
+			Satoshis: satoshis,
+			Spend:    spend,
+		}
+		
+		outputs = append(outputs, output)
+		txOutputMap[*txid] = append(txOutputMap[*txid], output)
+	}
+	
+	if err := iter.Err(); err != nil {
+		return nil, err
+	}
+	
+	// If no outputs found, transaction doesn't exist in this topic
+	if len(outputs) == 0 {
+		return nil, fmt.Errorf("transaction not found")
+	}
+	
+	// Get inputs for this transaction (similar to GetTransactionsByTopicAndHeight logic)
+	var inputs []*OutputData
+	for _, output := range outputs {
+		// Skip if already spent
+		if output.Spend == nil {
+			continue
+		}
+		
+		// Get input information
+		inputOutpointStrs, err := s.DB.SMembers(ctx, "spends:"+output.Spend.String()).Result()
+		if err != nil {
+			continue
+		}
+		
+		for _, inputOutpointStr := range inputOutpointStrs {
+			inputOutpoint, err := transaction.OutpointFromString(inputOutpointStr)
+			if err != nil {
+				continue
+			}
+			
+			// Get input data
+			inputData, err := s.DB.HGetAll(ctx, outputKey(inputOutpoint)).Result()
+			if err != nil {
+				continue
+			}
+			
+			// Parse input satoshis
+			var satoshis uint64
+			if satoshisStr, ok := inputData["st"]; ok {
+				satoshis, _ = strconv.ParseUint(satoshisStr, 10, 64)
+			}
+			
+			// Parse input script
+			var script []byte
+			if scriptStr, ok := inputData["sc"]; ok {
+				script = []byte(scriptStr)
+			}
+			
+			// Get input data
+			var data interface{}
+			dataKey := "data:" + inputOutpointStr
+			if dataJSON, err := s.DB.Get(ctx, dataKey).Result(); err == nil && dataJSON != "" {
+				json.Unmarshal([]byte(dataJSON), &data)
+			}
+			
+			// Create OutputData for input with source txid
+			sourceTxid := inputOutpoint.Txid
+			input := &OutputData{
+				TxID:     &sourceTxid,
+				Vout:     inputOutpoint.Index,
+				Data:     data,
+				Script:   script,
+				Satoshis: satoshis,
+			}
+			inputs = append(inputs, input)
+		}
+	}
+	
+	// Build TransactionData
+	txData := &TransactionData{
+		TxID:    *txid,
+		Outputs: outputs,
+		Inputs:  inputs,
+	}
+	
+	// Load BEEF if requested
+	if len(includeBeef) > 0 && includeBeef[0] {
+		beef, err := s.LoadBeefByTxidAndTopic(ctx, txid, topic)
+		if err != nil {
+			// Log but don't fail - BEEF is optional
+			// Could add logging here if needed
+		} else {
+			txData.Beef = beef
+		}
+	}
+	
+	return txData, nil
+}
+
 // SaveEvents associates multiple events with a single output, storing arbitrary data
 func (s *RedisEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, height uint32, idx uint64, data interface{}) error {
 	if len(events) == 0 {

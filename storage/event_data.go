@@ -28,6 +28,7 @@ type TransactionData struct {
 	TxID    chainhash.Hash `json:"txid"`
 	Inputs  []*OutputData  `json:"inputs"`
 	Outputs []*OutputData  `json:"outputs"`
+	Beef    []byte         `json:"beef,omitempty"` // Optional BEEF data
 }
 
 // EventDataStorage extends the base Storage interface with event data and lookup capabilities
@@ -54,6 +55,10 @@ type EventDataStorage interface {
 	// GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height
 	// Returns transaction structure with inputs/outputs but no protocol-specific data fields
 	GetTransactionsByTopicAndHeight(ctx context.Context, topic string, height uint32) ([]*TransactionData, error)
+
+	// GetTransactionByTopic returns a single transaction for a topic by txid
+	// Optional includeBeef parameter determines if BEEF data should be populated
+	GetTransactionByTopic(ctx context.Context, topic string, txid *chainhash.Hash, includeBeef ...bool) (*TransactionData, error)
 
 	// Event Management Methods
 	// SaveEvents associates multiple events with a single output, storing arbitrary data

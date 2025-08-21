@@ -560,6 +560,145 @@ func (s *MongoEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Cont
 	return transactions, nil
 }
 
+// GetTransactionByTopic returns a single transaction for a topic by txid
+func (s *MongoEventDataStorage) GetTransactionByTopic(ctx context.Context, topic string, txid *chainhash.Hash, includeBeef ...bool) (*TransactionData, error) {
+	collection := s.DB.Collection("outputs")
+
+	// Find all outputs for this specific transaction and topic
+	pipeline := bson.A{
+		// Match outputs for the topic and transaction
+		bson.D{{Key: "$match", Value: bson.D{
+			{Key: "topic", Value: topic},
+			{Key: "txid", Value: txid.String()},
+		}}},
+		
+		// Group by transaction ID and collect outputs
+		bson.D{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$txid"},
+			{Key: "outputs", Value: bson.D{{Key: "$push", Value: bson.D{
+				{Key: "outpoint", Value: "$outpoint"},
+				{Key: "vout", Value: "$vout"},
+				{Key: "script", Value: "$script"},
+				{Key: "satoshis", Value: "$satoshis"},
+				{Key: "spend", Value: "$spend"},
+				{Key: "data", Value: "$data"},
+			}}}},
+		}}},
+	}
+
+	cursor, err := collection.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var result struct {
+		TxID    string `bson:"_id"`
+		Outputs []struct {
+			Outpoint string      `bson:"outpoint"`
+			Vout     uint32      `bson:"vout"`
+			Script   []byte      `bson:"script"`
+			Satoshis uint64      `bson:"satoshis"`
+			Spend    string      `bson:"spend,omitempty"`
+			Data     interface{} `bson:"data,omitempty"`
+		} `bson:"outputs"`
+	}
+
+	if !cursor.Next(ctx) {
+		return nil, fmt.Errorf("transaction not found")
+	}
+
+	if err := cursor.Decode(&result); err != nil {
+		return nil, err
+	}
+
+	// Build TransactionData
+	txData := &TransactionData{
+		TxID:    *txid,
+		Outputs: make([]*OutputData, 0, len(result.Outputs)),
+	}
+
+	// Convert outputs
+	for _, output := range result.Outputs {
+		// Parse spend if exists
+		var spend *chainhash.Hash
+		if output.Spend != "" {
+			if spendHash, err := chainhash.NewHashFromHex(output.Spend); err == nil {
+				spend = spendHash
+			}
+		}
+
+		outputData := &OutputData{
+			TxID:     txid,
+			Vout:     output.Vout,
+			Data:     output.Data,
+			Script:   output.Script,
+			Satoshis: output.Satoshis,
+			Spend:    spend,
+		}
+
+		txData.Outputs = append(txData.Outputs, outputData)
+	}
+
+	// Get inputs for this transaction
+	inputPipeline := bson.A{
+		bson.D{{Key: "$match", Value: bson.D{
+			{Key: "spend", Value: txid.String()},
+		}}},
+	}
+
+	inputCursor, err := collection.Aggregate(ctx, inputPipeline)
+	if err != nil {
+		return nil, err
+	}
+	defer inputCursor.Close(ctx)
+
+	txData.Inputs = make([]*OutputData, 0)
+
+	for inputCursor.Next(ctx) {
+		var input struct {
+			Outpoint string      `bson:"outpoint"`
+			TxID     string      `bson:"txid"`
+			Vout     uint32      `bson:"vout"`
+			Script   []byte      `bson:"script"`
+			Satoshis uint64      `bson:"satoshis"`
+			Data     interface{} `bson:"data,omitempty"`
+		}
+
+		if err := inputCursor.Decode(&input); err != nil {
+			continue
+		}
+
+		// Parse source txid
+		sourceTxid, err := chainhash.NewHashFromHex(input.TxID)
+		if err != nil {
+			continue
+		}
+
+		inputData := &OutputData{
+			TxID:     sourceTxid,
+			Vout:     input.Vout,
+			Data:     input.Data,
+			Script:   input.Script,
+			Satoshis: input.Satoshis,
+		}
+
+		txData.Inputs = append(txData.Inputs, inputData)
+	}
+
+	// Load BEEF if requested
+	if len(includeBeef) > 0 && includeBeef[0] {
+		beef, err := s.LoadBeefByTxidAndTopic(ctx, txid, topic)
+		if err != nil {
+			// Log but don't fail - BEEF is optional
+		} else {
+			txData.Beef = beef
+		}
+	}
+
+	return txData, nil
+}
+
 // SaveEvents associates multiple events with a single output, storing arbitrary data
 func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, height uint32, idx uint64, data interface{}) error {
 	if len(events) == 0 {

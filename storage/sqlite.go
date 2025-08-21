@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -879,6 +880,150 @@ func (s *SQLiteEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Con
 	}
 
 	return transactions, nil
+}
+
+// GetTransactionByTopic returns a single transaction for a topic by txid
+func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topic string, txid *chainhash.Hash, includeBeef ...bool) (*TransactionData, error) {
+	// Query 1: Get all outputs for the specific transaction and topic
+	query := `SELECT outpoint, txid, script, satoshis, spend, data 
+	         FROM outputs 
+	         WHERE topic = ? AND txid = ?
+	         ORDER BY outpoint`
+
+	rows, err := s.rdb.QueryContext(ctx, query, topic, txid.String())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var outputs []*OutputData
+
+	// Process outputs
+	for rows.Next() {
+		var outpointStr, txidStr, scriptHex string
+		var satoshis uint64
+		var spendStr sql.NullString
+		var dataJSON sql.NullString
+
+		err := rows.Scan(&outpointStr, &txidStr, &scriptHex, &satoshis, &spendStr, &dataJSON)
+		if err != nil {
+			continue
+		}
+
+		// Parse outpoint to get vout
+		outpoint, err := transaction.OutpointFromString(outpointStr)
+		if err != nil {
+			continue
+		}
+
+		// Parse script from hex
+		script, err := hex.DecodeString(scriptHex)
+		if err != nil {
+			continue
+		}
+
+		// Parse spend if exists
+		var spend *chainhash.Hash
+		if spendStr.Valid && spendStr.String != "" {
+			if spendHash, err := chainhash.NewHashFromHex(spendStr.String); err == nil {
+				spend = spendHash
+			}
+		}
+
+		// Parse data if exists
+		var data interface{}
+		if dataJSON.Valid && dataJSON.String != "" {
+			json.Unmarshal([]byte(dataJSON.String), &data)
+		}
+
+		output := &OutputData{
+			TxID:     txid,
+			Vout:     outpoint.Index,
+			Data:     data,
+			Script:   script,
+			Satoshis: satoshis,
+			Spend:    spend,
+		}
+
+		outputs = append(outputs, output)
+	}
+
+	// If no outputs found, transaction doesn't exist in this topic
+	if len(outputs) == 0 {
+		return nil, fmt.Errorf("transaction not found")
+	}
+
+	// Query 2: Get all inputs for this transaction using spend references
+	var inputs []*OutputData
+	inputQuery := `SELECT outpoint, txid, script, satoshis, data 
+	              FROM outputs 
+	              WHERE spend = ?`
+
+	inputRows, err := s.rdb.QueryContext(ctx, inputQuery, txid.String())
+	if err != nil {
+		return nil, err
+	}
+	defer inputRows.Close()
+
+	for inputRows.Next() {
+		var outpointStr, txidStr, scriptHex string
+		var satoshis uint64
+		var dataJSON sql.NullString
+
+		err := inputRows.Scan(&outpointStr, &txidStr, &scriptHex, &satoshis, &dataJSON)
+		if err != nil {
+			continue
+		}
+
+		// Parse outpoint to get vout
+		outpoint, err := transaction.OutpointFromString(outpointStr)
+		if err != nil {
+			continue
+		}
+
+		// Parse script from hex
+		script, err := hex.DecodeString(scriptHex)
+		if err != nil {
+			continue
+		}
+
+		// Parse data if exists
+		var data interface{}
+		if dataJSON.Valid && dataJSON.String != "" {
+			json.Unmarshal([]byte(dataJSON.String), &data)
+		}
+
+		// Create OutputData for input with source txid
+		sourceTxid := outpoint.Txid
+		input := &OutputData{
+			TxID:     &sourceTxid,
+			Vout:     outpoint.Index,
+			Data:     data,
+			Script:   script,
+			Satoshis: satoshis,
+		}
+
+		inputs = append(inputs, input)
+	}
+
+	// Build TransactionData
+	txData := &TransactionData{
+		TxID:    *txid,
+		Outputs: outputs,
+		Inputs:  inputs,
+	}
+
+	// Load BEEF if requested
+	if len(includeBeef) > 0 && includeBeef[0] {
+		beef, err := s.LoadBeefByTxidAndTopic(ctx, txid, topic)
+		if err != nil {
+			// Log but don't fail - BEEF is optional
+		} else {
+			txData.Beef = beef
+		}
+	}
+
+	return txData, nil
 }
 
 // SaveEvents associates multiple events with a single output, storing arbitrary data
