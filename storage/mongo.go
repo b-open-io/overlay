@@ -1000,3 +1000,8 @@ func (s *MongoEventDataStorage) LookupEventScores(ctx context.Context, topic str
 	return members, cursor.Err()
 }
 
+// CountOutputs returns the total count of outputs in a given topic
+func (s *MongoEventDataStorage) CountOutputs(ctx context.Context, topic string) (int64, error) {
+	return s.DB.Collection("outputs").CountDocuments(ctx, bson.M{"topic": topic})
+}
+

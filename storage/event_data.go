@@ -75,6 +75,10 @@ type EventDataStorage interface {
 	// FindOutputData returns outputs matching the given query criteria as OutputData objects
 	// Supports paging with score-based 'from' parameter and can include spent outputs for history
 	FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error)
+
+	// CountOutputs returns the total count of outputs in a given topic
+	// Used for efficient balance calculation without fetching all output data
+	CountOutputs(ctx context.Context, topic string) (int64, error)
 }
 
 // EventQuestion defines query parameters for event-based lookups

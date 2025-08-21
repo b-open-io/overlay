@@ -19,6 +19,17 @@ func NewSQLiteQueueStorage(dbPath string) (*SQLiteQueueStorage, error) {
 		return nil, err
 	}
 
+	// Configure SQLite for concurrent access
+	if _, err = db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
+		return nil, err
+	}
+	if _, err = db.Exec("PRAGMA synchronous=NORMAL;"); err != nil {
+		return nil, err
+	}
+	if _, err = db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
+		return nil, err
+	}
+
 	s := &SQLiteQueueStorage{db: db}
 	if err := s.createTables(); err != nil {
 		return nil, err
@@ -287,4 +298,21 @@ func (s *SQLiteQueueStorage) ZIncrBy(ctx context.Context, key, member string, in
 		"SELECT score FROM sorted_sets WHERE key_name = ? AND member = ?",
 		key, member).Scan(&newScore)
 	return newScore, err
+}
+
+func (s *SQLiteQueueStorage) ZSum(ctx context.Context, key string) (float64, error) {
+	var sum sql.NullFloat64
+	err := s.db.QueryRowContext(ctx,
+		"SELECT SUM(score) FROM sorted_sets WHERE key_name = ?",
+		key).Scan(&sum)
+	
+	if err != nil {
+		return 0, err
+	}
+	
+	if !sum.Valid {
+		return 0, nil // No rows found, return 0
+	}
+	
+	return sum.Float64, nil
 }

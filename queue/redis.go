@@ -107,6 +107,20 @@ func (s *RedisQueueStorage) ZIncrBy(ctx context.Context, key, member string, inc
 	return s.client.ZIncrBy(ctx, key, increment, member).Result()
 }
 
+func (s *RedisQueueStorage) ZSum(ctx context.Context, key string) (float64, error) {
+	// Get all members with scores
+	results, err := s.client.ZRangeWithScores(ctx, key, 0, -1).Result()
+	if err != nil {
+		return 0, err
+	}
+	
+	var sum float64
+	for _, result := range results {
+		sum += result.Score
+	}
+	return sum, nil
+}
+
 // Helper function to format scores for Redis operations
 func formatScore(score float64) string {
 	if score == -1e9 {

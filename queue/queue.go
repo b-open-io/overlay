@@ -29,4 +29,5 @@ type QueueStorage interface {
 	ZScore(ctx context.Context, key, member string) (float64, error)
 	ZCard(ctx context.Context, key string) (int64, error)
 	ZIncrBy(ctx context.Context, key, member string, increment float64) (float64, error)
+	ZSum(ctx context.Context, key string) (float64, error)
 }

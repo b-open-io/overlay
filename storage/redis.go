@@ -1025,3 +1025,27 @@ func (s *RedisEventDataStorage) LookupEventScores(ctx context.Context, topic str
 	return members, nil
 }
 
+// CountOutputs returns the total count of outputs in a given topic
+func (s *RedisEventDataStorage) CountOutputs(ctx context.Context, topic string) (int64, error) {
+	// In Redis, outputs are stored in sorted sets with topic-based keys
+	// We need to count all outputs across all events in this topic
+	// Use pattern to find all event sets for this topic and sum their cardinalities
+	
+	pattern := fmt.Sprintf("events:%s:*", topic)
+	keys, err := s.DB.Keys(ctx, pattern).Result()
+	if err != nil {
+		return 0, err
+	}
+	
+	var total int64
+	for _, key := range keys {
+		count, err := s.DB.ZCard(ctx, key).Result()
+		if err != nil {
+			return 0, err
+		}
+		total += count
+	}
+	
+	return total, nil
+}
+

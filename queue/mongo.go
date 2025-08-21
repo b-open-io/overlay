@@ -260,3 +260,32 @@ func (s *MongoQueueStorage) ZIncrBy(ctx context.Context, key, member string, inc
 	err := collection.FindOneAndUpdate(ctx, filter, update, opts).Decode(&result)
 	return result.Score, err
 }
+
+func (s *MongoQueueStorage) ZSum(ctx context.Context, key string) (float64, error) {
+	pipeline := []bson.M{
+		{"$match": bson.M{"key": key}},
+		{"$group": bson.M{
+			"_id": nil,
+			"sum": bson.M{"$sum": "$score"},
+		}},
+	}
+
+	cursor, err := s.db.Collection("sorted_sets").Aggregate(ctx, pipeline)
+	if err != nil {
+		return 0, err
+	}
+	defer cursor.Close(ctx)
+
+	if cursor.Next(ctx) {
+		var result struct {
+			Sum float64 `bson:"sum"`
+		}
+		if err := cursor.Decode(&result); err != nil {
+			return 0, err
+		}
+		return result.Sum, nil
+	}
+
+	// No documents found, return 0
+	return 0, nil
+}

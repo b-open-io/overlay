@@ -1430,3 +1430,10 @@ func (s *SQLiteEventDataStorage) LookupEventScores(ctx context.Context, topic st
 	return members, rows.Err()
 }
 
+// CountOutputs returns the total count of outputs in a given topic
+func (s *SQLiteEventDataStorage) CountOutputs(ctx context.Context, topic string) (int64, error) {
+	var count int64
+	err := s.rdb.QueryRowContext(ctx, "SELECT COUNT(1) FROM outputs WHERE topic = ?", topic).Scan(&count)
+	return count, err
+}
+
