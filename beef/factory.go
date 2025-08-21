@@ -9,6 +9,18 @@ import (
 	"strings"
 )
 
+// expandHomePath expands ~ to home directory if the path starts with ~/
+func expandHomePath(path string) (string, error) {
+	if strings.HasPrefix(path, "~/") {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("failed to get home directory: %w", err)
+		}
+		return filepath.Join(homeDir, path[2:]), nil
+	}
+	return path, nil
+}
+
 // CreateBeefStorage creates a hierarchical stack of BeefStorage implementations
 // from a connection string. The connection string can be:
 //   - A single connection string: "redis://localhost:6379"
@@ -122,8 +134,12 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 			if path == "" {
 				path = "./beef.db"
 			}
-			var err error
-			storage, err = NewSQLiteBeefStorage(path, storage)
+			// Expand ~ to home directory
+			expandedPath, err := expandHomePath(path)
+			if err != nil {
+				return nil, err
+			}
+			storage, err = NewSQLiteBeefStorage(expandedPath, storage)
 			if err != nil {
 				return nil, err
 			}
@@ -134,33 +150,45 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 			if path == "" {
 				path = "./beef"
 			}
-			var err error
-			storage, err = NewFilesystemBeefStorage(path, storage)
+			// Expand ~ to home directory
+			expandedPath, err := expandHomePath(path)
+			if err != nil {
+				return nil, err
+			}
+			storage, err = NewFilesystemBeefStorage(expandedPath, storage)
 			if err != nil {
 				return nil, err
 			}
 
 		case strings.HasSuffix(connectionString, ".db"), strings.HasSuffix(connectionString, ".sqlite"):
 			// Looks like a SQLite database file
-			var err error
-			storage, err = NewSQLiteBeefStorage(connectionString, storage)
+			// Expand ~ to home directory
+			expandedPath, err := expandHomePath(connectionString)
+			if err != nil {
+				return nil, err
+			}
+			storage, err = NewSQLiteBeefStorage(expandedPath, storage)
 			if err != nil {
 				return nil, err
 			}
 
 		case filepath.IsAbs(connectionString) || strings.HasPrefix(connectionString, "./") || strings.HasPrefix(connectionString, "../") || strings.HasPrefix(connectionString, "~/"):
 			// Looks like a filesystem path
+			// Expand ~ to home directory
+			expandedPath, err := expandHomePath(connectionString)
+			if err != nil {
+				return nil, err
+			}
+			
 			// If it ends with a known DB extension, treat as SQLite
-			if strings.HasSuffix(connectionString, ".db") || strings.HasSuffix(connectionString, ".sqlite") {
-				var err error
-				storage, err = NewSQLiteBeefStorage(connectionString, storage)
+			if strings.HasSuffix(expandedPath, ".db") || strings.HasSuffix(expandedPath, ".sqlite") {
+				storage, err = NewSQLiteBeefStorage(expandedPath, storage)
 				if err != nil {
 					return nil, err
 				}
 			} else {
 				// Otherwise treat as filesystem storage directory
-				var err error
-				storage, err = NewFilesystemBeefStorage(connectionString, storage)
+				storage, err = NewFilesystemBeefStorage(expandedPath, storage)
 				if err != nil {
 					return nil, err
 				}
