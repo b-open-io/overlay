@@ -11,8 +11,7 @@ The overlay library provides infrastructure components for building BSV overlay 
 - **`queue`** - Database-agnostic cache and queue operations (sets, hashes, sorted sets)
 - **`beef`** - BEEF storage implementing `beef.BeefStorage`
 - **`pubsub`** - Pub/sub system with Redis publishing and SSE broadcasting
-- **`subscriber`** - JungleBus subscription management for transaction streaming
-- **`processor`** - Transaction processing utilities with Redis queue integration
+- **`subscriber`** - JungleBus subscription management for simple transaction streaming use cases
 
 When building overlay services, you implement `engine.TopicManager` for your protocol-specific admission logic, while this library provides the storage and indexing infrastructure through `engine.LookupService` implementations.
 
