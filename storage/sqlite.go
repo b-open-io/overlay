@@ -109,7 +109,8 @@ func (s *SQLiteEventDataStorage) createTables() error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (outpoint, topic)
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_outputs_txid ON outputs(txid)`,
+		`CREATE INDEX IF NOT EXISTS idx_outputs_txid_topic ON outputs(txid, topic)`,
+		`DROP INDEX IF EXISTS idx_outputs_txid`,
 		`CREATE INDEX IF NOT EXISTS idx_outputs_topic_score ON outputs(topic, score)`,
 		`CREATE INDEX IF NOT EXISTS idx_outputs_topic_spend_score ON outputs(topic, spend, score)`,
 
@@ -930,9 +931,9 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 	var inputs []*OutputData
 	inputQuery := `SELECT outpoint, txid, script, satoshis, data 
 	              FROM outputs 
-	              WHERE spend = ?`
+	              WHERE spend = ? AND topic = ?`
 
-	inputRows, err := s.rdb.QueryContext(ctx, inputQuery, txid.String())
+	inputRows, err := s.rdb.QueryContext(ctx, inputQuery, txid.String(), topic)
 	if err != nil {
 		return nil, err
 	}
