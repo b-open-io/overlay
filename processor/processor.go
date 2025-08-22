@@ -107,7 +107,7 @@ func (qp *QueueProcessor) processBatch(ctx context.Context) error {
 			} else {
 				// Remove from queue on success
 				if err := qp.rdb.ZRem(ctx, qp.config.QueueName, txidStr).Err(); err != nil {
-					log.Printf("Failed to remove transaction %s from queue: %v", txidStr, err)
+					log.Panicf("Critical queue cleanup failure: failed to remove transaction %s from queue: %v", txidStr, err)
 				}
 			}
 		}(txidStr)

@@ -77,7 +77,7 @@ func (s *Subscriber) Start(ctx context.Context) error {
 					Member: txn.Id,
 					Score:  float64(txn.BlockHeight)*1e9 + float64(txn.BlockIndex),
 				}).Err(); err != nil {
-					log.Printf("Failed to add transaction to queue: %v", err)
+					log.Panicf("Critical queue failure: failed to add transaction to queue: %v", err)
 				}
 			},
 			OnStatus: func(status *models.ControlResponse) {
@@ -86,7 +86,7 @@ func (s *Subscriber) Start(ctx context.Context) error {
 				case 200:
 					// Update progress
 					if err := s.rdb.HSet(ctx, "progress", s.config.TopicID, status.Block+1).Err(); err != nil {
-						log.Printf("Failed to update progress: %v", err)
+						log.Panicf("Critical progress update failure: %v", err)
 					}
 					txcount = 0
 				case 999:
