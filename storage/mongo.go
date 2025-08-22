@@ -714,9 +714,11 @@ func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transa
 
 	// Update the output document with events, score, and data
 	update := bson.M{
+		"$addToSet": bson.M{
+			"events": bson.M{"$each": events},
+		},
 		"$set": bson.M{
-			"events": events,
-			"score":  score,
+			"score": score,
 		},
 	}
 
