@@ -289,7 +289,7 @@ func (s *SQLiteEventDataStorage) FindOutput(ctx context.Context, outpoint *trans
 	}
 
 	var output engine.Output
-	var outpointStr string
+	var outpointStr, txidStr string
 	var scriptBytes []byte
 	var ancillaryBeef []byte
 	var spendTxid *string
@@ -297,7 +297,7 @@ func (s *SQLiteEventDataStorage) FindOutput(ctx context.Context, outpoint *trans
 	err := s.rdb.QueryRowContext(ctx, query, args...).Scan(
 		&outpointStr,
 		&output.Topic,
-		&output.Outpoint.Txid,
+		&txidStr,
 		&scriptBytes,
 		&output.Satoshis,
 		&spendTxid, // Now scanning spend field as *string
