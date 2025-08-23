@@ -416,14 +416,19 @@ func (s *SQLiteEventDataStorage) FindOutputsForTransaction(ctx context.Context, 
 }
 
 func (s *SQLiteEventDataStorage) FindUTXOsForTopic(ctx context.Context, topic string, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
+
 	query := `SELECT outpoint, topic, txid, script, satoshis, spend, 
 		block_height, block_idx, score, ancillary_beef 
 		FROM outputs 
 		WHERE topic = ? AND spend IS NULL AND score >= ?
-		ORDER BY score
-		LIMIT ?`
+		ORDER BY score`
 
-	rows, err := s.rdb.QueryContext(ctx, query, topic, since, limit)
+	args := []any{topic, since}
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
