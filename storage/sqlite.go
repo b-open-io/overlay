@@ -420,7 +420,7 @@ func (s *SQLiteEventDataStorage) FindUTXOsForTopic(ctx context.Context, topic st
 	query := `SELECT outpoint, topic, txid, script, satoshis, spend, 
 		block_height, block_idx, score, ancillary_beef 
 		FROM outputs 
-		WHERE topic = ? AND spend IS NULL AND score >= ?
+		WHERE topic = ? AND score >= ?
 		ORDER BY score`
 
 	args := []any{topic, since}
