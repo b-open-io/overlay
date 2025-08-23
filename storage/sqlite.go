@@ -863,7 +863,7 @@ func (s *SQLiteEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Con
 // GetTransactionByTopic returns a single transaction for a topic by txid
 func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topic string, txid *chainhash.Hash, includeBeef ...bool) (*TransactionData, error) {
 	// Query 1: Get all outputs for the specific transaction and topic
-	query := `SELECT outpoint, txid, script, satoshis, spend, data 
+	query := `SELECT outpoint, txid, script, satoshis, spend, data, block_height, block_idx
 	         FROM outputs 
 	         WHERE topic = ? AND txid = ?
 	         ORDER BY outpoint`
@@ -875,6 +875,8 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 	defer rows.Close()
 
 	var outputs []*OutputData
+	var blockHeight uint32
+	var blockIndex uint32
 
 	// Process outputs
 	for rows.Next() {
@@ -884,7 +886,7 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 		var spendStr sql.NullString
 		var dataJSON sql.NullString
 
-		err := rows.Scan(&outpointStr, &txidStr, &scriptBytes, &satoshis, &spendStr, &dataJSON)
+		err := rows.Scan(&outpointStr, &txidStr, &scriptBytes, &satoshis, &spendStr, &dataJSON, &blockHeight, &blockIndex)
 		if err != nil {
 			return nil, err
 		}
@@ -981,9 +983,11 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 
 	// Build TransactionData
 	txData := &TransactionData{
-		TxID:    *txid,
-		Outputs: outputs,
-		Inputs:  inputs,
+		TxID:        *txid,
+		Outputs:     outputs,
+		Inputs:      inputs,
+		BlockHeight: blockHeight,
+		BlockIndex:  blockIndex,
 	}
 
 	// Load BEEF if requested

@@ -11,7 +11,6 @@ import (
 	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
-
 // OutputData represents an input or output with its data
 type OutputData struct {
 	TxID     *chainhash.Hash `json:"txid,omitempty"` // Transaction ID (for inputs: source txid, for outputs: current txid)
@@ -20,15 +19,17 @@ type OutputData struct {
 	Script   []byte          `json:"script"`
 	Satoshis uint64          `json:"satoshis"`
 	Spend    *chainhash.Hash `json:"spend,omitempty"` // Spending transaction ID (only populated if spent)
-	Score    float64         `json:"score"`           // Sort score for ordering/pagination
+	Score    float64         `json:"score,omitempty"` // Sort score for ordering/pagination
 }
 
 // TransactionData represents a transaction with its inputs and outputs
 type TransactionData struct {
-	TxID    chainhash.Hash `json:"txid"`
-	Inputs  []*OutputData  `json:"inputs"`
-	Outputs []*OutputData  `json:"outputs"`
-	Beef    []byte         `json:"beef,omitempty"` // Optional BEEF data
+	TxID        chainhash.Hash `json:"txid"`
+	Inputs      []*OutputData  `json:"inputs"`
+	Outputs     []*OutputData  `json:"outputs"`
+	Beef        []byte         `json:"beef,omitempty"` // Optional BEEF data
+	BlockHeight uint32         `json:"block_height,omitempty"`
+	BlockIndex  uint32         `json:"block_index,omitempty"`
 }
 
 // EventDataStorage extends the base Storage interface with event data and lookup capabilities
@@ -38,11 +39,11 @@ type EventDataStorage interface {
 
 	// GetBeefStorage returns the underlying BEEF storage implementation
 	GetBeefStorage() beef.BeefStorage
-	
+
 	// GetPubSub returns the PubSub interface for event publishing and buffering
 	// Returns nil if no pubsub is configured
 	GetPubSub() pubsub.PubSub
-	
+
 	// GetQueueStorage returns the QueueStorage interface for Redis-like operations
 	GetQueueStorage() queue.QueueStorage
 
@@ -90,7 +91,7 @@ type EventDataStorage interface {
 type EventQuestion struct {
 	Event       string    `json:"event"`
 	Events      []string  `json:"events"`
-	Topic       string    `json:"topic"`           // Required topic scoping
+	Topic       string    `json:"topic"` // Required topic scoping
 	JoinType    *JoinType `json:"join"`
 	From        float64   `json:"from"`
 	Until       float64   `json:"until"`
