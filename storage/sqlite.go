@@ -1393,7 +1393,7 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 	query.WriteString(`
 		SELECT DISTINCT o.outpoint, o.script, o.satoshis, o.data, s.spend, o.score
 		FROM outputs o
-		LEFT JOIN outputs s ON o.txid = s.spend
+		LEFT JOIN outputs s ON s.spend = o.txid AND s.topic = o.topic
 	`)
 
 	// Add event filtering if needed
