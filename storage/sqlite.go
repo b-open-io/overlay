@@ -29,7 +29,6 @@ type SQLiteEventDataStorage struct {
 
 // GetBeefStorage is inherited from BaseEventDataStorage
 
-
 func NewSQLiteEventDataStorage(dbPath string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) (*SQLiteEventDataStorage, error) {
 	var err error
 	s := &SQLiteEventDataStorage{
@@ -542,11 +541,11 @@ func (s *SQLiteEventDataStorage) InsertAppliedTransaction(ctx context.Context, t
 		tx.Topic,
 		score,
 	)
-	
+
 	if err != nil {
 		return err
 	}
-	
+
 	// Publish transaction to topic via PubSub (if available)
 	if s.pubsub != nil {
 		// For topic events (tm_*), publish the txid with the score
@@ -555,7 +554,7 @@ func (s *SQLiteEventDataStorage) InsertAppliedTransaction(ctx context.Context, t
 			log.Printf("Failed to publish transaction to topic %s: %v", tx.Topic, err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -1123,7 +1122,7 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 		}
 		query.WriteString(" WHERE e.event = ?")
 		args = append(args, question.Event)
-		
+
 		// Add topic filtering if specified
 		if question.Topic != "" {
 			query.WriteString(" AND e.topic = ?")
@@ -1148,7 +1147,7 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 			}
 			query.WriteString(strings.Join(placeholders, ","))
 			query.WriteString(")")
-			
+
 			// Add topic filtering if specified
 			if question.Topic != "" {
 				query.WriteString(" AND e.topic = ?")
@@ -1352,36 +1351,36 @@ func (s *SQLiteEventDataStorage) LoadBeefByTxidAndTopic(ctx context.Context, txi
 		"SELECT ancillary_beef FROM outputs WHERE txid = ? AND topic = ? LIMIT 1",
 		txid.String(), topic,
 	).Scan(&ancillaryBeef)
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("transaction %s not found in topic %s: %w", txid.String(), topic, err)
 	}
-	
+
 	// Get BEEF from beef storage
 	beefBytes, err := s.beefStore.LoadBeef(ctx, txid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load BEEF: %w", err)
 	}
-	
+
 	// Parse the main BEEF
 	beef, _, _, err := transaction.ParseBeef(beefBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse main BEEF: %w", err)
 	}
-	
+
 	// Merge AncillaryBeef if present (field is optional)
 	if len(ancillaryBeef) > 0 {
 		if err := beef.MergeBeefBytes(ancillaryBeef); err != nil {
 			return nil, fmt.Errorf("failed to merge AncillaryBeef: %w", err)
 		}
 	}
-	
+
 	// Get atomic BEEF bytes for the specific transaction
 	completeBeef, err := beef.AtomicBytes(txid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate atomic BEEF: %w", err)
 	}
-	
+
 	return completeBeef, nil
 }
 
@@ -1392,14 +1391,14 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 
 	// Base query selecting OutputData fields including txid and spending txid
 	query.WriteString(`
-		SELECT DISTINCT o.outpoint, o.vout, o.script, o.satoshis, o.data, s.spending_txid, o.score
+		SELECT DISTINCT o.outpoint, o.script, o.satoshis, o.data, s.spend, o.score
 		FROM outputs o
-		LEFT JOIN spends s ON o.outpoint = s.outpoint
+		LEFT JOIN outputs s ON o.txid = s.spend
 	`)
 
 	// Add event filtering if needed
 	if question.Event != "" || len(question.Events) > 0 {
-		query.WriteString(" JOIN output_events oe ON o.outpoint = oe.outpoint")
+		query.WriteString(" JOIN events oe ON o.outpoint = oe.outpoint")
 	}
 
 	query.WriteString(" WHERE 1=1")
@@ -1427,7 +1426,7 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 
 	// Add unspent filter if needed
 	if question.UnspentOnly {
-		query.WriteString(" AND o.spent = 0")
+		query.WriteString(" AND o.spend IS NULL")
 	}
 
 	// Add score range filtering
@@ -1471,14 +1470,13 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 	var results []*OutputData
 	for rows.Next() {
 		var outpointStr string
-		var vout uint32
 		var script []byte
 		var satoshis uint64
 		var dataJSON *string
 		var spendingTxidStr *string
 		var score float64
 
-		if err := rows.Scan(&outpointStr, &vout, &script, &satoshis, &dataJSON, &spendingTxidStr, &score); err != nil {
+		if err := rows.Scan(&outpointStr, &script, &satoshis, &dataJSON, &spendingTxidStr, &score); err != nil {
 			return nil, err
 		}
 
@@ -1498,7 +1496,7 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 
 		result := &OutputData{
 			TxID:     &outpoint.Txid,
-			Vout:     vout,
+			Vout:     outpoint.Index,
 			Script:   script,
 			Satoshis: satoshis,
 			Spend:    spendTxid,
@@ -1555,4 +1553,3 @@ func (s *SQLiteEventDataStorage) CountOutputs(ctx context.Context, topic string)
 	err := s.rdb.QueryRowContext(ctx, "SELECT COUNT(1) FROM outputs WHERE topic = ?", topic).Scan(&count)
 	return count, err
 }
-
