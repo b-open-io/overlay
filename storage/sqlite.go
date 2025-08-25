@@ -3,7 +3,6 @@ package storage
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -194,12 +193,7 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 	}
 
 	// Calculate score
-	var score float64
-	if utxo.BlockHeight > 0 {
-		score = float64(utxo.BlockHeight) + float64(utxo.BlockIdx)/1e9
-	} else {
-		score = float64(time.Now().Unix())
-	}
+	utxo.Score = float64(time.Now().UnixNano())
 
 	// Begin transaction
 	tx, err := s.wdb.BeginTx(ctx, nil)
@@ -220,7 +214,7 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 		utxo.Satoshis,
 		utxo.BlockHeight,
 		utxo.BlockIdx,
-		score,
+		utxo.Score,
 		utxo.AncillaryBeef,
 	)
 	if err != nil {
@@ -307,9 +301,8 @@ func (s *SQLiteEventDataStorage) FindOutput(ctx context.Context, outpoint *trans
 		&ancillaryBeef,
 	)
 	if err == sql.ErrNoRows {
-		return nil, engine.ErrNotFound
-	}
-	if err != nil {
+		return nil, nil
+	} else if err != nil {
 		return nil, err
 	}
 
@@ -502,7 +495,7 @@ func (s *SQLiteEventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid
 }
 
 func (s *SQLiteEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
-	score := float64(blockHeight) + float64(blockIndex)/1e9
+	// score := float64(blockHeight) + float64(blockIndex)/1e9
 	outpointStr := outpoint.String()
 
 	tx, err := s.wdb.BeginTx(ctx, nil)
@@ -514,29 +507,29 @@ func (s *SQLiteEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, ou
 	// Update outputs table
 	_, err = tx.ExecContext(ctx, `
 		UPDATE outputs 
-		SET block_height = ?, block_idx = ?, score = ?, ancillary_beef = ?
+		SET block_height = ?, block_idx = ?, ancillary_beef = ?
 		WHERE outpoint = ? AND topic = ?`,
-		blockHeight, blockIndex, score, ancillaryBeef,
+		blockHeight, blockIndex, ancillaryBeef,
 		outpointStr, topic)
 	if err != nil {
 		return err
 	}
 
-	// Update score in events table for all events associated with this outpoint
-	_, err = tx.ExecContext(ctx, `
-		UPDATE events 
-		SET score = ?
-		WHERE outpoint = ?`,
-		score, outpointStr)
-	if err != nil {
-		return err
-	}
+	// // Update score in events table for all events associated with this outpoint
+	// _, err = tx.ExecContext(ctx, `
+	// 	UPDATE events
+	// 	SET score = ?
+	// 	WHERE outpoint = ?`,
+	// 	score, outpointStr)
+	// if err != nil {
+	// 	return err
+	// }
 
 	return tx.Commit()
 }
 
 func (s *SQLiteEventDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
-	score := float64(time.Now().Unix())
+	score := float64(time.Now().UnixNano())
 
 	_, err := s.wdb.ExecContext(ctx, `
 		INSERT OR REPLACE INTO applied_transactions 
@@ -917,7 +910,7 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 		}
 
 		output := &OutputData{
-			TxID:     txid,
+			// TxID:     txid,
 			Vout:     outpoint.Index,
 			Data:     data,
 			Script:   scriptBytes,
@@ -946,31 +939,28 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 	defer inputRows.Close()
 
 	for inputRows.Next() {
-		var outpointStr, txidStr, scriptHex string
+		var outpointStr, txidStr string
+		var script []byte
 		var satoshis uint64
 		var dataJSON sql.NullString
 
-		err := inputRows.Scan(&outpointStr, &txidStr, &scriptHex, &satoshis, &dataJSON)
+		err := inputRows.Scan(&outpointStr, &txidStr, &script, &satoshis, &dataJSON)
 		if err != nil {
-			continue
+			return nil, err
 		}
 
 		// Parse outpoint to get vout
 		outpoint, err := transaction.OutpointFromString(outpointStr)
 		if err != nil {
-			continue
-		}
-
-		// Parse script from hex
-		script, err := hex.DecodeString(scriptHex)
-		if err != nil {
-			continue
+			return nil, err
 		}
 
 		// Parse data if exists
 		var data interface{}
 		if dataJSON.Valid && dataJSON.String != "" {
-			json.Unmarshal([]byte(dataJSON.String), &data)
+			if err := json.Unmarshal([]byte(dataJSON.String), &data); err != nil {
+				return nil, err
+			}
 		}
 
 		// Create OutputData for input with source txid
@@ -999,7 +989,7 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 	if len(includeBeef) > 0 && includeBeef[0] {
 		beef, err := s.LoadBeefByTxidAndTopic(ctx, txid, topic)
 		if err != nil {
-			// Log but don't fail - BEEF is optional
+			return nil, err
 		} else {
 			txData.Beef = beef
 		}
@@ -1014,13 +1004,7 @@ func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 		return nil
 	}
 
-	var score float64
-	if height > 0 {
-		score = float64(height) + float64(idx)/1e9
-	} else {
-		score = float64(time.Now().Unix())
-	}
-
+	score := float64(time.Now().Unix())
 	outpointStr := outpoint.String()
 
 	tx, err := s.wdb.BeginTx(ctx, nil)

@@ -147,7 +147,6 @@ func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, que
 		return nil, err
 	}
 
-
 	return &MongoEventDataStorage{
 		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub),
 		DB:                   db,
@@ -158,14 +157,15 @@ func (s *MongoEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
-
+	utxo.Score = float64(time.Now().UnixNano())
 	bo := NewBSONOutput(utxo)
+
 	// Insert or update the output in the "outputs" collection
 	update := bson.M{
 		"$set":      bo,
 		"$addToSet": bson.M{"events": utxo.Topic}, // Add topic as an event
 	}
-	
+
 	if _, err = s.DB.Collection("outputs").UpdateOne(ctx,
 		bson.M{"outpoint": utxo.Outpoint.String(), "topic": utxo.Topic},
 		update,
@@ -180,7 +180,6 @@ func (s *MongoEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 			log.Printf("Failed to publish topic event: %v", err)
 		}
 	}
-
 
 	return nil
 }
@@ -379,8 +378,8 @@ func (s *MongoEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, out
 }
 
 func (s *MongoEventDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
-	score := float64(time.Now().UnixMilli())
-	
+	score := float64(time.Now().UnixNano())
+
 	_, err := s.DB.Collection("tx-topics").UpdateOne(ctx,
 		bson.M{"_id": tx.Txid.String()},
 		bson.M{
@@ -389,11 +388,11 @@ func (s *MongoEventDataStorage) InsertAppliedTransaction(ctx context.Context, tx
 		},
 		options.UpdateOne().SetUpsert(true),
 	)
-	
+
 	if err != nil {
 		return err
 	}
-	
+
 	// Publish transaction to topic via PubSub (if available)
 	if s.pubsub != nil {
 		// For topic events (tm_*), publish the txid with the score
@@ -402,7 +401,7 @@ func (s *MongoEventDataStorage) InsertAppliedTransaction(ctx context.Context, tx
 			log.Printf("Failed to publish transaction to topic %s: %v", tx.Topic, err)
 		}
 	}
-	
+
 	return nil
 }
 
@@ -571,7 +570,7 @@ func (s *MongoEventDataStorage) GetTransactionByTopic(ctx context.Context, topic
 			{Key: "topic", Value: topic},
 			{Key: "txid", Value: txid.String()},
 		}}},
-		
+
 		// Group by transaction ID and collect outputs
 		bson.D{{Key: "$group", Value: bson.D{
 			{Key: "_id", Value: "$txid"},
@@ -705,12 +704,7 @@ func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transa
 		return nil
 	}
 
-	var score float64
-	if height > 0 {
-		score = float64(height) + float64(idx)/1e9
-	} else {
-		score = float64(time.Now().Unix())
-	}
+	score := float64(time.Now().UnixNano())
 
 	// Update the output document with events, score, and data
 	update := bson.M{
@@ -930,41 +924,41 @@ func (s *MongoEventDataStorage) LoadBeefByTxidAndTopic(ctx context.Context, txid
 	var result struct {
 		AncillaryBeef []byte `bson:"ancillaryBeef"`
 	}
-	
+
 	err := s.DB.Collection("outputs").FindOne(ctx, bson.M{
 		"txid":  txid.String(),
 		"topic": topic,
 	}).Decode(&result)
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("transaction %s not found in topic %s: %w", txid.String(), topic, err)
 	}
-	
+
 	// Get BEEF from beef storage
 	beefBytes, err := s.beefStore.LoadBeef(ctx, txid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load BEEF: %w", err)
 	}
-	
+
 	// Parse the main BEEF
 	beef, _, _, err := transaction.ParseBeef(beefBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse main BEEF: %w", err)
 	}
-	
+
 	// Merge AncillaryBeef if present (field is optional)
 	if len(result.AncillaryBeef) > 0 {
 		if err := beef.MergeBeefBytes(result.AncillaryBeef); err != nil {
 			return nil, fmt.Errorf("failed to merge AncillaryBeef: %w", err)
 		}
 	}
-	
+
 	// Get atomic BEEF bytes for the specific transaction
 	completeBeef, err := beef.AtomicBytes(txid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate atomic BEEF: %w", err)
 	}
-	
+
 	return completeBeef, nil
 }
 
@@ -1116,7 +1110,7 @@ func (s *MongoEventDataStorage) LookupEventScores(ctx context.Context, topic str
 		"score":  bson.M{"$gt": fromScore},
 	}
 
-	cursor, err := s.DB.Collection("outputs").Find(ctx, filter, 
+	cursor, err := s.DB.Collection("outputs").Find(ctx, filter,
 		options.Find().SetSort(bson.M{"score": 1}).SetProjection(bson.M{"outpoint": 1, "score": 1}))
 	if err != nil {
 		return nil, err
@@ -1145,4 +1139,3 @@ func (s *MongoEventDataStorage) LookupEventScores(ctx context.Context, topic str
 func (s *MongoEventDataStorage) CountOutputs(ctx context.Context, topic string) (int64, error) {
 	return s.DB.Collection("outputs").CountDocuments(ctx, bson.M{"topic": topic})
 }
-
