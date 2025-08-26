@@ -588,8 +588,9 @@ func (l *TokenLookup) OutputAdmittedByTopic(ctx context.Context, payload *engine
         }
         
         // Save all events with the token amount as value
+        score := float64(time.Now().UnixNano())
         err := l.SaveEvents(ctx, payload.Outpoint, events, 
-            blockHeight, blockIndex, tokenData.Amount)
+            payload.Topic, score, tokenData.Amount)
         if err != nil {
             return err
         }
@@ -602,13 +603,11 @@ func (l *TokenLookup) OutputAdmittedByTopic(ctx context.Context, payload *engine
 
 ### Scoring System
 
-Events are sorted using a decimal notation score that combines block height and transaction index:
-- **Mined transactions**: `score = height + index/1e9` (e.g., 850000.000000123)
-  - Block height forms the integer part
-  - Block index forms the decimal part (9 digits, zero-padded)
-  - Supports up to 999,999,999 transactions per block with full precision
-- **Unmined transactions**: `score = unix timestamp` (seconds)
-  - Ensures unmined transactions sort after all mined transactions
+Events are sorted using timestamp-based scores:
+- **All transactions**: `score = time.Now().UnixNano()` 
+  - Uses nanosecond precision for consistent ordering
+  - Higher scores sort later than lower scores
+  - Score-based pagination allows consistent ordering across queries
 
 ### Backend Options
 

@@ -63,7 +63,7 @@ type EventDataStorage interface {
 
 	// Event Management Methods
 	// SaveEvents associates multiple events with a single output, storing arbitrary data
-	SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, height uint32, idx uint64, data interface{}) error
+	SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, score float64, data interface{}) error
 
 	// FindEvents returns all events associated with a given outpoint
 	FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error)

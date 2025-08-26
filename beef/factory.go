@@ -110,7 +110,6 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 			storage = NewLRUBeefStorage(size, storage)
 
 		case strings.HasPrefix(connectionString, "redis://"):
-			// TTL is now parsed inside NewRedisBeefStorage
 			var err error
 			storage, err = NewRedisBeefStorage(connectionString, storage)
 			if err != nil {

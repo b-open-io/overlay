@@ -42,5 +42,5 @@
 //   - BEEF data is stored as binary data (base64 encoded in Redis)
 //   - Transaction IDs are used as keys for efficient lookup
 //   - Storage implementations should handle concurrent access safely
-//   - LoadTx is now a standalone function, not a method on BeefStorage
+//   - LoadTx is a standalone function
 package beef

@@ -255,7 +255,7 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 	}
 
 	// Add topic as an event using SaveEvents (handles pubsub publishing)
-	if err := s.SaveEvents(ctx, &utxo.Outpoint, []string{utxo.Topic}, utxo.Topic, utxo.BlockHeight, utxo.BlockIdx, nil); err != nil {
+	if err := s.SaveEvents(ctx, &utxo.Outpoint, []string{utxo.Topic}, utxo.Topic, utxo.Score, nil); err != nil {
 		return err
 	}
 
@@ -483,10 +483,7 @@ func (s *SQLiteEventDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints
 }
 
 func (s *SQLiteEventDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, topic string, consumedBy []*transaction.Outpoint) error {
-	// No-op: Output relationships are already managed by InsertOutput method.
-	// InsertOutput handles both OutputsConsumed and ConsumedBy relationships atomically
-	// using INSERT OR IGNORE, which is safe for concurrent access.
-	// This method was causing UNIQUE constraint violations due to DELETE->INSERT race conditions.
+	// No-op: Output relationships are managed by InsertOutput method atomically.
 	return nil
 }
 
@@ -495,7 +492,6 @@ func (s *SQLiteEventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid
 }
 
 func (s *SQLiteEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
-	// score := float64(blockHeight) + float64(blockIndex)/1e9
 	outpointStr := outpoint.String()
 
 	tx, err := s.wdb.BeginTx(ctx, nil)
@@ -999,12 +995,10 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 }
 
 // SaveEvents associates multiple events with a single output, storing arbitrary data
-func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, height uint32, idx uint64, data interface{}) error {
+func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, score float64, data interface{}) error {
 	if len(events) == 0 && data == nil {
 		return nil
 	}
-
-	score := float64(time.Now().Unix())
 	outpointStr := outpoint.String()
 
 	tx, err := s.wdb.BeginTx(ctx, nil)
@@ -1232,7 +1226,7 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 		args = append(args, question.Until)
 	}
 
-	// Unspent filter - now we can use the denormalized spend column in events table
+	// Unspent filter
 	if question.UnspentOnly {
 		if question.Event != "" || len(question.Events) > 0 {
 			// Querying events table - use its spend column

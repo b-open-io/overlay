@@ -42,7 +42,7 @@
 //	outputs, err := storage.FindUTXOsForTopic(ctx, "my-topic", 0, 100)
 //
 //	// Save events for an output
-//	err = storage.SaveEvents(ctx, outpoint, []string{"event1", "event2"}, 850000, 123, eventData)
+//	err = storage.SaveEvents(ctx, outpoint, []string{"event1", "event2"}, "topic", 850000.000000123, eventData)
 //
 //	// Create SQLite storage with EventDataStorage interface
 //	sqliteStorage, err := storage.NewSQLiteEventDataStorage(

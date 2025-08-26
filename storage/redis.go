@@ -48,10 +48,10 @@ func (s *RedisEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
+	
+	score := float64(time.Now().UnixNano())
 	_, err = s.DB.Pipelined(ctx, func(p redis.Pipeliner) error {
 		op := utxo.Outpoint.String()
-
-		score := float64(time.Now().UnixNano())
 
 		// Store output topic data
 		if err := p.HMSet(ctx, OutputTopicKey(&utxo.Outpoint, utxo.Topic), outputToTopicMap(utxo)).Err(); err != nil {
@@ -79,7 +79,7 @@ func (s *RedisEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 	}
 
 	// Add topic as an event using SaveEvents (handles pubsub publishing)
-	return s.SaveEvents(ctx, &utxo.Outpoint, []string{utxo.Topic}, utxo.Topic, utxo.BlockHeight, utxo.BlockIdx, nil)
+	return s.SaveEvents(ctx, &utxo.Outpoint, []string{utxo.Topic}, utxo.Topic, score, nil)
 }
 
 func (s *RedisEventDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, topic *string, spent *bool, includeBEEF bool) (o *engine.Output, err error) {
@@ -222,7 +222,7 @@ func (s *RedisEventDataStorage) DeleteOutput(ctx context.Context, outpoint *tran
 
 		// If no other topics use this output, clean up everything
 		if !otherTopics {
-			// 3. Delete the main output hash (contains score and events now)
+			// 3. Delete the main output hash
 			p.Del(ctx, outputKey(outpoint))
 
 			// 4. Delete optional data
@@ -299,29 +299,11 @@ func (s *RedisEventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid 
 }
 
 func (s *RedisEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
-	score := float64(blockHeight) + float64(blockIndex)/1e9
-	outpointStr := outpoint.String()
-
-	// First, get the events associated with this output
-	events, err := s.FindEvents(ctx, outpoint)
-	if err != nil {
-		return err
-	}
-
-	_, err = s.DB.Pipelined(ctx, func(p redis.Pipeliner) error {
-		// Update topic membership score
-		if err := p.ZAdd(ctx, OutMembershipKey(topic), redis.Z{
-			Score:  score,
-			Member: outpointStr,
-		}).Err(); err != nil {
-			return err
-		}
-
-		// Update output block height, index, and score in main hash
+	_, err := s.DB.Pipelined(ctx, func(p redis.Pipeliner) error {
+		// Update output block height and index
 		if err := p.HSet(ctx, outputKey(outpoint),
 			"h", blockHeight,
 			"i", blockIndex,
-			"score", score,
 		).Err(); err != nil {
 			return err
 		}
@@ -329,17 +311,6 @@ func (s *RedisEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, out
 		// Update output topic data
 		if err := p.HSet(ctx, OutputTopicKey(outpoint, topic), "h", blockHeight, "i", blockIndex).Err(); err != nil {
 			return err
-		}
-
-		// Update scores in event sorted sets
-		for _, event := range events {
-			eventSetKey := fmt.Sprintf("evt:%s:%s", topic, event)
-			if err := p.ZAdd(ctx, eventSetKey, redis.Z{
-				Score:  score,
-				Member: outpointStr,
-			}).Err(); err != nil {
-				return err
-			}
 		}
 
 		return nil
@@ -695,12 +666,10 @@ func (s *RedisEventDataStorage) GetTransactionByTopic(ctx context.Context, topic
 }
 
 // SaveEvents associates multiple events with a single output, storing arbitrary data
-func (s *RedisEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, height uint32, idx uint64, data interface{}) error {
+func (s *RedisEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, score float64, data interface{}) error {
 	if len(events) == 0 {
 		return nil
 	}
-
-	score := float64(time.Now().UnixNano())
 
 	outpointStr := outpoint.String()
 
@@ -853,7 +822,7 @@ func (s *RedisEventDataStorage) LookupOutpoints(ctx context.Context, question *E
 			}
 		} else {
 			// For intersection and difference, we'd need more complex Redis operations
-			// For now, return empty results for these complex queries
+			// Return empty results for complex queries not yet implemented
 			outpointStrs = []string{}
 		}
 	} else {
@@ -1062,7 +1031,7 @@ func (s *RedisEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 			}
 		} else {
 			// For intersection and difference, we'd need more complex Redis operations
-			// For now, return empty results for these complex queries
+			// Return empty results for complex queries not yet implemented
 			outpointStrs = []string{}
 		}
 	} else {

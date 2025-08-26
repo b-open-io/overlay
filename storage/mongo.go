@@ -699,12 +699,10 @@ func (s *MongoEventDataStorage) GetTransactionByTopic(ctx context.Context, topic
 }
 
 // SaveEvents associates multiple events with a single output, storing arbitrary data
-func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, height uint32, idx uint64, data interface{}) error {
+func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, score float64, data interface{}) error {
 	if len(events) == 0 {
 		return nil
 	}
-
-	score := float64(time.Now().UnixNano())
 
 	// Update the output document with events, score, and data
 	update := bson.M{

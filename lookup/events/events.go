@@ -3,15 +3,10 @@
 // multiple backend implementations (Redis, MongoDB, SQLite).
 //
 // Scoring System:
-// Events are sorted by a score that combines block height and transaction index.
-// - Mined transactions: score = height + idx/1e9 (e.g., 850000.000000123)
-//   - Block height forms the integer part
-//   - Block index forms the decimal part (9 digits, zero-padded)
-//   - Supports block heights up to 9,007,199 (7+ digits)
-//   - Supports block indices up to 999,999,999 (9 digits)
-// - Unmined transactions: score = current unix timestamp (seconds)
-//   - Ensures unmined transactions sort after all mined transactions
-//   - Unix timestamps are currently ~1.7 billion, well above any block height
+// Events are sorted by a score value passed when saving events.
+// - Typically uses current unix timestamp in nanoseconds (time.Now().UnixNano())
+// - Higher scores sort later than lower scores
+// - Score-based pagination allows consistent ordering across queries
 package events
 
 import (
@@ -68,7 +63,7 @@ type EventLookup interface {
 	
 	// SaveEvents associates multiple events with a single output in one operation.
 	// The data parameter can be used to store arbitrary data (as JSON) associated with the outpoint.
-	SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, height uint32, idx uint64, data interface{}) error
+	SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, score float64, data interface{}) error
 	
 	// LookupOutpoints returns outpoints matching the given query criteria.
 	// The includeData parameter controls whether to fetch associated data (default: false).
