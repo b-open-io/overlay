@@ -14,7 +14,7 @@ import (
 
 // CommonRoutesConfig holds the configuration for common 1sat routes
 type CommonRoutesConfig struct {
-	Storage      storage.EventDataStorage
+	Storage      *storage.EventDataStorage
 	ChainTracker *headers_client.Client
 	Engine       *engine.Engine
 }

@@ -13,7 +13,7 @@ import (
 // LibP2PSyncConfig holds the configuration for LibP2P synchronization
 type LibP2PSyncConfig struct {
 	Engine  *engine.Engine
-	Storage storage.EventDataStorage
+	Storage *storage.EventDataStorage
 	Topics  []string
 	Context context.Context
 }

@@ -18,18 +18,17 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"go.mongodb.org/mongo-driver/v2/x/mongo/driver/connstring"
 )
 
-type MongoEventDataStorage struct {
+type MongoTopicDataStorage struct {
 	BaseEventDataStorage
-	DB *mongo.Database
+	DB    *mongo.Database
+	topic string
 }
 
 // GetBeefStorage is inherited from BaseEventDataStorage
 
-func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) (*MongoEventDataStorage, error) {
-	// Parse the connection string to extract database name
+func NewMongoTopicDataStorage(topic string, connString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) (TopicDataStorage, error) {
 	clientOpts := options.Client().ApplyURI(connString)
 
 	client, err := mongo.Connect(clientOpts)
@@ -37,19 +36,13 @@ func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, que
 		return nil, err
 	}
 
-	// Extract database name from the connection string
-	// MongoDB connection strings can include the database as: mongodb://host/database
-	dbName := "overlay" // default
-	if cs, err := connstring.ParseAndValidate(connString); err == nil && cs.Database != "" {
-		dbName = cs.Database
-	}
-
+	// Create topic-specific database name
+	dbName := fmt.Sprintf("overlay_%s", topic)
 	db := client.Database(dbName)
 
 	indexModel := mongo.IndexModel{
 		Keys: bson.D{
 			{Key: "outpoint", Value: 1},
-			{Key: "topic", Value: 1},
 		},
 		Options: options.Index().SetUnique(true),
 	}
@@ -68,7 +61,6 @@ func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, que
 
 	indexModel = mongo.IndexModel{
 		Keys: bson.D{
-			{Key: "topic", Value: 1},
 			{Key: "blockHeight", Value: 1},
 		},
 	}
@@ -76,27 +68,14 @@ func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, que
 		return nil, err
 	}
 
-	// Index for score-based queries in FindUTXOsForTopic
+	// Index for score-based queries
 	indexModel = mongo.IndexModel{
 		Keys: bson.D{
-			{Key: "topic", Value: 1},
 			{Key: "score", Value: 1},
-			{Key: "spent", Value: 1},
+			{Key: "spend", Value: 1},
 		},
 	}
 	if _, err = db.Collection("outputs").Indexes().CreateOne(context.TODO(), indexModel); err != nil {
-		return nil, err
-	}
-
-	// Index for interactions collection
-	indexModel = mongo.IndexModel{
-		Keys: bson.D{
-			{Key: "host", Value: 1},
-			{Key: "topic", Value: 1},
-		},
-		Options: options.Index().SetUnique(true),
-	}
-	if _, err = db.Collection("interactions").Indexes().CreateOne(context.TODO(), indexModel); err != nil {
 		return nil, err
 	}
 
@@ -134,26 +113,31 @@ func NewMongoEventDataStorage(connString string, beefStore beef.BeefStorage, que
 		return nil, err
 	}
 
-	// Index for topic + events + score + spent queries (with topic filtering)
+	// Index for events + score + spend queries
 	indexModel = mongo.IndexModel{
 		Keys: bson.D{
-			{Key: "topic", Value: 1},
 			{Key: "events", Value: 1},
 			{Key: "score", Value: 1},
-			{Key: "spent", Value: 1},
+			{Key: "spend", Value: 1},
 		},
 	}
 	if _, err = db.Collection("outputs").Indexes().CreateOne(context.TODO(), indexModel); err != nil {
 		return nil, err
 	}
 
-	return &MongoEventDataStorage{
+	return &MongoTopicDataStorage{
 		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub),
 		DB:                   db,
+		topic:                topic,
 	}, nil
 }
 
-func (s *MongoEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
+// GetTopic returns the topic this storage handles
+func (s *MongoTopicDataStorage) GetTopic() string {
+	return s.topic
+}
+
+func (s *MongoTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
 	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
@@ -167,7 +151,7 @@ func (s *MongoEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 	}
 
 	if _, err = s.DB.Collection("outputs").UpdateOne(ctx,
-		bson.M{"outpoint": utxo.Outpoint.String(), "topic": utxo.Topic},
+		bson.M{"outpoint": utxo.Outpoint.String()},
 		update,
 		options.UpdateOne().SetUpsert(true),
 	); err != nil {
@@ -176,7 +160,7 @@ func (s *MongoEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 
 	// Manually publish topic event to pubsub since we're not using SaveEvents
 	if s.pubsub != nil {
-		if err := s.pubsub.Publish(ctx, utxo.Topic, utxo.Outpoint.String()); err != nil {
+		if err := s.pubsub.Publish(ctx, s.topic, utxo.Outpoint.String()); err != nil {
 			log.Printf("Failed to publish topic event: %v", err)
 		}
 	}
@@ -184,11 +168,8 @@ func (s *MongoEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 	return nil
 }
 
-func (s *MongoEventDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, topic *string, spent *bool, includeBEEF bool) (o *engine.Output, err error) {
+func (s *MongoTopicDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, spent *bool, includeBEEF bool) (o *engine.Output, err error) {
 	query := bson.M{"outpoint": outpoint.String()}
-	if topic != nil {
-		query["topic"] = *topic
-	}
 	if spent != nil {
 		if *spent {
 			// If looking for spent outputs, spend field must not be nil
@@ -216,12 +197,12 @@ func (s *MongoEventDataStorage) FindOutput(ctx context.Context, outpoint *transa
 	return o, nil
 }
 
-func (s *MongoEventDataStorage) FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
+func (s *MongoTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
 	ops := make([]string, 0, len(outpoints))
 	for _, outpoint := range outpoints {
 		ops = append(ops, outpoint.String())
 	}
-	query := bson.M{"topic": topic, "outpoint": bson.M{"$in": ops}}
+	query := bson.M{"outpoint": bson.M{"$in": ops}}
 
 	resultsByOutpoint := make(map[string]*engine.Output)
 	if cursor, err := s.DB.Collection("outputs").Find(ctx, query); err != nil {
@@ -253,7 +234,7 @@ func (s *MongoEventDataStorage) FindOutputs(ctx context.Context, outpoints []*tr
 	}
 }
 
-func (s *MongoEventDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
+func (s *MongoTopicDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
 	query := bson.M{"txid": txid.String()}
 
 	if cursor, err := s.DB.Collection("outputs").Find(ctx, query); err != nil {
@@ -281,10 +262,10 @@ func (s *MongoEventDataStorage) FindOutputsForTransaction(ctx context.Context, t
 	}
 }
 
-func (s *MongoEventDataStorage) FindUTXOsForTopic(ctx context.Context, topic string, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
+func (s *MongoTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
 	query := bson.M{
-		"topic": topic,
 		"score": bson.M{"$gte": since},
+		"spend": nil,
 	}
 	findOpts := options.Find().SetSort(bson.M{"score": 1})
 	if limit > 0 {
@@ -315,15 +296,14 @@ func (s *MongoEventDataStorage) FindUTXOsForTopic(ctx context.Context, topic str
 	}
 }
 
-func (s *MongoEventDataStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint, topic string) error {
+func (s *MongoTopicDataStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint) error {
 	_, err := s.DB.Collection("outputs").DeleteOne(ctx, bson.M{
 		"outpoint": outpoint.String(),
-		"topic":    topic,
 	})
 	return err
 }
 
-func (s *MongoEventDataStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *transaction.Outpoint, topic string, beef []byte) error {
+func (s *MongoTopicDataStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *transaction.Outpoint, beef []byte) error {
 	// Parse the beef to get the spending txid
 	_, _, spendTxid, err := transaction.ParseBeef(beef)
 	if err != nil {
@@ -331,43 +311,43 @@ func (s *MongoEventDataStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *t
 	}
 
 	_, err = s.DB.Collection("outputs").UpdateOne(ctx,
-		bson.M{"outpoint": outpoint.String(), "topic": topic},
+		bson.M{"outpoint": outpoint.String()},
 		bson.M{"$set": bson.M{"spend": spendTxid.String()}},
 	)
 	return err
 }
 
-func (s *MongoEventDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spendTxid *chainhash.Hash) error {
+func (s *MongoTopicDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transaction.Outpoint, spendTxid *chainhash.Hash) error {
 	ops := make([]string, 0, len(outpoints))
 	for _, outpoint := range outpoints {
 		ops = append(ops, outpoint.String())
 	}
 	_, err := s.DB.Collection("outputs").UpdateMany(ctx,
-		bson.M{"outpoint": bson.M{"$in": ops}, "topic": topic},
+		bson.M{"outpoint": bson.M{"$in": ops}},
 		bson.M{"$set": bson.M{"spend": spendTxid.String()}},
 	)
 	return err
 }
 
-func (s *MongoEventDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, topic string, consumedBy []*transaction.Outpoint) error {
+func (s *MongoTopicDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, consumedBy []*transaction.Outpoint) error {
 	ops := make([]string, 0, len(consumedBy))
 	for _, outpoint := range consumedBy {
 		ops = append(ops, outpoint.String())
 	}
 	_, err := s.DB.Collection("outputs").UpdateOne(ctx,
-		bson.M{"outpoint": outpoint.String(), "topic": topic},
+		bson.M{"outpoint": outpoint.String()},
 		bson.M{"$addToSet": bson.M{"consumedBy": bson.M{"$each": ops}}},
 	)
 	return err
 }
 
-func (s *MongoEventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
+func (s *MongoTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
 	return s.beefStore.SaveBeef(ctx, txid, beef)
 }
 
-func (s *MongoEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
+func (s *MongoTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
 	_, err := s.DB.Collection("outputs").UpdateOne(ctx,
-		bson.M{"outpoint": outpoint.String(), "topic": topic},
+		bson.M{"outpoint": outpoint.String()},
 		bson.M{"$set": bson.M{
 			"blockHeight":   blockHeight,
 			"blockIdx":      blockIndex,
@@ -377,13 +357,12 @@ func (s *MongoEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, out
 	return err
 }
 
-func (s *MongoEventDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
+func (s *MongoTopicDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
 	score := float64(time.Now().UnixNano())
 
-	_, err := s.DB.Collection("tx-topics").UpdateOne(ctx,
+	_, err := s.DB.Collection("transactions").UpdateOne(ctx,
 		bson.M{"_id": tx.Txid.String()},
 		bson.M{
-			"$addToSet":    bson.M{"topics": tx.Topic},
 			"$setOnInsert": bson.M{"firstSeen": score},
 		},
 		options.UpdateOne().SetUpsert(true),
@@ -396,17 +375,17 @@ func (s *MongoEventDataStorage) InsertAppliedTransaction(ctx context.Context, tx
 	// Publish transaction to topic via PubSub (if available)
 	if s.pubsub != nil {
 		// For topic events (tm_*), publish the txid with the score
-		if err := s.pubsub.Publish(ctx, tx.Topic, tx.Txid.String(), score); err != nil {
+		if err := s.pubsub.Publish(ctx, s.topic, tx.Txid.String(), score); err != nil {
 			// Log error but don't fail the transaction insertion
-			log.Printf("Failed to publish transaction to topic %s: %v", tx.Topic, err)
+			log.Printf("Failed to publish transaction to topic %s: %v", s.topic, err)
 		}
 	}
 
 	return nil
 }
 
-func (s *MongoEventDataStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
-	if err := s.DB.Collection("tx-topics").FindOne(ctx, bson.M{"_id": tx.Txid.String(), "topics": tx.Topic}).Err(); err != nil {
+func (s *MongoTopicDataStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
+	if err := s.DB.Collection("transactions").FindOne(ctx, bson.M{"_id": tx.Txid.String()}).Err(); err != nil {
 		if err == mongo.ErrNoDocuments {
 			return false, nil // Transaction does not exist
 		}
@@ -416,12 +395,11 @@ func (s *MongoEventDataStorage) DoesAppliedTransactionExist(ctx context.Context,
 	return true, nil
 }
 
-func (s *MongoEventDataStorage) UpdateLastInteraction(ctx context.Context, host string, topic string, since float64) error {
+func (s *MongoTopicDataStorage) UpdateLastInteraction(ctx context.Context, host string, since float64) error {
 	_, err := s.DB.Collection("interactions").UpdateOne(ctx,
-		bson.M{"host": host, "topic": topic},
+		bson.M{"host": host},
 		bson.M{"$set": bson.M{
 			"host":      host,
-			"topic":     topic,
 			"score":     since,
 			"updatedAt": time.Now(),
 		}},
@@ -430,11 +408,11 @@ func (s *MongoEventDataStorage) UpdateLastInteraction(ctx context.Context, host 
 	return err
 }
 
-func (s *MongoEventDataStorage) GetLastInteraction(ctx context.Context, host string, topic string) (float64, error) {
+func (s *MongoTopicDataStorage) GetLastInteraction(ctx context.Context, host string) (float64, error) {
 	var result struct {
 		Score float64 `bson:"score"`
 	}
-	err := s.DB.Collection("interactions").FindOne(ctx, bson.M{"host": host, "topic": topic}).Decode(&result)
+	err := s.DB.Collection("interactions").FindOne(ctx, bson.M{"host": host}).Decode(&result)
 	if err != nil {
 		if err == mongo.ErrNoDocuments {
 			return 0, nil // No record exists, return 0 as specified
@@ -445,14 +423,13 @@ func (s *MongoEventDataStorage) GetLastInteraction(ctx context.Context, host str
 }
 
 // GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height
-func (s *MongoEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Context, topic string, height uint32) ([]*TransactionData, error) {
+func (s *MongoTopicDataStorage) GetTransactionsByHeight(ctx context.Context, height uint32) ([]*TransactionData, error) {
 	collection := s.DB.Collection("outputs")
 
 	// Find all outputs for this topic at the specified height
 	pipeline := bson.A{
 		// Match outputs for the topic at the specified block height
 		bson.D{{Key: "$match", Value: bson.D{
-			{Key: "topic", Value: topic},
 			{Key: "blockHeight", Value: height},
 		}}},
 
@@ -514,7 +491,6 @@ func (s *MongoEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Cont
 		// Find inputs for this transaction using aggregation
 		inputPipeline := bson.A{
 			bson.D{{Key: "$match", Value: bson.D{
-				{Key: "topic", Value: topic},
 				{Key: "spend", Value: result.TxID},
 			}}},
 		}
@@ -560,14 +536,13 @@ func (s *MongoEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Cont
 }
 
 // GetTransactionByTopic returns a single transaction for a topic by txid
-func (s *MongoEventDataStorage) GetTransactionByTopic(ctx context.Context, topic string, txid *chainhash.Hash, includeBeef ...bool) (*TransactionData, error) {
+func (s *MongoTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid *chainhash.Hash, includeBeef ...bool) (*TransactionData, error) {
 	collection := s.DB.Collection("outputs")
 
 	// Find all outputs for this specific transaction and topic
 	pipeline := bson.A{
 		// Match outputs for the topic and transaction
 		bson.D{{Key: "$match", Value: bson.D{
-			{Key: "topic", Value: topic},
 			{Key: "txid", Value: txid.String()},
 		}}},
 
@@ -687,7 +662,7 @@ func (s *MongoEventDataStorage) GetTransactionByTopic(ctx context.Context, topic
 
 	// Load BEEF if requested
 	if len(includeBeef) > 0 && includeBeef[0] {
-		beef, err := s.LoadBeefByTxidAndTopic(ctx, txid, topic)
+		beef, err := s.LoadBeefByTxid(ctx, txid)
 		if err != nil {
 			// Log but don't fail - BEEF is optional
 		} else {
@@ -699,7 +674,7 @@ func (s *MongoEventDataStorage) GetTransactionByTopic(ctx context.Context, topic
 }
 
 // SaveEvents associates multiple events with a single output, storing arbitrary data
-func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, score float64, data interface{}) error {
+func (s *MongoTopicDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, score float64, data interface{}) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -719,7 +694,7 @@ func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transa
 	}
 
 	_, err := s.DB.Collection("outputs").UpdateOne(ctx,
-		bson.M{"outpoint": outpoint.String(), "topic": topic},
+		bson.M{"outpoint": outpoint.String()},
 		update,
 	)
 	if err != nil {
@@ -741,7 +716,7 @@ func (s *MongoEventDataStorage) SaveEvents(ctx context.Context, outpoint *transa
 }
 
 // FindEvents returns all events associated with a given outpoint
-func (s *MongoEventDataStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
+func (s *MongoTopicDataStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
 	var result struct {
 		Events []string `bson:"events"`
 	}
@@ -766,16 +741,13 @@ func (s *MongoEventDataStorage) FindEvents(ctx context.Context, outpoint *transa
 }
 
 // LookupOutpoints returns outpoints matching the given query criteria using aggregations for performance
-func (s *MongoEventDataStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
+func (s *MongoTopicDataStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
 	withData := len(includeData) > 0 && includeData[0]
 
 	// Build match criteria
 	match := bson.M{}
 
-	// Handle topic filtering
-	if question.Topic != "" {
-		match["topic"] = question.Topic
-	}
+	// Topic is always this storage's topic (no filtering needed)
 
 	// Handle event filtering
 	if question.Event != "" {
@@ -881,7 +853,7 @@ func (s *MongoEventDataStorage) LookupOutpoints(ctx context.Context, question *E
 }
 
 // GetOutputData retrieves the data associated with a specific output
-func (s *MongoEventDataStorage) GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error) {
+func (s *MongoTopicDataStorage) GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error) {
 	var result struct {
 		Data interface{} `bson:"data"`
 	}
@@ -917,19 +889,18 @@ func (s *MongoEventDataStorage) GetOutputData(ctx context.Context, outpoint *tra
 }
 
 // LoadBeefByTxidAndTopic loads merged BEEF for a transaction within a topic context
-func (s *MongoEventDataStorage) LoadBeefByTxidAndTopic(ctx context.Context, txid *chainhash.Hash, topic string) ([]byte, error) {
+func (s *MongoTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	// Find any output for this txid in the specified topic
 	var result struct {
 		AncillaryBeef []byte `bson:"ancillaryBeef"`
 	}
 
 	err := s.DB.Collection("outputs").FindOne(ctx, bson.M{
-		"txid":  txid.String(),
-		"topic": topic,
+		"txid": txid.String(),
 	}).Decode(&result)
 
 	if err != nil {
-		return nil, fmt.Errorf("transaction %s not found in topic %s: %w", txid.String(), topic, err)
+		return nil, fmt.Errorf("transaction %s not found in topic %s: %w", txid.String(), s.topic, err)
 	}
 
 	// Get BEEF from beef storage
@@ -961,14 +932,11 @@ func (s *MongoEventDataStorage) LoadBeefByTxidAndTopic(ctx context.Context, txid
 }
 
 // FindOutputData returns outputs matching the given query criteria as OutputData objects
-func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error) {
+func (s *MongoTopicDataStorage) FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error) {
 	// Build match pipeline
 	matchStage := bson.M{}
 
-	// Add topic filtering
-	if question.Topic != "" {
-		matchStage["topic"] = question.Topic
-	}
+	// Topic is always this storage's topic (no filtering needed)
 
 	// Add event filtering
 	if question.Event != "" {
@@ -1100,10 +1068,9 @@ func (s *MongoEventDataStorage) FindOutputData(ctx context.Context, question *Ev
 }
 
 // LookupEventScores returns lightweight event scores for simple queries
-func (s *MongoEventDataStorage) LookupEventScores(ctx context.Context, topic string, event string, fromScore float64) ([]queue.ScoredMember, error) {
+func (s *MongoTopicDataStorage) LookupEventScores(ctx context.Context, event string, fromScore float64) ([]queue.ScoredMember, error) {
 	// Query the outputs collection for this event without loading additional data
 	filter := bson.M{
-		"topic":  topic,
 		"events": event,
 		"score":  bson.M{"$gt": fromScore},
 	}
@@ -1133,7 +1100,15 @@ func (s *MongoEventDataStorage) LookupEventScores(ctx context.Context, topic str
 	return members, cursor.Err()
 }
 
-// CountOutputs returns the total count of outputs in a given topic
-func (s *MongoEventDataStorage) CountOutputs(ctx context.Context, topic string) (int64, error) {
-	return s.DB.Collection("outputs").CountDocuments(ctx, bson.M{"topic": topic})
+// CountOutputs returns the total count of outputs in this topic
+func (s *MongoTopicDataStorage) CountOutputs(ctx context.Context) (int64, error) {
+	return s.DB.Collection("outputs").CountDocuments(ctx, bson.M{})
+}
+
+// Close disconnects from the MongoDB database
+func (s *MongoTopicDataStorage) Close() error {
+	if s.DB != nil {
+		return s.DB.Client().Disconnect(context.Background())
+	}
+	return nil
 }

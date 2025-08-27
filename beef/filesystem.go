@@ -86,3 +86,11 @@ func (t *FilesystemBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Ha
 
 	return nil
 }
+
+// Close closes the fallback storage (filesystem storage itself needs no cleanup)
+func (f *FilesystemBeefStorage) Close() error {
+	if f.fallback != nil {
+		return f.fallback.Close()
+	}
+	return nil
+}

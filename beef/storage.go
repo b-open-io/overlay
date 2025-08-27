@@ -15,6 +15,7 @@ var ErrNotFound = errors.New("not-found")
 type BeefStorage interface {
 	LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error)
 	SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error
+	Close() error
 }
 
 // LoadTxFromBeef is a helper function that loads a transaction from BEEF bytes

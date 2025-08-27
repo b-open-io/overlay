@@ -14,6 +14,14 @@ type MongoQueueStorage struct {
 	db *mongo.Database
 }
 
+// Close disconnects from the MongoDB database
+func (m *MongoQueueStorage) Close() error {
+	if m.db != nil {
+		return m.db.Client().Disconnect(context.Background())
+	}
+	return nil
+}
+
 func NewMongoQueueStorage(connString string) (*MongoQueueStorage, error) {
 	// Parse the connection string to extract database name
 	clientOpts := options.Client().ApplyURI(connString)

@@ -28,7 +28,7 @@ func ConfigureSync(ctx context.Context, eng *engine.Engine, queueStore queue.Que
 	if eng == nil || queueStore == nil {
 		return fmt.Errorf("engine and queue storage are required")
 	}
-	
+
 	// Build new sync configuration map
 	newSyncConfig := make(map[string]engine.SyncConfiguration)
 
@@ -53,7 +53,7 @@ func ConfigureSync(ctx context.Context, eng *engine.Engine, queueStore queue.Que
 
 		// Parse peer settings and build configurations
 		gaspPeers := make([]string, 0)
-		
+
 		for peerURL, settingsJSON := range peerData {
 			var settings PeerSettings
 			if err := json.Unmarshal([]byte(settingsJSON), &settings); err != nil {
@@ -73,8 +73,9 @@ func ConfigureSync(ctx context.Context, eng *engine.Engine, queueStore queue.Que
 		// Add sync configuration if GASP peers are available
 		if len(gaspPeers) > 0 {
 			newSyncConfig[topicId] = engine.SyncConfiguration{
-				Type:  engine.SyncConfigurationPeers,
-				Peers: gaspPeers,
+				Type:        engine.SyncConfigurationPeers,
+				Peers:       gaspPeers,
+				Concurrency: 16,
 			}
 			configuredTopics++
 			log.Printf("Configured GASP sync for topic %s with %d peers", topicId, len(gaspPeers))
@@ -84,7 +85,7 @@ func ConfigureSync(ctx context.Context, eng *engine.Engine, queueStore queue.Que
 	// Atomically replace the engine's sync configuration
 	eng.SyncConfiguration = newSyncConfig
 
-	log.Printf("ConfigureSync completed: %d/%d topics configured with %d total peers", 
+	log.Printf("ConfigureSync completed: %d/%d topics configured with %d total peers",
 		configuredTopics, len(topicIds), totalPeers)
 
 	return nil

@@ -13,6 +13,14 @@ type SQLiteQueueStorage struct {
 	db *sql.DB
 }
 
+// Close closes the database connection
+func (s *SQLiteQueueStorage) Close() error {
+	if s.db != nil {
+		return s.db.Close()
+	}
+	return nil
+}
+
 func NewSQLiteQueueStorage(dbPath string) (*SQLiteQueueStorage, error) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {

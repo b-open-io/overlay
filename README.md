@@ -83,75 +83,77 @@ beefBytes, err := lruCache.LoadBeef(ctx, txid)
 
 ## Storage
 
-The storage package provides implementations of the `engine.Storage` interface for storing and retrieving transaction outputs. The `EventDataStorage` interface extends `engine.Storage` with event-specific operations and integrates with the separate `queue` package for cache and queue management.
+The storage package provides a multi-tenant `EventDataStorage` struct that implements `engine.Storage` for storing and retrieving transaction outputs. EventDataStorage coordinates multiple topic-specific storage instances, providing true data isolation between topics while maintaining efficient cross-topic operations.
 
-### Storage Factory Configuration
+### Multi-Tenant Storage Configuration
 
-The easiest way to create storage is using the factory with connection strings:
+EventDataStorage automatically creates separate databases per topic for true isolation:
 
 ```go
 import "github.com/b-open-io/overlay/config"
 
-// Create storage from environment or flags
+// Create multi-tenant storage from connection strings
 storage, err := config.CreateEventStorage(
-    eventStorageURL,  // Event storage: "mongodb://localhost:27017/mydb", "./overlay.db" 
-    beefStorageURL,   // BEEF storage: "lru://1gb,redis://localhost:6379,junglebus://"
-    queueStorageURL,  // Queue storage: "redis://localhost:6379", "./queue.db"
-    pubsubURL,        // PubSub: "redis://localhost:6379", "channels://" (default)
+    eventStorageURL,  // "mongodb://localhost:27017" -> creates overlay_topic1, overlay_topic2, etc.
+    beefStorageURL,   // "lru://1gb,redis://localhost:6379,junglebus://" (shared across topics)
+    queueStorageURL,  // "redis://localhost:6379" (shared config & cross-topic indexes)
+    pubsubURL,        // "redis://localhost:6379", "channels://" (shared pub/sub)
 )
 ```
+
+**Topic Isolation Strategy**:
+- **MongoDB**: Separate databases (`overlay_bsv21`, `overlay_bap`, etc.)
+- **SQLite**: Separate files (`overlay_bsv21.db`, `overlay_bap.db`, etc.)
+- **Dynamic Management**: Topics created on-demand, removed via disconnection
+
+**Shared Services**:
+- **BEEF Storage**: Shared across all topics (transactions are universal)
+- **Queue Storage**: Cross-topic indexes + configuration management  
+- **PubSub**: Real-time events and peer synchronization
 
 **Default Configuration** (no dependencies):
-- Event Storage: `~/.1sat/overlay.db` (SQLite)
-- BEEF Storage: `~/.1sat/beef/` (filesystem)
-- Queue Storage: `~/.1sat/queue.db` (SQLite)
+- Event Storage: `~/.1sat/overlay_*.db` (SQLite per topic)
+- BEEF Storage: `~/.1sat/beef/` (filesystem, shared)
+- Queue Storage: `~/.1sat/queue.db` (SQLite, shared)
 - PubSub: `channels://` (in-memory Go channels)
 
-**Connection String Formats**:
-- **Redis**: `redis://[user:password@]host:port`
-- **MongoDB**: `mongodb://[user:password@]host:port/database`
-- **SQLite**: `./database.db` or `sqlite://path/to/db`
-- **Channels**: `channels://` (no external dependencies)
+### Topic Management
 
-### Storage Backend Examples
+Topics are managed dynamically - storage instances are created automatically when first accessed:
 
 ```go
-// SQLite Storage (default)
-storage, err := storage.NewSQLiteEventDataStorage(
-    "/path/to/database.db",
-    beefStore,
-    publisher
-)
+// Topics are created automatically when first used
+err = storage.InsertOutput(ctx, output) // Creates topic storage if needed
 
-// Redis Storage
-storage, err := storage.NewRedisEventDataStorage(
-    "redis://localhost:6379",
-    beefStore,
-    publisher
-)
+// Explicitly manage topics
+err = storage.AddTopic("tm_token123")      // Pre-create topic storage
+err = storage.RemoveTopic("tm_old_token")  // Disconnect and cleanup
 
-// MongoDB Storage
-storage, err := storage.NewMongoEventDataStorage(
-    "mongodb://localhost:27017/mydb",
-    beefStore,
-    publisher
-)
+// List active topics
+topics := storage.GetActiveTopics()
 ```
 
-### Basic Storage Operations
+### Storage Operations
 
 ```go
-// Insert an output
+// Insert an output (topic determined from output.Topic field)
 err = storage.InsertOutput(ctx, output)
 
 // Find outputs by topic
-outputs, err := storage.FindUTXOsForTopic(ctx, "my-topic", 0, 100)
+outputs, err := storage.FindUTXOsForTopic(ctx, "tm_token123", 0, 100)
 
-// Load topic-contextualized BEEF with merged AncillaryBeef
-beef, err := storage.LoadBeefByTxidAndTopic(ctx, txid, "my-topic")
+// Cross-topic transaction lookup (optimized with QueueStorage index)
+outputs, err := storage.FindOutputsForTransaction(ctx, txid, true)
 
-// Mark outputs as spent
-err = storage.MarkOutputsSpent(ctx, outpoints)
+// Topic-scoped BEEF loading
+beef, err := storage.LoadBeefByTxidAndTopic(ctx, txid, "tm_token123")
+
+// Event queries with topic context
+results, err := storage.LookupOutpoints(ctx, &storage.EventQuestion{
+    Topic: "tm_token123",
+    Event: "type:mint",
+    Limit: 100,
+})
 ```
 
 ## Basic Querying
@@ -333,8 +335,8 @@ sseSync := pubsub.NewSSESync(engine, storage)
 
 // Start SSE sync with peer-to-topics mapping
 peerTopics := map[string][]string{
-    "https://peer1.com": {"topic1", "topic2"},
-    "https://peer2.com": {"topic3"},
+    "https://peer1.com": {"tm_token123", "tm_token456"},
+    "https://peer2.com": {"tm_token789"},
 }
 err = sseSync.Start(ctx, peerTopics)
 ```
@@ -358,11 +360,11 @@ LibP2P provides decentralized transaction synchronization with automatic peer di
 libp2pSync, err := pubsub.NewLibP2PSync(engine, storage, beefStorage)
 
 // Start sync for specific topics
-topics := []string{"tm_tokenId1", "tm_tokenId2"}
+topics := []string{"tm_token123", "tm_token456"}
 err = libp2pSync.Start(ctx, topics)
 
 // Publish transaction to LibP2P mesh
-err = libp2pSync.PublishTxid(ctx, "tm_tokenId", txid)
+err = libp2pSync.PublishTxid(ctx, "tm_token123", txid)
 ```
 
 **Key Features:**
@@ -460,8 +462,8 @@ import "github.com/b-open-io/overlay/sync"
 
 // Configure peer-topic mapping
 peerTopics := map[string][]string{
-    "https://peer1.com": {"topic1", "topic2"},
-    "https://peer2.com": {"topic3"},
+    "https://peer1.com": {"tm_token123", "tm_token456"},
+    "https://peer2.com": {"tm_token789"},
 }
 
 // Register SSE sync
@@ -478,8 +480,8 @@ defer sseSyncManager.Stop()
 ### LibP2P Sync
 
 ```go
-// Configure topics
-topics := []string{"tm_token1", "tm_token2"}
+// Configure topics  
+topics := []string{"tm_token123", "tm_token456"}
 
 // Register LibP2P sync
 libp2pSyncManager, err := sync.RegisterLibP2PSync(&sync.LibP2PSyncConfig{

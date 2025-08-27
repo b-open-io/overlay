@@ -15,7 +15,7 @@ import (
 
 // SSERoutesConfig holds the configuration for SSE streaming routes
 type SSERoutesConfig struct {
-	Storage storage.EventDataStorage
+	Storage *storage.EventDataStorage
 	Context context.Context
 }
 

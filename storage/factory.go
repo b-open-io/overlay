@@ -15,14 +15,14 @@ import (
 // from a connection string. Auto-detects the storage type from the URL scheme.
 //
 // Supported formats:
-//   - redis://localhost:6379
+//   - redis://localhost:6379 (deprecated)
 //   - mongodb://localhost:27017/dbname
 //   - sqlite:///path/to/overlay.db or sqlite://overlay.db
 //   - ./overlay.db (inferred as SQLite)
 //
 // If no connection string is provided, defaults to ./overlay.db
 // The beefStore, queueStorage, and pubSub parameters are required dependencies.
-func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubSub pubsub.PubSub) (EventDataStorage, error) {
+func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubSub pubsub.PubSub) (*EventDataStorage, error) {
 	// If no connection string provided, default to ~/.1sat directory
 	if connectionString == "" {
 		homeDir, err := os.UserHomeDir()
@@ -38,36 +38,68 @@ func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage,
 		}
 	}
 
-	// Detect storage type from connection string and create storage
+	// Create factory function based on storage type
+	var factory TopicDataStorageFactory
+
 	switch {
 	case strings.HasPrefix(connectionString, "redis://"):
-		return NewRedisEventDataStorage(connectionString, beefStore, queueStorage, pubSub)
+		// Redis is deprecated - fallback to single-topic behavior for now
+		return nil, fmt.Errorf("redis storage is deprecated, please use mongodb or sqlite")
 
 	case strings.HasPrefix(connectionString, "mongodb://"), strings.HasPrefix(connectionString, "mongo://"):
-		// MongoDB driver will extract database name from the connection string
-		return NewMongoEventDataStorage(connectionString, beefStore, queueStorage, pubSub)
+		// Create MongoDB factory function
+		factory = func(topic string) (TopicDataStorage, error) {
+			return NewMongoTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub)
+		}
 
 	case strings.HasPrefix(connectionString, "sqlite://"):
 		// Remove sqlite:// prefix (can be sqlite:// or sqlite:///path)
-		path := strings.TrimPrefix(connectionString, "sqlite://")
-		path = strings.TrimPrefix(path, "/") // Handle sqlite:///path format
-		if path == "" {
-			path = "./overlay.db"
+		basePath := strings.TrimPrefix(connectionString, "sqlite://")
+		basePath = strings.TrimPrefix(basePath, "/") // Handle sqlite:///path format
+		if basePath == "" {
+			basePath = "./overlay.db"
 		}
-		return NewSQLiteEventDataStorage(path, beefStore, queueStorage, pubSub)
+		// Remove .db extension to create base path for topic databases
+		if strings.HasSuffix(basePath, ".db") {
+			basePath = strings.TrimSuffix(basePath, ".db")
+		}
+		
+		// Create SQLite factory function
+		factory = func(topic string) (TopicDataStorage, error) {
+			topicPath := fmt.Sprintf("%s_%s.db", basePath, topic)
+			return NewSQLiteTopicDataStorage(topic, topicPath, beefStore, queueStorage, pubSub)
+		}
 
 	case strings.HasSuffix(connectionString, ".db"), strings.HasSuffix(connectionString, ".sqlite"):
-		// Looks like a SQLite database file
-		return NewSQLiteEventDataStorage(connectionString, beefStore, queueStorage, pubSub)
+		// Remove extension to create base path for topic databases
+		basePath := strings.TrimSuffix(connectionString, filepath.Ext(connectionString))
+		
+		// Create SQLite factory function
+		factory = func(topic string) (TopicDataStorage, error) {
+			topicPath := fmt.Sprintf("%s_%s.db", basePath, topic)
+			return NewSQLiteTopicDataStorage(topic, topicPath, beefStore, queueStorage, pubSub)
+		}
 
 	case filepath.IsAbs(connectionString) || strings.HasPrefix(connectionString, "./") || strings.HasPrefix(connectionString, "../"):
 		// Looks like a filesystem path - assume SQLite
-		if !strings.HasSuffix(connectionString, ".db") {
-			connectionString = connectionString + "/overlay.db"
+		basePath := connectionString
+		if strings.HasSuffix(connectionString, ".db") {
+			basePath = strings.TrimSuffix(connectionString, ".db")
+		} else if !strings.HasSuffix(connectionString, "/") {
+			basePath = connectionString + "/overlay"
+		} else {
+			basePath = connectionString + "overlay"
 		}
-		return NewSQLiteEventDataStorage(connectionString, beefStore, queueStorage, pubSub)
+		
+		// Create SQLite factory function
+		factory = func(topic string) (TopicDataStorage, error) {
+			topicPath := fmt.Sprintf("%s_%s.db", basePath, topic)
+			return NewSQLiteTopicDataStorage(topic, topicPath, beefStore, queueStorage, pubSub)
+		}
 
 	default:
 		return nil, fmt.Errorf("unable to determine storage type from connection string: %s", connectionString)
 	}
+
+	return NewEventDataStorage(factory, beefStore, queueStorage, pubSub), nil
 }

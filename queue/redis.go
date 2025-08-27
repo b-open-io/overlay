@@ -12,6 +12,14 @@ type RedisQueueStorage struct {
 	client *redis.Client
 }
 
+// Close closes the Redis client connection
+func (r *RedisQueueStorage) Close() error {
+	if r.client != nil {
+		return r.client.Close()
+	}
+	return nil
+}
+
 func NewRedisQueueStorage(connString string) (*RedisQueueStorage, error) {
 	log.Println("Connecting to Redis Queue Storage...", connString)
 	opts, err := redis.ParseURL(connString)

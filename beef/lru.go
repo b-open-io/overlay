@@ -192,3 +192,21 @@ func ParseSize(sizeStr string) (int64, error) {
 		return 0, fmt.Errorf("unknown size unit: %s", unit)
 	}
 }
+
+// Close closes the fallback storage and clears the LRU cache
+func (lru *LRUBeefStorage) Close() error {
+	lru.mu.Lock()
+	defer lru.mu.Unlock()
+	
+	// Clear cache
+	lru.cache = make(map[chainhash.Hash][]byte)
+	lru.lruIndex = make(map[chainhash.Hash]*list.Element)
+	lru.lru.Init()
+	lru.currentSize.Store(0)
+	
+	// Close fallback
+	if lru.fallback != nil {
+		return lru.fallback.Close()
+	}
+	return nil
+}

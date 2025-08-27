@@ -20,18 +20,20 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-type SQLiteEventDataStorage struct {
+type SQLiteTopicDataStorage struct {
 	BaseEventDataStorage
-	wdb *sql.DB
-	rdb *sql.DB
+	wdb   *sql.DB
+	rdb   *sql.DB
+	topic string
 }
 
 // GetBeefStorage is inherited from BaseEventDataStorage
 
-func NewSQLiteEventDataStorage(dbPath string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) (*SQLiteEventDataStorage, error) {
+func NewSQLiteTopicDataStorage(topic string, dbPath string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) (TopicDataStorage, error) {
 	var err error
-	s := &SQLiteEventDataStorage{
+	s := &SQLiteTopicDataStorage{
 		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub),
+		topic:                topic,
 	}
 
 	// Write database connection
@@ -90,68 +92,53 @@ func NewSQLiteEventDataStorage(dbPath string, beefStore beef.BeefStorage, queueS
 	return s, nil
 }
 
-func (s *SQLiteEventDataStorage) createTables() error {
+// GetTopic returns the topic this storage handles
+func (s *SQLiteTopicDataStorage) GetTopic() string {
+	return s.topic
+}
+
+func (s *SQLiteTopicDataStorage) createTables() error {
 	queries := []string{
 		`CREATE TABLE IF NOT EXISTS outputs (
-			outpoint TEXT NOT NULL,
-			topic TEXT NOT NULL,
+			outpoint TEXT NOT NULL PRIMARY KEY,
 			txid TEXT NOT NULL,
 			script BLOB NOT NULL,
 			satoshis INTEGER NOT NULL,
-			spend TEXT, -- Changed from spent BOOLEAN to spend TEXT (spending transaction ID)
+			spend TEXT,
 			block_height INTEGER,
 			block_idx INTEGER,
 			score REAL,
 			ancillary_beef BLOB,
-			data TEXT,   -- JSON data associated with the output
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (outpoint, topic)
+			data TEXT,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_outputs_txid_topic ON outputs(txid, topic)`,
-		`DROP INDEX IF EXISTS idx_outputs_txid`,
-		`CREATE INDEX IF NOT EXISTS idx_outputs_topic_score ON outputs(topic, score)`,
-		`CREATE INDEX IF NOT EXISTS idx_outputs_topic_spend_score ON outputs(topic, spend, score)`,
+		`CREATE INDEX IF NOT EXISTS idx_outputs_txid ON outputs(txid)`,
+		`CREATE INDEX IF NOT EXISTS idx_outputs_score ON outputs(score)`,
+		`CREATE INDEX IF NOT EXISTS idx_outputs_spend_score ON outputs(spend, score)`,
 
 		`CREATE TABLE IF NOT EXISTS events (
 			event TEXT NOT NULL,
 			outpoint TEXT NOT NULL,
-			topic TEXT NOT NULL,
 			score REAL NOT NULL,
-			spend TEXT,  -- Denormalized from outputs table for query performance
-			PRIMARY KEY (event, outpoint, topic)
+			spend TEXT,
+			PRIMARY KEY (event, outpoint)
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_events_topic_event_score_spend ON events(topic, event, score, spend)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_event_score_spend ON events(event, score, spend)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_outpoint ON events(outpoint)`,
 
-		`CREATE TABLE IF NOT EXISTS applied_transactions (
-			txid TEXT NOT NULL,
-			topic TEXT NOT NULL,
-			merklepath TEXT,
-			block_height INTEGER,
-			block_idx INTEGER,
+		`CREATE TABLE IF NOT EXISTS transactions (
+			txid TEXT NOT NULL PRIMARY KEY,
 			score REAL,
-			status TEXT,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (txid, topic)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_applied_tx_topic_score ON applied_transactions(topic, score)`,
-
-		`CREATE TABLE IF NOT EXISTS interactions (
-			host TEXT NOT NULL,
-			topic TEXT NOT NULL,
-			last_score REAL NOT NULL,
-			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (host, topic)
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
 
 		`CREATE TABLE IF NOT EXISTS output_relationships (
-			consuming_outpoint TEXT NOT NULL,  -- The output doing the consuming (spender)
-			consumed_outpoint TEXT NOT NULL,   -- The output being consumed (spent)
-			topic TEXT NOT NULL,
-			PRIMARY KEY (consuming_outpoint, consumed_outpoint, topic)
+			consuming_outpoint TEXT NOT NULL,
+			consumed_outpoint TEXT NOT NULL,
+			PRIMARY KEY (consuming_outpoint, consumed_outpoint)
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_output_rel_consuming ON output_relationships(consuming_outpoint, topic)`,
-		`CREATE INDEX IF NOT EXISTS idx_output_rel_consumed ON output_relationships(consumed_outpoint, topic)`,
+		`CREATE INDEX IF NOT EXISTS idx_output_rel_consuming ON output_relationships(consuming_outpoint)`,
+		`CREATE INDEX IF NOT EXISTS idx_output_rel_consumed ON output_relationships(consumed_outpoint)`,
 
 		`CREATE TABLE IF NOT EXISTS hashes (
 			key_name TEXT NOT NULL,
@@ -186,7 +173,7 @@ func (s *SQLiteEventDataStorage) createTables() error {
 	return nil
 }
 
-func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) error {
+func (s *SQLiteTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) error {
 	// Save BEEF to BEEF storage
 	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
@@ -204,11 +191,10 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 
 	// Insert output (spend field is omitted - defaults to NULL for unspent)
 	_, err = tx.ExecContext(ctx, `
-		INSERT OR REPLACE INTO outputs (outpoint, topic, txid, script, satoshis,
+		INSERT OR REPLACE INTO outputs (outpoint, txid, script, satoshis,
 			block_height, block_idx, score, ancillary_beef)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		utxo.Outpoint.String(),
-		utxo.Topic,
 		utxo.Outpoint.Txid.String(),
 		utxo.Script.Bytes(),
 		utxo.Satoshis,
@@ -225,11 +211,10 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 	// For OutputsConsumed: this output consumes others
 	for _, consumed := range utxo.OutputsConsumed {
 		_, err = tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO output_relationships (consuming_outpoint, consumed_outpoint, topic)
-			VALUES (?, ?, ?)`,
+			INSERT OR IGNORE INTO output_relationships (consuming_outpoint, consumed_outpoint)
+			VALUES (?, ?)`,
 			utxo.Outpoint.String(), // This output is the consumer
 			consumed.String(),      // This is what it consumes
-			utxo.Topic,
 		)
 		if err != nil {
 			return err
@@ -239,11 +224,10 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 	// For ConsumedBy: other outputs consume this one
 	for _, consumedBy := range utxo.ConsumedBy {
 		_, err = tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO output_relationships (consuming_outpoint, consumed_outpoint, topic)
-			VALUES (?, ?, ?)`,
+			INSERT OR IGNORE INTO output_relationships (consuming_outpoint, consumed_outpoint)
+			VALUES (?, ?)`,
 			consumedBy.String(),    // The other output is the consumer
 			utxo.Outpoint.String(), // This output is being consumed
-			utxo.Topic,
 		)
 		if err != nil {
 			return err
@@ -255,23 +239,20 @@ func (s *SQLiteEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 	}
 
 	// Add topic as an event using SaveEvents (handles pubsub publishing)
-	if err := s.SaveEvents(ctx, &utxo.Outpoint, []string{utxo.Topic}, utxo.Topic, utxo.Score, nil); err != nil {
+	if err := s.SaveEvents(ctx, &utxo.Outpoint, []string{s.topic}, utxo.Score, nil); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (s *SQLiteEventDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, topic *string, spent *bool, includeBEEF bool) (*engine.Output, error) {
-	query := `SELECT outpoint, topic, txid, script, satoshis, spend, 
+func (s *SQLiteTopicDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, spent *bool, includeBEEF bool) (*engine.Output, error) {
+	query := `SELECT outpoint, txid, script, satoshis, spend, 
 		block_height, block_idx, score, ancillary_beef 
 		FROM outputs WHERE outpoint = ?`
 	args := []interface{}{outpoint.String()}
 
-	if topic != nil {
-		query += " AND topic = ?"
-		args = append(args, *topic)
-	}
+	// Topic filtering removed - this storage is already topic-specific
 	if spent != nil {
 		if *spent {
 			// Looking for spent outputs (spend field is not null)
@@ -290,7 +271,6 @@ func (s *SQLiteEventDataStorage) FindOutput(ctx context.Context, outpoint *trans
 
 	err := s.rdb.QueryRowContext(ctx, query, args...).Scan(
 		&outpointStr,
-		&output.Topic,
 		&txidStr,
 		&scriptBytes,
 		&output.Satoshis,
@@ -312,6 +292,9 @@ func (s *SQLiteEventDataStorage) FindOutput(ctx context.Context, outpoint *trans
 		return nil, err
 	}
 	output.Outpoint = *op
+
+	// Set topic from storage
+	output.Topic = s.topic
 
 	// Set spent status based on whether spend field has a value
 	output.Spent = spendTxid != nil
@@ -338,7 +321,7 @@ func (s *SQLiteEventDataStorage) FindOutput(ctx context.Context, outpoint *trans
 	return &output, nil
 }
 
-func (s *SQLiteEventDataStorage) FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
+func (s *SQLiteTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
 	if len(outpoints) == 0 {
 		return nil, nil
 	}
@@ -352,10 +335,9 @@ func (s *SQLiteEventDataStorage) FindOutputs(ctx context.Context, outpoints []*t
 		args = append(args, op.String())
 	}
 
-	query := fmt.Sprintf(`SELECT outpoint, topic, txid, script, satoshis, spend, 
+	query := fmt.Sprintf(`SELECT outpoint, txid, script, satoshis, spend, 
 		block_height, block_idx, score, ancillary_beef 
-		FROM outputs WHERE outpoint IN (%s) AND topic = ?`, strings.Join(placeholders, ","))
-	args = append(args, topic)
+		FROM outputs WHERE outpoint IN (%s)`, strings.Join(placeholders, ","))
 
 	if spent != nil {
 		if *spent {
@@ -385,8 +367,8 @@ func (s *SQLiteEventDataStorage) FindOutputs(ctx context.Context, outpoints []*t
 	return outputs, rows.Err()
 }
 
-func (s *SQLiteEventDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
-	query := `SELECT outpoint, topic, txid, script, satoshis, spend, 
+func (s *SQLiteTopicDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
+	query := `SELECT outpoint, txid, script, satoshis, spend, 
 		block_height, block_idx, score, ancillary_beef 
 		FROM outputs WHERE txid = ?`
 
@@ -408,15 +390,15 @@ func (s *SQLiteEventDataStorage) FindOutputsForTransaction(ctx context.Context, 
 	return outputs, rows.Err()
 }
 
-func (s *SQLiteEventDataStorage) FindUTXOsForTopic(ctx context.Context, topic string, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
+func (s *SQLiteTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
 
-	query := `SELECT outpoint, topic, txid, script, satoshis, spend, 
+	query := `SELECT outpoint, txid, script, satoshis, spend, 
 		block_height, block_idx, score, ancillary_beef 
 		FROM outputs 
-		WHERE topic = ? AND score >= ?
+		WHERE score >= ? AND spend IS NULL
 		ORDER BY score`
 
-	args := []any{topic, since}
+	args := []any{since}
 	if limit > 0 {
 		query += " LIMIT ?"
 		args = append(args, limit)
@@ -439,14 +421,27 @@ func (s *SQLiteEventDataStorage) FindUTXOsForTopic(ctx context.Context, topic st
 	return outputs, rows.Err()
 }
 
-func (s *SQLiteEventDataStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint, topic string) error {
+func (s *SQLiteTopicDataStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint) error {
 	_, err := s.wdb.ExecContext(ctx,
-		"DELETE FROM outputs WHERE outpoint = ? AND topic = ?",
-		outpoint.String(), topic)
+		"DELETE FROM outputs WHERE outpoint = ?",
+		outpoint.String())
 	return err
 }
 
-func (s *SQLiteEventDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transaction.Outpoint, topic string, spendTxid *chainhash.Hash) error {
+func (s *SQLiteTopicDataStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *transaction.Outpoint, beef []byte) error {
+	// Parse the beef to get the spending txid
+	_, _, spendTxid, err := transaction.ParseBeef(beef)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.wdb.ExecContext(ctx,
+		"UPDATE outputs SET spend = ? WHERE outpoint = ?",
+		spendTxid.String(), outpoint.String())
+	return err
+}
+
+func (s *SQLiteTopicDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transaction.Outpoint, spendTxid *chainhash.Hash) error {
 	if len(outpoints) == 0 {
 		return nil
 	}
@@ -464,8 +459,8 @@ func (s *SQLiteEventDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints
 
 		// Update outputs table
 		_, err = tx.ExecContext(ctx,
-			"UPDATE outputs SET spend = ? WHERE outpoint = ? AND topic = ?",
-			spendTxidStr, opStr, topic)
+			"UPDATE outputs SET spend = ? WHERE outpoint = ?",
+			spendTxidStr, opStr)
 		if err != nil {
 			return err
 		}
@@ -482,16 +477,16 @@ func (s *SQLiteEventDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints
 	return tx.Commit()
 }
 
-func (s *SQLiteEventDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, topic string, consumedBy []*transaction.Outpoint) error {
+func (s *SQLiteTopicDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, consumedBy []*transaction.Outpoint) error {
 	// No-op: Output relationships are managed by InsertOutput method atomically.
 	return nil
 }
 
-func (s *SQLiteEventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
+func (s *SQLiteTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
 	return s.beefStore.SaveBeef(ctx, txid, beef)
 }
 
-func (s *SQLiteEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
+func (s *SQLiteTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
 	outpointStr := outpoint.String()
 
 	tx, err := s.wdb.BeginTx(ctx, nil)
@@ -504,9 +499,9 @@ func (s *SQLiteEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, ou
 	_, err = tx.ExecContext(ctx, `
 		UPDATE outputs 
 		SET block_height = ?, block_idx = ?, ancillary_beef = ?
-		WHERE outpoint = ? AND topic = ?`,
+		WHERE outpoint = ?`,
 		blockHeight, blockIndex, ancillaryBeef,
-		outpointStr, topic)
+		outpointStr)
 	if err != nil {
 		return err
 	}
@@ -524,15 +519,14 @@ func (s *SQLiteEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, ou
 	return tx.Commit()
 }
 
-func (s *SQLiteEventDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
+func (s *SQLiteTopicDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
 	score := float64(time.Now().UnixNano())
 
 	_, err := s.wdb.ExecContext(ctx, `
-		INSERT OR REPLACE INTO applied_transactions 
-		(txid, topic, score, created_at)
-		VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
+		INSERT OR REPLACE INTO transactions 
+		(txid, score, created_at)
+		VALUES (?, ?, CURRENT_TIMESTAMP)`,
 		tx.Txid.String(),
-		tx.Topic,
 		score,
 	)
 
@@ -543,43 +537,24 @@ func (s *SQLiteEventDataStorage) InsertAppliedTransaction(ctx context.Context, t
 	// Publish transaction to topic via PubSub (if available)
 	if s.pubsub != nil {
 		// For topic events (tm_*), publish the txid with the score
-		if err := s.pubsub.Publish(ctx, tx.Topic, tx.Txid.String(), score); err != nil {
+		if err := s.pubsub.Publish(ctx, s.topic, tx.Txid.String(), score); err != nil {
 			// Log error but don't fail the transaction insertion
-			log.Printf("Failed to publish transaction to topic %s: %v", tx.Topic, err)
+			log.Printf("Failed to publish transaction to topic %s: %v", s.topic, err)
 		}
 	}
 
 	return nil
 }
 
-func (s *SQLiteEventDataStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
+func (s *SQLiteTopicDataStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
 	var exists bool
 	err := s.rdb.QueryRowContext(ctx,
-		"SELECT EXISTS(SELECT 1 FROM applied_transactions WHERE txid = ? AND topic = ?)",
-		tx.Txid.String(), tx.Topic).Scan(&exists)
+		"SELECT EXISTS(SELECT 1 FROM transactions WHERE txid = ?)",
+		tx.Txid.String()).Scan(&exists)
 	return exists, err
 }
 
-func (s *SQLiteEventDataStorage) UpdateLastInteraction(ctx context.Context, host string, topic string, since float64) error {
-	_, err := s.wdb.ExecContext(ctx, `
-		INSERT OR REPLACE INTO interactions (host, topic, last_score, updated_at)
-		VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
-		host, topic, since)
-	return err
-}
-
-func (s *SQLiteEventDataStorage) GetLastInteraction(ctx context.Context, host string, topic string) (float64, error) {
-	var score float64
-	err := s.rdb.QueryRowContext(ctx,
-		"SELECT last_score FROM interactions WHERE host = ? AND topic = ?",
-		host, topic).Scan(&score)
-	if err == sql.ErrNoRows {
-		return 0, nil
-	}
-	return score, err
-}
-
-func (s *SQLiteEventDataStorage) Close() error {
+func (s *SQLiteTopicDataStorage) Close() error {
 	if s.wdb != nil {
 		s.wdb.Close()
 	}
@@ -591,7 +566,7 @@ func (s *SQLiteEventDataStorage) Close() error {
 
 // Helper functions
 
-func (s *SQLiteEventDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*engine.Output, error) {
+func (s *SQLiteTopicDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*engine.Output, error) {
 	var output engine.Output
 	var outpointStr, txidStr string
 	var scriptBytes []byte
@@ -600,7 +575,6 @@ func (s *SQLiteEventDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*
 
 	err := rows.Scan(
 		&outpointStr,
-		&output.Topic,
 		&txidStr,
 		&scriptBytes,
 		&output.Satoshis,
@@ -620,6 +594,9 @@ func (s *SQLiteEventDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*
 		return nil, err
 	}
 	output.Outpoint = *op
+
+	// Set topic from storage
+	output.Topic = s.topic
 
 	// Set spent status based on whether spend field has a value
 	output.Spent = spendTxid != nil
@@ -647,11 +624,11 @@ func (s *SQLiteEventDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*
 	return &output, nil
 }
 
-func (s *SQLiteEventDataStorage) loadOutputRelations(ctx context.Context, output *engine.Output) error {
+func (s *SQLiteTopicDataStorage) loadOutputRelations(ctx context.Context, output *engine.Output) error {
 	// Load outputs consumed by this output (this output is the consumer)
 	rows, err := s.rdb.QueryContext(ctx,
-		"SELECT consumed_outpoint FROM output_relationships WHERE consuming_outpoint = ? AND topic = ?",
-		output.Outpoint.String(), output.Topic)
+		"SELECT consumed_outpoint FROM output_relationships WHERE consuming_outpoint = ?",
+		output.Outpoint.String())
 	if err != nil {
 		return err
 	}
@@ -671,8 +648,8 @@ func (s *SQLiteEventDataStorage) loadOutputRelations(ctx context.Context, output
 
 	// Load outputs that consume this output (this output is being consumed)
 	rows2, err := s.rdb.QueryContext(ctx,
-		"SELECT consuming_outpoint FROM output_relationships WHERE consumed_outpoint = ? AND topic = ?",
-		output.Outpoint.String(), output.Topic)
+		"SELECT consuming_outpoint FROM output_relationships WHERE consumed_outpoint = ?",
+		output.Outpoint.String())
 	if err != nil {
 		return err
 	}
@@ -694,14 +671,14 @@ func (s *SQLiteEventDataStorage) loadOutputRelations(ctx context.Context, output
 }
 
 // GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height
-func (s *SQLiteEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Context, topic string, height uint32) ([]*TransactionData, error) {
+func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, height uint32) ([]*TransactionData, error) {
 	// Query 1: Get all outputs for the topic and block height, including data field
 	query := `SELECT outpoint, txid, script, satoshis, spend, data 
 	         FROM outputs 
-	         WHERE topic = ? AND block_height = ?
+	         WHERE block_height = ?
 	         ORDER BY txid, outpoint`
 
-	rows, err := s.rdb.QueryContext(ctx, query, topic, height)
+	rows, err := s.rdb.QueryContext(ctx, query, height)
 	if err != nil {
 		return nil, err
 	}
@@ -769,15 +746,14 @@ func (s *SQLiteEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Con
 
 	// Query 2: Get all inputs for these transactions in one batch
 	placeholders := make([]string, len(txids))
-	args := make([]interface{}, len(txids)+1)
-	args[0] = topic
+	args := make([]interface{}, len(txids))
 	for i, txid := range txids {
 		placeholders[i] = "?"
-		args[i+1] = txid
+		args[i] = txid
 	}
 
 	inputQuery := fmt.Sprintf(`SELECT outpoint, txid, script, satoshis, spend, data 
-	                          FROM outputs WHERE topic = ? AND spend IN (%s)`, strings.Join(placeholders, ","))
+	                          FROM outputs WHERE spend IN (%s)`, strings.Join(placeholders, ","))
 
 	inputRows, err := s.rdb.QueryContext(ctx, inputQuery, args...)
 	if err != nil {
@@ -855,14 +831,14 @@ func (s *SQLiteEventDataStorage) GetTransactionsByTopicAndHeight(ctx context.Con
 }
 
 // GetTransactionByTopic returns a single transaction for a topic by txid
-func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topic string, txid *chainhash.Hash, includeBeef ...bool) (*TransactionData, error) {
+func (s *SQLiteTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid *chainhash.Hash, includeBeef ...bool) (*TransactionData, error) {
 	// Query 1: Get all outputs for the specific transaction and topic
 	query := `SELECT outpoint, txid, script, satoshis, spend, data, block_height, block_idx
 	         FROM outputs 
-	         WHERE topic = ? AND txid = ?
+	         WHERE txid = ?
 	         ORDER BY outpoint`
 
-	rows, err := s.rdb.QueryContext(ctx, query, topic, txid.String())
+	rows, err := s.rdb.QueryContext(ctx, query, txid.String())
 	if err != nil {
 		return nil, err
 	}
@@ -926,9 +902,9 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 	var inputs []*OutputData
 	inputQuery := `SELECT outpoint, txid, script, satoshis, data 
 	              FROM outputs 
-	              WHERE spend = ? AND topic = ?`
+	              WHERE spend = ?`
 
-	inputRows, err := s.rdb.QueryContext(ctx, inputQuery, txid.String(), topic)
+	inputRows, err := s.rdb.QueryContext(ctx, inputQuery, txid.String())
 	if err != nil {
 		return nil, err
 	}
@@ -983,7 +959,7 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 
 	// Load BEEF if requested
 	if len(includeBeef) > 0 && includeBeef[0] {
-		beef, err := s.LoadBeefByTxidAndTopic(ctx, txid, topic)
+		beef, err := s.LoadBeefByTxid(ctx, txid)
 		if err != nil {
 			return nil, err
 		} else {
@@ -995,7 +971,7 @@ func (s *SQLiteEventDataStorage) GetTransactionByTopic(ctx context.Context, topi
 }
 
 // SaveEvents associates multiple events with a single output, storing arbitrary data
-func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, topic string, score float64, data interface{}) error {
+func (s *SQLiteTopicDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, score float64, data interface{}) error {
 	if len(events) == 0 && data == nil {
 		return nil
 	}
@@ -1010,9 +986,9 @@ func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 	// Insert events into events table
 	for _, event := range events {
 		_, err = tx.ExecContext(ctx, `
-			INSERT OR REPLACE INTO events (event, outpoint, topic, score)
-			VALUES (?, ?, ?, ?)`,
-			event, outpointStr, topic, score)
+			INSERT OR REPLACE INTO events (event, outpoint, score)
+			VALUES (?, ?, ?)`,
+			event, outpointStr, score)
 		if err != nil {
 			return err
 		}
@@ -1025,22 +1001,15 @@ func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 			return err
 		}
 
-		// Get topic from outputs table first
-		var topic string
-		err = tx.QueryRowContext(ctx, `SELECT topic FROM outputs WHERE outpoint = ? LIMIT 1`, outpointStr).Scan(&topic)
-		if err != nil {
-			return err
-		}
-
 		_, err = tx.ExecContext(ctx, `
 			UPDATE outputs 
 			SET data = CASE 
 				WHEN data IS NULL THEN ?
 				ELSE json_patch(data, ?)
 			END
-			WHERE outpoint = ? AND topic = ?`,
+			WHERE outpoint = ?`,
 			string(dataJSON), string(dataJSON),
-			outpointStr, topic)
+			outpointStr)
 		if err != nil {
 			return err
 		}
@@ -1067,7 +1036,7 @@ func (s *SQLiteEventDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 }
 
 // FindEvents returns all events associated with a given outpoint
-func (s *SQLiteEventDataStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
+func (s *SQLiteTopicDataStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
 	rows, err := s.rdb.QueryContext(ctx,
 		"SELECT event FROM events WHERE outpoint = ?",
 		outpoint.String())
@@ -1089,7 +1058,7 @@ func (s *SQLiteEventDataStorage) FindEvents(ctx context.Context, outpoint *trans
 }
 
 // LookupOutpoints returns outpoints matching the given query criteria
-func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
+func (s *SQLiteTopicDataStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
 	withData := len(includeData) > 0 && includeData[0]
 
 	// Build the query
@@ -1110,11 +1079,7 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 		query.WriteString(" WHERE e.event = ?")
 		args = append(args, question.Event)
 
-		// Add topic filtering if specified
-		if question.Topic != "" {
-			query.WriteString(" AND e.topic = ?")
-			args = append(args, question.Topic)
-		}
+		// Topic filtering removed - this storage is already topic-specific
 	} else if len(question.Events) > 0 {
 		if question.JoinType == nil || *question.JoinType == JoinTypeUnion {
 			// Union: find outputs with ANY of the events
@@ -1135,11 +1100,7 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 			query.WriteString(strings.Join(placeholders, ","))
 			query.WriteString(")")
 
-			// Add topic filtering if specified
-			if question.Topic != "" {
-				query.WriteString(" AND e.topic = ?")
-				args = append(args, question.Topic)
-			}
+			// Topic filtering removed - this storage is already topic-specific
 		} else if *question.JoinType == JoinTypeIntersect {
 			// Intersection: find outputs that have ALL events
 			query.WriteString("SELECT e1.outpoint, e1.score")
@@ -1305,7 +1266,7 @@ func (s *SQLiteEventDataStorage) LookupOutpoints(ctx context.Context, question *
 }
 
 // GetOutputData retrieves the data associated with a specific output
-func (s *SQLiteEventDataStorage) GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error) {
+func (s *SQLiteTopicDataStorage) GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error) {
 	var dataJSON *string
 	err := s.rdb.QueryRowContext(ctx,
 		"SELECT data FROM outputs WHERE outpoint = ? LIMIT 1",
@@ -1331,16 +1292,16 @@ func (s *SQLiteEventDataStorage) GetOutputData(ctx context.Context, outpoint *tr
 }
 
 // LoadBeefByTxidAndTopic loads merged BEEF for a transaction within a topic context
-func (s *SQLiteEventDataStorage) LoadBeefByTxidAndTopic(ctx context.Context, txid *chainhash.Hash, topic string) ([]byte, error) {
+func (s *SQLiteTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	// Find any output for this txid in the specified topic
 	var ancillaryBeef []byte
 	err := s.rdb.QueryRowContext(ctx,
-		"SELECT ancillary_beef FROM outputs WHERE txid = ? AND topic = ? LIMIT 1",
-		txid.String(), topic,
+		"SELECT ancillary_beef FROM outputs WHERE txid = ? LIMIT 1",
+		txid.String(),
 	).Scan(&ancillaryBeef)
 
 	if err != nil {
-		return nil, fmt.Errorf("transaction %s not found in topic %s: %w", txid.String(), topic, err)
+		return nil, fmt.Errorf("transaction %s not found in topic %s: %w", txid.String(), s.topic, err)
 	}
 
 	// Get BEEF from beef storage
@@ -1372,7 +1333,7 @@ func (s *SQLiteEventDataStorage) LoadBeefByTxidAndTopic(ctx context.Context, txi
 }
 
 // FindOutputData returns outputs matching the given query criteria as OutputData objects
-func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error) {
+func (s *SQLiteTopicDataStorage) FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error) {
 	var query strings.Builder
 	var args []interface{}
 
@@ -1505,14 +1466,14 @@ func (s *SQLiteEventDataStorage) FindOutputData(ctx context.Context, question *E
 }
 
 // LookupEventScores returns lightweight event scores for simple queries
-func (s *SQLiteEventDataStorage) LookupEventScores(ctx context.Context, topic string, event string, fromScore float64) ([]queue.ScoredMember, error) {
+func (s *SQLiteTopicDataStorage) LookupEventScores(ctx context.Context, event string, fromScore float64) ([]queue.ScoredMember, error) {
 	// Query the events table directly without joining to outputs
 	rows, err := s.rdb.QueryContext(ctx, `
 		SELECT outpoint, score 
 		FROM events 
-		WHERE topic = ? AND event = ? AND score > ? 
+		WHERE event = ? AND score > ? 
 		ORDER BY score ASC`,
-		topic, event, fromScore)
+		event, fromScore)
 	if err != nil {
 		return nil, err
 	}
@@ -1535,8 +1496,8 @@ func (s *SQLiteEventDataStorage) LookupEventScores(ctx context.Context, topic st
 }
 
 // CountOutputs returns the total count of outputs in a given topic
-func (s *SQLiteEventDataStorage) CountOutputs(ctx context.Context, topic string) (int64, error) {
+func (s *SQLiteTopicDataStorage) CountOutputs(ctx context.Context) (int64, error) {
 	var count int64
-	err := s.rdb.QueryRowContext(ctx, "SELECT COUNT(1) FROM outputs WHERE topic = ?", topic).Scan(&count)
+	err := s.rdb.QueryRowContext(ctx, "SELECT COUNT(1) FROM outputs").Scan(&count)
 	return count, err
 }

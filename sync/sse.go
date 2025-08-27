@@ -12,7 +12,7 @@ import (
 // SSESyncConfig holds the configuration for SSE synchronization
 type SSESyncConfig struct {
 	Engine      *engine.Engine
-	Storage     storage.EventDataStorage
+	Storage     *storage.EventDataStorage
 	PeerTopics  map[string][]string // peer URL -> topics
 	Context     context.Context
 }

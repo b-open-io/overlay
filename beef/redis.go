@@ -2,6 +2,7 @@ package beef
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -125,4 +126,26 @@ func parseRedisQueryParams(query string) map[string]string {
 		}
 	}
 	return params
+}
+
+// Close closes the Redis client connection and fallback storage
+func (r *RedisBeefStorage) Close() error {
+	var errs []error
+	
+	if r.db != nil {
+		if err := r.db.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close Redis client: %w", err))
+		}
+	}
+	
+	if r.fallback != nil {
+		if err := r.fallback.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("failed to close fallback storage: %w", err))
+		}
+	}
+	
+	if len(errs) > 0 {
+		return fmt.Errorf("errors closing Redis beef storage: %v", errs)
+	}
+	return nil
 }

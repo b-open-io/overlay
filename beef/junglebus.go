@@ -103,3 +103,13 @@ func (t *JunglebusBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Has
 	}
 	return nil
 }
+
+// Close cleans up inflight requests (no persistent connections to close)
+func (j *JunglebusBeefStorage) Close() error {
+	// Clear any inflight requests
+	j.inflightMap.Range(func(key, value interface{}) bool {
+		j.inflightMap.Delete(key)
+		return true
+	})
+	return nil
+}

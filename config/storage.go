@@ -37,7 +37,7 @@ import (
 //
 //  4. Default no-dependency setup:
 //     CreateEventStorage("", "", "", "")  // Uses ~/.1sat/overlay.db, ~/.1sat/beef/, ~/.1sat/queue.db, channels://
-func CreateEventStorage(eventURL, beefURL, queueURL, pubsubURL string) (storage.EventDataStorage, error) {
+func CreateEventStorage(eventURL, beefURL, queueURL, pubsubURL string) (*storage.EventDataStorage, error) {
 	// Create BEEF storage - let it handle parsing and defaults
 	beefStorage, err := beef.CreateBeefStorage(beefURL)
 	if err != nil {
