@@ -36,8 +36,11 @@ func NewMongoTopicDataStorage(topic string, connString string, beefStore beef.Be
 		return nil, err
 	}
 
-	// Create topic-specific database name
-	dbName := fmt.Sprintf("overlay_%s", topic)
+	// Create topic-specific database name (truncate to MongoDB's 63-char limit)
+	dbName := topic
+	if len(dbName) > 63 {
+		dbName = dbName[:63]
+	}
 	db := client.Database(dbName)
 
 	indexModel := mongo.IndexModel{
