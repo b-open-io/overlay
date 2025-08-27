@@ -104,6 +104,7 @@ type BSONBeef struct {
 type BSONOutput struct {
 	Outpoint        string      `bson:"outpoint"`
 	Txid            string      `bson:"txid"`
+	Vout            uint32      `bson:"vout"`
 	Topic           string      `bson:"topic"`
 	Script          []byte      `bson:"script"`
 	Satoshis        uint64      `bson:"satoshis"`
@@ -123,6 +124,7 @@ func NewBSONOutput(o *engine.Output) *BSONOutput {
 	bo := &BSONOutput{
 		Outpoint:        o.Outpoint.String(),
 		Txid:            o.Outpoint.Txid.String(),
+		Vout:            o.Outpoint.Index,
 		Topic:           o.Topic,
 		Script:          o.Script.Bytes(),
 		Satoshis:        o.Satoshis,
@@ -134,7 +136,7 @@ func NewBSONOutput(o *engine.Output) *BSONOutput {
 		AncillaryBeef:   o.AncillaryBeef,
 		OutputsConsumed: make([]string, 0, len(o.OutputsConsumed)),
 		ConsumedBy:      make([]string, 0, len(o.ConsumedBy)),
-		Events:          make([]string, 0), // Initialize empty events array
+		Events:          []string{o.Topic}, // Initialize with the topic as an event
 		Data:            nil,               // Initialize empty data
 	}
 	for _, oc := range o.OutputsConsumed {

@@ -149,8 +149,7 @@ func (s *MongoTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 
 	// Insert or update the output in the "outputs" collection
 	update := bson.M{
-		"$set":      bo,
-		"$addToSet": bson.M{"events": utxo.Topic}, // Add topic as an event
+		"$set": bo, // Set all fields including events (which already contains the topic)
 	}
 
 	if _, err = s.DB.Collection("outputs").UpdateOne(ctx,
