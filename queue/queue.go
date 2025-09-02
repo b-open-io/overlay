@@ -8,6 +8,14 @@ type ScoredMember struct {
 	Score  float64
 }
 
+// ScoreRange defines range parameters for sorted set queries
+type ScoreRange struct {
+	Min    *float64 // nil = -inf
+	Max    *float64 // nil = +inf 
+	Offset int64    // 0 = start from beginning
+	Count  int64    // 0 = all (default), positive = limit
+}
+
 // QueueStorage provides Redis-like operations for queues, caches, and configuration
 type QueueStorage interface {
 	// Set Operations - for whitelists, topic management, etc.
@@ -25,7 +33,7 @@ type QueueStorage interface {
 	// Sorted Set Operations - for queues, progress tracking, fee balances, etc.
 	ZAdd(ctx context.Context, key string, members ...ScoredMember) error
 	ZRem(ctx context.Context, key string, members ...string) error
-	ZRangeByScore(ctx context.Context, key string, min, max float64, offset, count int64) ([]ScoredMember, error)
+	ZRange(ctx context.Context, key string, scoreRange ScoreRange) ([]ScoredMember, error)
 	ZScore(ctx context.Context, key, member string) (float64, error)
 	ZCard(ctx context.Context, key string) (int64, error)
 	ZIncrBy(ctx context.Context, key, member string, increment float64) (float64, error)

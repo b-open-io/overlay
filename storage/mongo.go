@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/b-open-io/overlay/beef"
@@ -20,20 +21,29 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
+// MongoSharedClient manages a single MongoDB client shared across all topics
+type MongoSharedClient struct {
+	client      *mongo.Client
+	initialized bool
+	refCount    int
+	mutex       sync.RWMutex
+}
+
+// Global shared client instance
+var sharedMongoClient = &MongoSharedClient{}
+
 type MongoTopicDataStorage struct {
 	BaseEventDataStorage
 	DB    *mongo.Database
 	topic string
 }
 
-// GetBeefStorage is inherited from BaseEventDataStorage
-
+// NewMongoTopicDataStorage creates a new MongoDB topic storage using shared client
 func NewMongoTopicDataStorage(topic string, connString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) (TopicDataStorage, error) {
-	clientOpts := options.Client().ApplyURI(connString)
-
-	client, err := mongo.Connect(clientOpts)
+	// Get or create shared MongoDB client
+	client, err := getSharedMongoClient(connString)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to get shared client: %w", err)
 	}
 
 	// Create topic-specific database name (truncate to MongoDB's 63-char limit)
@@ -133,6 +143,41 @@ func NewMongoTopicDataStorage(topic string, connString string, beefStore beef.Be
 		DB:                   db,
 		topic:                topic,
 	}, nil
+}
+
+// getSharedMongoClient returns the shared MongoDB client, creating it if necessary
+func getSharedMongoClient(connString string) (*mongo.Client, error) {
+	sharedMongoClient.mutex.Lock()
+	defer sharedMongoClient.mutex.Unlock()
+
+	if sharedMongoClient.initialized {
+		sharedMongoClient.refCount++
+		return sharedMongoClient.client, nil
+	}
+
+	// Create MongoDB client with connection pooling settings
+	clientOpts := options.Client().ApplyURI(connString)
+	// Configure connection pool for shared usage
+	clientOpts.SetMaxPoolSize(100)    // Max connections in pool
+	clientOpts.SetMinPoolSize(10)     // Min connections to maintain
+	clientOpts.SetMaxConnIdleTime(30 * time.Minute)
+
+	client, err := mongo.Connect(clientOpts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to MongoDB: %w", err)
+	}
+
+	// Test the connection
+	if err := client.Ping(context.Background(), nil); err != nil {
+		client.Disconnect(context.Background())
+		return nil, fmt.Errorf("failed to ping MongoDB: %w", err)
+	}
+
+	sharedMongoClient.client = client
+	sharedMongoClient.initialized = true
+	sharedMongoClient.refCount = 1
+
+	return client, nil
 }
 
 // GetTopic returns the topic this storage handles
@@ -1107,10 +1152,20 @@ func (s *MongoTopicDataStorage) CountOutputs(ctx context.Context) (int64, error)
 	return s.DB.Collection("outputs").CountDocuments(ctx, bson.M{})
 }
 
-// Close disconnects from the MongoDB database
+// Close closes the storage and decrements shared client reference count
 func (s *MongoTopicDataStorage) Close() error {
-	if s.DB != nil {
-		return s.DB.Client().Disconnect(context.Background())
+	sharedMongoClient.mutex.Lock()
+	defer sharedMongoClient.mutex.Unlock()
+	
+	if sharedMongoClient.initialized {
+		sharedMongoClient.refCount--
+		if sharedMongoClient.refCount == 0 {
+			// No more references, disconnect the shared client
+			err := sharedMongoClient.client.Disconnect(context.Background())
+			sharedMongoClient.client = nil
+			sharedMongoClient.initialized = false
+			return err
+		}
 	}
 	return nil
 }

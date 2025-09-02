@@ -81,11 +81,26 @@ func (s *RedisQueueStorage) ZRem(ctx context.Context, key string, members ...str
 	return s.client.ZRem(ctx, key, members).Err()
 }
 
-func (s *RedisQueueStorage) ZRangeByScore(ctx context.Context, key string, min, max float64, offset, count int64) ([]ScoredMember, error) {
+
+func (s *RedisQueueStorage) ZRange(ctx context.Context, key string, scoreRange ScoreRange) ([]ScoredMember, error) {
+	min := "-inf"
+	max := "+inf"
+	if scoreRange.Min != nil {
+		min = strconv.FormatFloat(*scoreRange.Min, 'f', -1, 64)
+	}
+	if scoreRange.Max != nil {
+		max = strconv.FormatFloat(*scoreRange.Max, 'f', -1, 64)
+	}
+	
+	count := int64(-1) // Redis -1 = all
+	if scoreRange.Count > 0 {
+		count = scoreRange.Count
+	}
+	
 	results, err := s.client.ZRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
-		Min:    formatScore(min),
-		Max:    formatScore(max),
-		Offset: offset,
+		Min:    min,
+		Max:    max,
+		Offset: scoreRange.Offset,
 		Count:  count,
 	}).Result()
 	if err != nil {
@@ -129,13 +144,3 @@ func (s *RedisQueueStorage) ZSum(ctx context.Context, key string) (float64, erro
 	return sum, nil
 }
 
-// Helper function to format scores for Redis operations
-func formatScore(score float64) string {
-	if score == -1e9 {
-		return "-inf"
-	}
-	if score == 1e9 {
-		return "+inf"
-	}
-	return strconv.FormatFloat(score, 'f', -1, 64)
-}

@@ -194,21 +194,30 @@ func (s *MongoQueueStorage) ZRem(ctx context.Context, key string, members ...str
 	return err
 }
 
-func (s *MongoQueueStorage) ZRangeByScore(ctx context.Context, key string, min, max float64, offset, count int64) ([]ScoredMember, error) {
-	filter := bson.M{
-		"key": key,
-		"score": bson.M{
-			"$gte": min,
-			"$lte": max,
-		},
-	}
 
-	opts := options.Find().SetSort(bson.M{"score": 1})
-	if offset > 0 {
-		opts.SetSkip(offset)
+func (s *MongoQueueStorage) ZRange(ctx context.Context, key string, scoreRange ScoreRange) ([]ScoredMember, error) {
+	filter := bson.M{"key": key}
+	
+	// Add score range conditions if specified
+	if scoreRange.Min != nil || scoreRange.Max != nil {
+		scoreFilter := bson.M{}
+		if scoreRange.Min != nil {
+			scoreFilter["$gte"] = *scoreRange.Min
+		}
+		if scoreRange.Max != nil {
+			scoreFilter["$lte"] = *scoreRange.Max
+		}
+		filter["score"] = scoreFilter
 	}
-	if count > 0 {
-		opts.SetLimit(count)
+	
+	opts := options.Find().SetSort(bson.M{"score": 1})
+	
+	if scoreRange.Offset > 0 {
+		opts.SetSkip(scoreRange.Offset)
+	}
+	
+	if scoreRange.Count > 0 {
+		opts.SetLimit(scoreRange.Count)
 	}
 
 	cursor, err := s.db.Collection("sorted_sets").Find(ctx, filter, opts)

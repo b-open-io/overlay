@@ -7,7 +7,7 @@ A Go library providing infrastructure components for building BSV overlay servic
 The overlay library provides infrastructure components for building BSV overlay services that implement the core interfaces defined in [go-overlay-services](https://github.com/bsv-blockchain/go-overlay-services):
 
 - **`lookup/events`** - Event-based lookup services implementing `engine.LookupService`
-- **`storage`** - Storage backends implementing `engine.Storage` (Redis, MongoDB, SQLite)
+- **`storage`** - Storage backends implementing `engine.Storage` (PostgreSQL, MongoDB, SQLite)
 - **`queue`** - Database-agnostic cache and queue operations (sets, hashes, sorted sets)
 - **`beef`** - BEEF storage implementing `beef.BeefStorage`
 - **`pubsub`** - Pub/sub system with Redis publishing and SSE broadcasting
@@ -94,9 +94,13 @@ import "github.com/b-open-io/overlay/config"
 
 // Create multi-tenant storage from connection strings
 storage, err := config.CreateEventStorage(
-    eventStorageURL,  // "mongodb://localhost:27017" -> creates overlay_topic1, overlay_topic2, etc.
+    eventStorageURL,  // "postgresql://user:pass@localhost:5432/dbname" -> topic-partitioned tables
+                      // "mongodb://localhost:27017" -> creates overlay_topic1, overlay_topic2, etc.
+                      // "" or "./overlay.db" -> ~/.1sat/overlay_topic.db (SQLite default)
     beefStorageURL,   // "lru://1gb,redis://localhost:6379,junglebus://" (shared across topics)
-    queueStorageURL,  // "redis://localhost:6379" (shared config & cross-topic indexes)
+    queueStorageURL,  // "postgresql://user:pass@localhost:5432/dbname" (shared queue operations)
+                      // "redis://localhost:6379" (shared config & cross-topic indexes)
+                      // "" -> ~/.1sat/queue.db (SQLite default)
     pubsubURL,        // "redis://localhost:6379", "channels://" (shared pub/sub)
 )
 ```

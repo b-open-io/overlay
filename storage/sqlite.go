@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -29,12 +31,50 @@ type SQLiteTopicDataStorage struct {
 
 // GetBeefStorage is inherited from BaseEventDataStorage
 
-func NewSQLiteTopicDataStorage(topic string, dbPath string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) (TopicDataStorage, error) {
+func NewSQLiteTopicDataStorage(topic string, connectionString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) (TopicDataStorage, error) {
 	var err error
 	s := &SQLiteTopicDataStorage{
 		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub),
 		topic:                topic,
 	}
+
+	// Parse connection string to determine topic-specific database path
+	var basePath string
+	
+	if connectionString == "" {
+		// Default to ~/.1sat directory
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			basePath = "./overlay" // Fallback
+		} else {
+			dotOneSatDir := filepath.Join(homeDir, ".1sat")
+			if err := os.MkdirAll(dotOneSatDir, 0755); err != nil {
+				basePath = "./overlay" // Fallback if can't create dir
+			} else {
+				basePath = filepath.Join(dotOneSatDir, "overlay")
+			}
+		}
+	} else if strings.HasPrefix(connectionString, "sqlite://") {
+		// Remove sqlite:// prefix (can be sqlite:// or sqlite:///path)
+		basePath = strings.TrimPrefix(connectionString, "sqlite://")
+		basePath = strings.TrimPrefix(basePath, "/") // Handle sqlite:///path format
+		if basePath == "" {
+			basePath = "./overlay"
+		}
+	} else {
+		// Direct path (ends with .db or .sqlite)
+		basePath = connectionString
+	}
+	
+	// Remove .db extension to create base path for topic databases
+	if strings.HasSuffix(basePath, ".db") {
+		basePath = strings.TrimSuffix(basePath, ".db")
+	} else if strings.HasSuffix(basePath, ".sqlite") {
+		basePath = strings.TrimSuffix(basePath, ".sqlite")
+	}
+	
+	// Generate topic-specific database path (topic already contains tm_ prefix)
+	dbPath := fmt.Sprintf("%s_%s.db", basePath, topic)
 
 	// Write database connection
 	if s.wdb, err = sql.Open("sqlite3", dbPath); err != nil {
@@ -140,28 +180,6 @@ func (s *SQLiteTopicDataStorage) createTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_output_rel_consuming ON output_relationships(consuming_outpoint)`,
 		`CREATE INDEX IF NOT EXISTS idx_output_rel_consumed ON output_relationships(consumed_outpoint)`,
 
-		`CREATE TABLE IF NOT EXISTS hashes (
-			key_name TEXT NOT NULL,
-			field TEXT NOT NULL,
-			value TEXT NOT NULL,
-			PRIMARY KEY (key_name, field)
-		)`,
-
-		`CREATE TABLE IF NOT EXISTS sets (
-			key_name TEXT NOT NULL,
-			member TEXT NOT NULL,
-			PRIMARY KEY (key_name, member)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_sets_key ON sets(key_name)`,
-
-		`CREATE TABLE IF NOT EXISTS sorted_sets (
-			key_name TEXT NOT NULL,
-			member TEXT NOT NULL,
-			score REAL NOT NULL,
-			created_at INTEGER DEFAULT (unixepoch()),
-			PRIMARY KEY (key_name, member)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_sorted_sets_key_score ON sorted_sets(key_name, score)`,
 	}
 
 	for _, query := range queries {

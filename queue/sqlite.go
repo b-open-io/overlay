@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -21,7 +23,35 @@ func (s *SQLiteQueueStorage) Close() error {
 	return nil
 }
 
-func NewSQLiteQueueStorage(dbPath string) (*SQLiteQueueStorage, error) {
+func NewSQLiteQueueStorage(connectionString string) (*SQLiteQueueStorage, error) {
+	// Parse connection string to determine database path
+	var dbPath string
+	
+	if connectionString == "" {
+		// Default to ~/.1sat/queue.db
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			dbPath = "./queue.db" // Fallback
+		} else {
+			dotOneSatDir := filepath.Join(homeDir, ".1sat")
+			if err := os.MkdirAll(dotOneSatDir, 0755); err != nil {
+				dbPath = "./queue.db" // Fallback if can't create dir
+			} else {
+				dbPath = filepath.Join(dotOneSatDir, "queue.db")
+			}
+		}
+	} else if strings.HasPrefix(connectionString, "sqlite://") {
+		// Remove sqlite:// prefix (can be sqlite:// or sqlite:///path)
+		dbPath = strings.TrimPrefix(connectionString, "sqlite://")
+		dbPath = strings.TrimPrefix(dbPath, "/") // Handle sqlite:///path format
+		if dbPath == "" {
+			dbPath = "./queue.db"
+		}
+	} else {
+		// Direct path
+		dbPath = connectionString
+	}
+
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
@@ -242,16 +272,31 @@ func (s *SQLiteQueueStorage) ZRem(ctx context.Context, key string, members ...st
 	return err
 }
 
-func (s *SQLiteQueueStorage) ZRangeByScore(ctx context.Context, key string, min, max float64, offset, count int64) ([]ScoredMember, error) {
-	query := "SELECT member, score FROM sorted_sets WHERE key_name = ? AND score >= ? AND score <= ? ORDER BY score ASC"
-	args := []interface{}{key, min, max}
 
-	if count > 0 {
+func (s *SQLiteQueueStorage) ZRange(ctx context.Context, key string, scoreRange ScoreRange) ([]ScoredMember, error) {
+	query := "SELECT member, score FROM sorted_sets WHERE key_name = ?"
+	args := []interface{}{key}
+	
+	// Add score range conditions if specified
+	if scoreRange.Min != nil {
+		query += " AND score >= ?"
+		args = append(args, *scoreRange.Min)
+	}
+	
+	if scoreRange.Max != nil {
+		query += " AND score <= ?"
+		args = append(args, *scoreRange.Max)
+	}
+	
+	query += " ORDER BY score ASC"
+	
+	// Add pagination if specified
+	if scoreRange.Count > 0 {
 		query += " LIMIT ? OFFSET ?"
-		args = append(args, count, offset)
-	} else if offset > 0 {
+		args = append(args, scoreRange.Count, scoreRange.Offset)
+	} else if scoreRange.Offset > 0 {
 		query += " LIMIT -1 OFFSET ?"
-		args = append(args, offset)
+		args = append(args, scoreRange.Offset)
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)

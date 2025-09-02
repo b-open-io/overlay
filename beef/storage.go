@@ -27,13 +27,6 @@ func LoadTxFromBeef(ctx context.Context, beefBytes []byte, txid *chainhash.Hash,
 		return nil, err
 	}
 
-	// Validate merkle path if present and chaintracker is provided
-	if tx.MerklePath != nil && chaintracker != nil {
-		if err := validateMerklePath(ctx, tx, txid, chaintracker); err != nil {
-			return nil, err
-		}
-	}
-
 	return tx, nil
 }
 
@@ -46,23 +39,4 @@ func LoadTx(ctx context.Context, storage BeefStorage, txid *chainhash.Hash, chai
 	}
 
 	return LoadTxFromBeef(ctx, beefBytes, txid, chaintracker)
-}
-
-// validateMerklePath validates the transaction's merkle path against the chain tracker
-func validateMerklePath(ctx context.Context, tx *transaction.Transaction, txid *chainhash.Hash, chaintracker *headers_client.Client) error {
-	root, err := tx.MerklePath.ComputeRoot(txid)
-	if err != nil {
-		return err
-	}
-
-	valid, err := chaintracker.IsValidRootForHeight(ctx, root, tx.MerklePath.BlockHeight)
-	if err != nil {
-		return err
-	}
-
-	if !valid {
-		return errors.New("invalid merkle path")
-	}
-
-	return nil
 }
