@@ -13,6 +13,9 @@ import (
 	"github.com/joho/godotenv"
 )
 
+// MaxConcurrentRequests limits the number of concurrent BEEF fetch operations
+const MaxConcurrentRequests = 16
+
 type inflightRequest struct {
 	wg     *sync.WaitGroup
 	result []byte
@@ -23,6 +26,7 @@ type JunglebusBeefStorage struct {
 	junglebusURL string
 	inflightMap  sync.Map
 	fallback     BeefStorage
+	limiter      chan struct{}
 }
 
 func NewJunglebusBeefStorage(junglebusURL string, fallback BeefStorage) *JunglebusBeefStorage {
@@ -35,6 +39,7 @@ func NewJunglebusBeefStorage(junglebusURL string, fallback BeefStorage) *Jungleb
 	return &JunglebusBeefStorage{
 		junglebusURL: junglebusURL,
 		fallback:     fallback,
+		limiter:      make(chan struct{}, MaxConcurrentRequests),
 	}
 }
 
@@ -51,6 +56,16 @@ func (t *JunglebusBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Has
 		return req.result, req.err
 	} else {
 		req := inflight.(*inflightRequest)
+		
+		// Acquire limiter before making HTTP request
+		select {
+		case t.limiter <- struct{}{}:
+			defer func() { <-t.limiter }()
+		case <-ctx.Done():
+			t.inflightMap.Delete(txidStr)
+			return nil, ctx.Err()
+		}
+
 		req.result, req.err = t.fetchBeef(txid)
 
 		// If not found, try fallback
