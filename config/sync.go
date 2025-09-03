@@ -10,6 +10,8 @@ import (
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 )
 
+const DefaultGASPConcurrency = 8
+
 // PeerSettings defines the configuration for a peer's capabilities
 type PeerSettings struct {
 	SSE       bool `json:"sse"`       // Server-Sent Events support
@@ -75,7 +77,7 @@ func ConfigureSync(ctx context.Context, eng *engine.Engine, queueStore queue.Que
 			newSyncConfig[topicId] = engine.SyncConfiguration{
 				Type:        engine.SyncConfigurationPeers,
 				Peers:       gaspPeers,
-				Concurrency: 1,
+				Concurrency: DefaultGASPConcurrency,
 			}
 			configuredTopics++
 			log.Printf("Configured GASP sync for topic %s with %d peers", topicId, len(gaspPeers))
