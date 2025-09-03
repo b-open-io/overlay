@@ -437,16 +437,27 @@ func (s *PostgresTopicDataStorage) FindOutputs(ctx context.Context, outpoints []
 	}
 	defer rows.Close()
 
-	outputs := make([]*engine.Output, 0, len(outpoints))
+	// Create map to store found outputs by outpoint
+	resultsByOutpoint := make(map[transaction.Outpoint]*engine.Output)
 	for rows.Next() {
 		output, err := s.scanOutput(rows, includeBEEF)
 		if err != nil {
 			return nil, err
 		}
-		outputs = append(outputs, output)
+		resultsByOutpoint[output.Outpoint] = output
+	}
+	
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
-	return outputs, rows.Err()
+	// Build result slice in same order as input, with nils for missing outputs
+	outputs := make([]*engine.Output, len(outpoints))
+	for i, outpoint := range outpoints {
+		outputs[i] = resultsByOutpoint[*outpoint]
+	}
+
+	return outputs, nil
 }
 
 // Helper method to scan output from database row

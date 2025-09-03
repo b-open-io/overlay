@@ -75,7 +75,7 @@ func ConfigureSync(ctx context.Context, eng *engine.Engine, queueStore queue.Que
 			newSyncConfig[topicId] = engine.SyncConfiguration{
 				Type:        engine.SyncConfigurationPeers,
 				Peers:       gaspPeers,
-				Concurrency: 16,
+				Concurrency: 1,
 			}
 			configuredTopics++
 			log.Printf("Configured GASP sync for topic %s with %d peers", topicId, len(gaspPeers))
