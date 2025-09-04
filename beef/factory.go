@@ -202,5 +202,6 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 		return nil, fmt.Errorf("no valid storage configurations provided")
 	}
 
-	return storage, nil
+	// Wrap the entire chain with deduplication
+	return NewDedupBeefStorage(storage), nil
 }
