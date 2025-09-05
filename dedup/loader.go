@@ -13,14 +13,14 @@ type Operation[T any] struct {
 
 // Loader provides deduplication for concurrent load operations by key
 type Loader[K comparable, T any] struct {
-	loader     func(K) (T, error)
+	load       func(K) (T, error)
 	operations sync.Map // map[K]*Operation[T]
 }
 
 // NewLoader creates a new deduplicated loader with the specified worker function
-func NewLoader[K comparable, T any](loader func(K) (T, error)) *Loader[K, T] {
+func NewLoader[K comparable, T any](load func(K) (T, error)) *Loader[K, T] {
 	return &Loader[K, T]{
-		loader: loader,
+		load: load,
 	}
 }
 
@@ -40,8 +40,8 @@ func (d *Loader[K, T]) Load(key K) (T, error) {
 	} else {
 		op := inflight.(*Operation[T])
 		
-		// Execute the loader function
-		op.result, op.err = d.loader(key)
+		// Execute the load function
+		op.result, op.err = d.load(key)
 
 		// Clean up operations map
 		d.operations.Delete(key)

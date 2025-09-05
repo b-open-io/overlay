@@ -11,6 +11,7 @@ import (
 type DedupBeefStorage struct {
 	chain  BeefStorage
 	loader *dedup.Loader[chainhash.Hash, []byte]
+	saver  *dedup.Saver[chainhash.Hash, []byte]
 }
 
 // NewDedupBeefStorage creates a deduplicated wrapper around a BeefStorage chain
@@ -24,6 +25,11 @@ func NewDedupBeefStorage(chain BeefStorage) *DedupBeefStorage {
 		return chain.LoadBeef(context.Background(), &txid)
 	})
 	
+	// Create saver that executes the entire chain
+	dedupStorage.saver = dedup.NewSaver(func(txid chainhash.Hash, beefBytes []byte) error {
+		return chain.SaveBeef(context.Background(), &txid, beefBytes)
+	})
+	
 	return dedupStorage
 }
 
@@ -32,13 +38,14 @@ func (d *DedupBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) (
 	return d.loader.Load(*txid)
 }
 
-// SaveBeef delegates to the underlying chain
+// SaveBeef saves BEEF data with deduplication to prevent concurrent saves of the same txid
 func (d *DedupBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
-	return d.chain.SaveBeef(ctx, txid, beefBytes)
+	return d.saver.Save(*txid, beefBytes)
 }
 
 // Close closes the underlying chain and cleans up deduplication
 func (d *DedupBeefStorage) Close() error {
 	d.loader.Clear()
+	d.saver.Clear()
 	return d.chain.Close()
 }
