@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/b-open-io/overlay/pubsub"
 	"github.com/b-open-io/overlay/storage"
@@ -118,8 +119,22 @@ func RegisterSSERoutes(group fiber.Router, config *SSERoutesConfig) {
 				}()
 			}
 
-			// Keep connection alive - wait for context cancellation
-			<-ctx.Done()
+			// Keep connection alive with periodic pings
+			ticker := time.NewTicker(15 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ticker.C:
+					// Send ping to keep connection alive
+					fmt.Fprintf(w, ": ping\n\n")
+					if err := w.Flush(); err != nil {
+						return // Connection closed
+					}
+				case <-ctx.Done():
+					return
+				}
+			}
 		})
 
 		return nil
