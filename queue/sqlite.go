@@ -68,6 +68,11 @@ func NewSQLiteQueueStorage(connectionString string) (*SQLiteQueueStorage, error)
 		return nil, err
 	}
 
+	// Set connection pool limits to prevent goroutine explosion
+	db.SetMaxOpenConns(10)   // Shared queue database can handle more connections
+	db.SetMaxIdleConns(3)    // Keep a few idle connections
+	db.SetConnMaxLifetime(0) // No connection lifetime limit
+
 	s := &SQLiteQueueStorage{db: db}
 	if err := s.createTables(); err != nil {
 		return nil, err

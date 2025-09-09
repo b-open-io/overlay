@@ -34,6 +34,11 @@ func NewSQLiteBeefStorage(dbPath string, fallback BeefStorage) (*SQLiteBeefStora
 		return nil, fmt.Errorf("failed to create table: %w", err)
 	}
 
+	// Set connection pool limits to prevent goroutine explosion
+	db.SetMaxOpenConns(15)   // BEEF storage needs more connections for concurrent access
+	db.SetMaxIdleConns(5)    // Keep several idle connections for frequent access
+	db.SetConnMaxLifetime(0) // No connection lifetime limit
+
 	return &SQLiteBeefStorage{
 		db:       db,
 		fallback: fallback,
