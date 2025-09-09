@@ -24,7 +24,8 @@ import (
 
 type SQLiteTopicDataStorage struct {
 	BaseEventDataStorage
-	db    *sql.DB
+	wdb   *sql.DB
+	rdb   *sql.DB
 	topic string
 }
 
@@ -75,25 +76,25 @@ func NewSQLiteTopicDataStorage(topic string, connectionString string, beefStore 
 	// Generate topic-specific database path (topic already contains tm_ prefix)
 	dbPath := fmt.Sprintf("%s_%s.db", basePath, topic)
 
-	// Single database connection with WAL mode for concurrent read/write access
-	if s.db, err = sql.Open("sqlite3", dbPath); err != nil {
+	// Write database connection
+	if s.wdb, err = sql.Open("sqlite3", dbPath); err != nil {
 		return nil, err
 	}
 
-	// Configure database with WAL mode for concurrent access
-	if _, err = s.db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
+	// Configure write database
+	if _, err = s.wdb.Exec("PRAGMA journal_mode=WAL;"); err != nil {
 		return nil, err
 	}
-	if _, err = s.db.Exec("PRAGMA synchronous=NORMAL;"); err != nil {
+	if _, err = s.wdb.Exec("PRAGMA synchronous=NORMAL;"); err != nil {
 		return nil, err
 	}
-	if _, err = s.db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
+	if _, err = s.wdb.Exec("PRAGMA busy_timeout=5000;"); err != nil {
 		return nil, err
 	}
-	if _, err = s.db.Exec("PRAGMA temp_store=MEMORY;"); err != nil {
+	if _, err = s.wdb.Exec("PRAGMA temp_store=MEMORY;"); err != nil {
 		return nil, err
 	}
-	if _, err = s.db.Exec("PRAGMA mmap_size=30000000000;"); err != nil {
+	if _, err = s.wdb.Exec("PRAGMA mmap_size=30000000000;"); err != nil {
 		return nil, err
 	}
 
@@ -102,11 +103,31 @@ func NewSQLiteTopicDataStorage(topic string, connectionString string, beefStore 
 		return nil, err
 	}
 
-	// Set conservative connection pool settings for each topic database
-	// Each topic has low concurrent access, so keep limits small
-	s.db.SetMaxOpenConns(3)     // Max 3 connections per topic
-	s.db.SetMaxIdleConns(1)     // Keep 1 idle connection
-	s.db.SetConnMaxLifetime(0)  // No connection lifetime limit
+	// Set connection pool settings
+	s.wdb.SetMaxOpenConns(10)
+	s.wdb.SetMaxIdleConns(5)
+
+	// Read database connection
+	if s.rdb, err = sql.Open("sqlite3", dbPath); err != nil {
+		return nil, err
+	}
+
+	// Configure read database
+	if _, err = s.rdb.Exec("PRAGMA journal_mode=WAL;"); err != nil {
+		return nil, err
+	}
+	if _, err = s.rdb.Exec("PRAGMA synchronous=NORMAL;"); err != nil {
+		return nil, err
+	}
+	if _, err = s.rdb.Exec("PRAGMA busy_timeout=5000;"); err != nil {
+		return nil, err
+	}
+	if _, err = s.rdb.Exec("PRAGMA temp_store=MEMORY;"); err != nil {
+		return nil, err
+	}
+	if _, err = s.rdb.Exec("PRAGMA mmap_size=30000000000;"); err != nil {
+		return nil, err
+	}
 
 	return s, nil
 }
@@ -162,7 +183,7 @@ func (s *SQLiteTopicDataStorage) createTables() error {
 	}
 
 	for _, query := range queries {
-		if _, err := s.db.Exec(query); err != nil {
+		if _, err := s.wdb.Exec(query); err != nil {
 			return fmt.Errorf("failed to create table: %w", err)
 		}
 	}
@@ -180,7 +201,7 @@ func (s *SQLiteTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 	utxo.Score = float64(time.Now().UnixNano())
 
 	// Begin transaction
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -266,7 +287,7 @@ func (s *SQLiteTopicDataStorage) FindOutput(ctx context.Context, outpoint *trans
 	var ancillaryBeef []byte
 	var spendTxid *string
 
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(
+	err := s.rdb.QueryRowContext(ctx, query, args...).Scan(
 		&outpointStr,
 		&txidStr,
 		&scriptBytes,
@@ -346,7 +367,7 @@ func (s *SQLiteTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*t
 		}
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -380,7 +401,7 @@ func (s *SQLiteTopicDataStorage) FindOutputsForTransaction(ctx context.Context, 
 		block_height, block_idx, score, ancillary_beef 
 		FROM outputs WHERE txid = ?`
 
-	rows, err := s.db.QueryContext(ctx, query, txid.String())
+	rows, err := s.rdb.QueryContext(ctx, query, txid.String())
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +432,7 @@ func (s *SQLiteTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since fl
 		query += " LIMIT ?"
 		args = append(args, limit)
 	}
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.rdb.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -430,7 +451,7 @@ func (s *SQLiteTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since fl
 }
 
 func (s *SQLiteTopicDataStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.wdb.ExecContext(ctx,
 		"DELETE FROM outputs WHERE outpoint = ?",
 		outpoint.String())
 	return err
@@ -443,7 +464,7 @@ func (s *SQLiteTopicDataStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx,
+	_, err = s.wdb.ExecContext(ctx,
 		"UPDATE outputs SET spend = ? WHERE outpoint = ?",
 		spendTxid.String(), outpoint.String())
 	return err
@@ -454,7 +475,7 @@ func (s *SQLiteTopicDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints
 		return nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -497,7 +518,7 @@ func (s *SQLiteTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, txid
 func (s *SQLiteTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
 	outpointStr := outpoint.String()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -530,7 +551,7 @@ func (s *SQLiteTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, ou
 func (s *SQLiteTopicDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
 	score := float64(time.Now().UnixNano())
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.wdb.ExecContext(ctx, `
 		INSERT OR REPLACE INTO transactions 
 		(txid, score, created_at)
 		VALUES (?, ?, CURRENT_TIMESTAMP)`,
@@ -556,15 +577,18 @@ func (s *SQLiteTopicDataStorage) InsertAppliedTransaction(ctx context.Context, t
 
 func (s *SQLiteTopicDataStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
 	var exists bool
-	err := s.db.QueryRowContext(ctx,
+	err := s.rdb.QueryRowContext(ctx,
 		"SELECT EXISTS(SELECT 1 FROM transactions WHERE txid = ?)",
 		tx.Txid.String()).Scan(&exists)
 	return exists, err
 }
 
 func (s *SQLiteTopicDataStorage) Close() error {
-	if s.db != nil {
-		s.db.Close()
+	if s.wdb != nil {
+		s.wdb.Close()
+	}
+	if s.rdb != nil {
+		s.rdb.Close()
 	}
 	return nil
 }
@@ -631,7 +655,7 @@ func (s *SQLiteTopicDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*
 
 func (s *SQLiteTopicDataStorage) loadOutputRelations(ctx context.Context, output *engine.Output) error {
 	// Load outputs consumed by this output (this output is the consumer)
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.rdb.QueryContext(ctx,
 		"SELECT consumed_outpoint FROM output_relationships WHERE consuming_outpoint = ?",
 		output.Outpoint.String())
 	if err != nil {
@@ -652,7 +676,7 @@ func (s *SQLiteTopicDataStorage) loadOutputRelations(ctx context.Context, output
 	}
 
 	// Load outputs that consume this output (this output is being consumed)
-	rows2, err := s.db.QueryContext(ctx,
+	rows2, err := s.rdb.QueryContext(ctx,
 		"SELECT consuming_outpoint FROM output_relationships WHERE consumed_outpoint = ?",
 		output.Outpoint.String())
 	if err != nil {
@@ -683,7 +707,7 @@ func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, he
 	         WHERE block_height = ?
 	         ORDER BY txid, outpoint`
 
-	rows, err := s.db.QueryContext(ctx, query, height)
+	rows, err := s.rdb.QueryContext(ctx, query, height)
 	if err != nil {
 		return nil, err
 	}
@@ -760,7 +784,7 @@ func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, he
 	inputQuery := fmt.Sprintf(`SELECT outpoint, txid, script, satoshis, spend, data 
 	                          FROM outputs WHERE spend IN (%s)`, strings.Join(placeholders, ","))
 
-	inputRows, err := s.db.QueryContext(ctx, inputQuery, args...)
+	inputRows, err := s.rdb.QueryContext(ctx, inputQuery, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -843,7 +867,7 @@ func (s *SQLiteTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid 
 	         WHERE txid = ?
 	         ORDER BY outpoint`
 
-	rows, err := s.db.QueryContext(ctx, query, txid.String())
+	rows, err := s.rdb.QueryContext(ctx, query, txid.String())
 	if err != nil {
 		return nil, err
 	}
@@ -909,7 +933,7 @@ func (s *SQLiteTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid 
 	              FROM outputs 
 	              WHERE spend = ?`
 
-	inputRows, err := s.db.QueryContext(ctx, inputQuery, txid.String())
+	inputRows, err := s.rdb.QueryContext(ctx, inputQuery, txid.String())
 	if err != nil {
 		return nil, err
 	}
@@ -982,7 +1006,7 @@ func (s *SQLiteTopicDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 	}
 	outpointStr := outpoint.String()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -1042,7 +1066,7 @@ func (s *SQLiteTopicDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 
 // FindEvents returns all events associated with a given outpoint
 func (s *SQLiteTopicDataStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx,
+	rows, err := s.rdb.QueryContext(ctx,
 		"SELECT event FROM events WHERE outpoint = ?",
 		outpoint.String())
 	if err != nil {
@@ -1225,7 +1249,7 @@ func (s *SQLiteTopicDataStorage) LookupOutpoints(ctx context.Context, question *
 	}
 
 	// Execute query
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	rows, err := s.rdb.QueryContext(ctx, query.String(), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1273,7 +1297,7 @@ func (s *SQLiteTopicDataStorage) LookupOutpoints(ctx context.Context, question *
 // GetOutputData retrieves the data associated with a specific output
 func (s *SQLiteTopicDataStorage) GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error) {
 	var dataJSON *string
-	err := s.db.QueryRowContext(ctx,
+	err := s.rdb.QueryRowContext(ctx,
 		"SELECT data FROM outputs WHERE outpoint = ? LIMIT 1",
 		outpoint.String()).Scan(&dataJSON)
 
@@ -1300,7 +1324,7 @@ func (s *SQLiteTopicDataStorage) GetOutputData(ctx context.Context, outpoint *tr
 func (s *SQLiteTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	// Find any output for this txid in the specified topic
 	var ancillaryBeef []byte
-	err := s.db.QueryRowContext(ctx,
+	err := s.rdb.QueryRowContext(ctx,
 		"SELECT ancillary_beef FROM outputs WHERE txid = ? LIMIT 1",
 		txid.String(),
 	).Scan(&ancillaryBeef)
@@ -1414,7 +1438,7 @@ func (s *SQLiteTopicDataStorage) FindOutputData(ctx context.Context, question *E
 		args = append(args, question.Limit)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query.String(), args...)
+	rows, err := s.rdb.QueryContext(ctx, query.String(), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1473,7 +1497,7 @@ func (s *SQLiteTopicDataStorage) FindOutputData(ctx context.Context, question *E
 // LookupEventScores returns lightweight event scores for simple queries
 func (s *SQLiteTopicDataStorage) LookupEventScores(ctx context.Context, event string, fromScore float64) ([]queue.ScoredMember, error) {
 	// Query the events table directly without joining to outputs
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.rdb.QueryContext(ctx, `
 		SELECT outpoint, score 
 		FROM events 
 		WHERE event = ? AND score > ? 
@@ -1503,6 +1527,6 @@ func (s *SQLiteTopicDataStorage) LookupEventScores(ctx context.Context, event st
 // CountOutputs returns the total count of outputs in a given topic
 func (s *SQLiteTopicDataStorage) CountOutputs(ctx context.Context) (int64, error) {
 	var count int64
-	err := s.db.QueryRowContext(ctx, "SELECT COUNT(1) FROM outputs").Scan(&count)
+	err := s.rdb.QueryRowContext(ctx, "SELECT COUNT(1) FROM outputs").Scan(&count)
 	return count, err
 }
