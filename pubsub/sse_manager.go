@@ -206,6 +206,8 @@ func (s *SSEManager) broadcastToClients(event Event) {
 	
 	// Broadcast to all clients for this topic
 	sentCount := 0
+	var disconnectedClients []string
+	
 	for _, clientID := range clientIDs {
 		if clientVal, exists := s.clients.Load(clientID); exists {
 			client := clientVal.(*SSEClient)
@@ -217,13 +219,23 @@ func (s *SSEManager) broadcastToClients(event Event) {
 					data = fmt.Sprintf("event: %s\ndata: %s\n\n", event.Topic, event.Member)
 				}
 				if _, err := writer.Write([]byte(data)); err == nil {
-					writer.Flush()
-					sentCount++
+					if flushErr := writer.Flush(); flushErr == nil {
+						sentCount++
+					} else {
+						log.Printf("SSEManager: Failed to flush to client %s: %v", clientID, flushErr)
+						disconnectedClients = append(disconnectedClients, clientID)
+					}
 				} else {
 					log.Printf("SSEManager: Failed to write to client %s: %v", clientID, err)
+					disconnectedClients = append(disconnectedClients, clientID)
 				}
 			}
 		}
+	}
+	
+	// Clean up disconnected clients
+	for _, clientID := range disconnectedClients {
+		s.DeregisterClient(clientID)
 	}
 	
 	log.Printf("SSEManager: Successfully sent event to %d/%d clients", sentCount, len(clientIDs))
