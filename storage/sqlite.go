@@ -1050,18 +1050,11 @@ func (s *SQLiteTopicDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 
 	// Publish events if publisher is available
 	if s.pubsub != nil {
-		log.Printf("Publishing %d events for outpoint %s", len(events), outpointStr)
 		for _, event := range events {
-			// Publish event with outpoint string as the message
-			log.Printf("Publishing event: topic=%s, outpoint=%s", event, outpointStr)
 			if err := s.pubsub.Publish(ctx, event, outpointStr, score); err != nil {
 				log.Printf("Failed to publish event %s: %v", event, err)
-				continue
 			}
-			log.Printf("Successfully published event %s", event)
 		}
-	} else {
-		log.Printf("Pubsub is nil - cannot publish events for outpoint %s", outpointStr)
 	}
 
 	return nil
