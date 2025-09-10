@@ -40,7 +40,7 @@ func NewSQLiteTopicDataStorage(topic string, connectionString string, beefStore 
 
 	// Parse connection string to determine topic-specific database path
 	var basePath string
-	
+
 	if connectionString == "" {
 		// Default to ~/.1sat directory
 		homeDir, err := os.UserHomeDir()
@@ -65,14 +65,14 @@ func NewSQLiteTopicDataStorage(topic string, connectionString string, beefStore 
 		// Direct path (ends with .db or .sqlite)
 		basePath = connectionString
 	}
-	
+
 	// Remove .db extension to create base path for topic databases
 	if strings.HasSuffix(basePath, ".db") {
 		basePath = strings.TrimSuffix(basePath, ".db")
 	} else if strings.HasSuffix(basePath, ".sqlite") {
 		basePath = strings.TrimSuffix(basePath, ".sqlite")
 	}
-	
+
 	// Generate topic-specific database path (topic already contains tm_ prefix)
 	dbPath := fmt.Sprintf("%s_%s.db", basePath, topic)
 
@@ -179,7 +179,6 @@ func (s *SQLiteTopicDataStorage) createTables() error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_output_rel_consuming ON output_relationships(consuming_outpoint)`,
 		`CREATE INDEX IF NOT EXISTS idx_output_rel_consumed ON output_relationships(consumed_outpoint)`,
-
 	}
 
 	for _, query := range queries {
@@ -256,10 +255,10 @@ func (s *SQLiteTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 		return err
 	}
 
-	// Add topic as an event using SaveEvents (handles pubsub publishing)
-	if err := s.SaveEvents(ctx, &utxo.Outpoint, []string{s.topic}, utxo.Score, nil); err != nil {
-		return err
-	}
+	// // Add topic as an event using SaveEvents (handles pubsub publishing)
+	// if err := s.SaveEvents(ctx, &utxo.Outpoint, []string{s.topic}, utxo.Score, nil); err != nil {
+	// 	return err
+	// }
 
 	return nil
 }
@@ -382,7 +381,7 @@ func (s *SQLiteTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*t
 		}
 		resultsByOutpoint[output.Outpoint] = output
 	}
-	
+
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -1051,14 +1050,18 @@ func (s *SQLiteTopicDataStorage) SaveEvents(ctx context.Context, outpoint *trans
 
 	// Publish events if publisher is available
 	if s.pubsub != nil {
+		log.Printf("Publishing %d events for outpoint %s", len(events), outpointStr)
 		for _, event := range events {
 			// Publish event with outpoint string as the message
-			if err := s.pubsub.Publish(ctx, event, outpointStr); err != nil {
-				// Log error but don't fail the operation
-				// Publishing is best-effort
+			log.Printf("Publishing event: topic=%s, outpoint=%s", event, outpointStr)
+			if err := s.pubsub.Publish(ctx, event, outpointStr, score); err != nil {
+				log.Printf("Failed to publish event %s: %v", event, err)
 				continue
 			}
+			log.Printf("Successfully published event %s", event)
 		}
+	} else {
+		log.Printf("Pubsub is nil - cannot publish events for outpoint %s", outpointStr)
 	}
 
 	return nil

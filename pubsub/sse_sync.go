@@ -14,14 +14,12 @@ import (
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
-	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 // SSESync manages centralized SSE connections to peers and processes transactions
 type SSESync struct {
 	peerConnections map[string]*SSEConnection // peer URL -> connection
-	inFlightTxs     map[chainhash.Hash]bool   // global in-flight tracking by txid
-	inFlightMutex   *sync.RWMutex
+	inFlightTxs     sync.Map                  // chainhash.Hash -> struct{} (global in-flight tracking)
 	engine          engine.OverlayEngineProvider
 	storage         engine.Storage
 	httpClient      *http.Client
@@ -43,17 +41,16 @@ type SSEConnection struct {
 
 // SSEEvent represents an event received from SSE
 type SSEEvent struct {
-	Topic    string
-	Outpoint transaction.Outpoint
-	PeerURL  string
+	Topic   string
+	Txid    chainhash.Hash
+	PeerURL string
 }
 
 // NewSSESync creates a new centralized SSE sync manager
 func NewSSESync(engine engine.OverlayEngineProvider, storage engine.Storage) *SSESync {
 	return &SSESync{
 		peerConnections: make(map[string]*SSEConnection),
-		inFlightTxs:     make(map[chainhash.Hash]bool),
-		inFlightMutex:   &sync.RWMutex{},
+		// inFlightTxs is a sync.Map, no need to initialize
 		engine:          engine,
 		storage:         storage,
 		httpClient: &http.Client{
@@ -240,19 +237,19 @@ func (s *SSESync) handleSSEEvent(conn *SSEConnection, eventType, data string) {
 		return
 	}
 	
-	// Parse outpoint from event data
-	outpoint, err := transaction.OutpointFromString(data)
+	// Parse txid from event data
+	txid, err := chainhash.NewHashFromHex(data)
 	if err != nil {
-		slog.Error("Invalid outpoint format in SSE event", "data", data, "peer", conn.peerURL, "error", err)
+		slog.Error("Invalid txid format in SSE event", "data", data, "peer", conn.peerURL, "error", err)
 		return
 	}
 	
 	// Send to processing channel
 	select {
 	case conn.eventChan <- SSEEvent{
-		Topic:    eventType,
-		Outpoint: *outpoint,
-		PeerURL:  conn.peerURL,
+		Topic:   eventType,
+		Txid:    *txid,
+		PeerURL: conn.peerURL,
 	}:
 	case <-s.ctx.Done():
 	}
@@ -272,16 +269,13 @@ func (s *SSESync) processEvents(eventChan <-chan SSEEvent) {
 
 // processTransaction processes a single transaction event
 func (s *SSESync) processTransaction(event SSEEvent) {
-	txid := &event.Outpoint.Txid
+	txid := &event.Txid
 	
 	// Check if transaction is already in-flight (fast memory check)
-	s.inFlightMutex.RLock()
-	if s.inFlightTxs[*txid] {
-		s.inFlightMutex.RUnlock()
+	if _, exists := s.inFlightTxs.Load(*txid); exists {
 		slog.Debug("Transaction already in-flight", "txid", txid.String(), "peer", event.PeerURL)
 		return
 	}
-	s.inFlightMutex.RUnlock()
 	
 	// Check if transaction already exists in storage for this topic
 	exists, err := s.storage.DoesAppliedTransactionExist(s.ctx, &overlay.AppliedTransaction{
@@ -298,17 +292,14 @@ func (s *SSESync) processTransaction(event SSEEvent) {
 	}
 	
 	// Mark as in-flight
-	s.inFlightMutex.Lock()
-	s.inFlightTxs[*txid] = true
-	s.inFlightMutex.Unlock()
+	// Mark transaction as in-flight
+	s.inFlightTxs.Store(*txid, struct{}{})
 	
 	// Process the transaction
 	go func() {
 		defer func() {
 			// Remove from in-flight when done
-			s.inFlightMutex.Lock()
-			delete(s.inFlightTxs, *txid)
-			s.inFlightMutex.Unlock()
+			s.inFlightTxs.Delete(*txid)
 		}()
 		
 		if err := s.fetchAndSubmitTransaction(event); err != nil {
@@ -322,7 +313,7 @@ func (s *SSESync) processTransaction(event SSEEvent) {
 // fetchAndSubmitTransaction fetches BEEF and submits to engine
 func (s *SSESync) fetchAndSubmitTransaction(event SSEEvent) error {
 	// Fetch BEEF from peer using topic-specific endpoint
-	beefURL := fmt.Sprintf("%s/api/1sat/beef/%s/%s", event.PeerURL, event.Topic, event.Outpoint.Txid.String())
+	beefURL := fmt.Sprintf("%s/api/1sat/beef/%s/%s", event.PeerURL, event.Topic, event.Txid.String())
 	
 	resp, err := s.httpClient.Get(beefURL)
 	if err != nil {

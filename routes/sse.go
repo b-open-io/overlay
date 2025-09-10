@@ -105,16 +105,12 @@ func RegisterSSERoutes(group fiber.Router, config *SSERoutesConfig) {
 
 			// Register this client with the shared SSE manager
 			if sharedSSEManager != nil {
-				// Register client for each event
-				for _, event := range events {
-					sharedSSEManager.AddSSEClient(event, w)
-				}
+				// Register client for all requested topics
+				clientID := sharedSSEManager.RegisterClient(events, w)
 
 				// Cleanup function - remove client when connection closes
 				defer func() {
-					for _, event := range events {
-						sharedSSEManager.RemoveSSEClient(event, w)
-					}
+					sharedSSEManager.DeregisterClient(clientID)
 					close(clientDone)
 				}()
 			}

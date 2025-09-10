@@ -2,6 +2,7 @@ package pubsub
 
 import (
 	"context"
+	"log"
 	"sync"
 )
 
@@ -32,6 +33,8 @@ func (cp *ChannelPubSub) Publish(ctx context.Context, topic string, data string,
 	subscribers := cp.subscribers[topic]
 	cp.mu.RUnlock()
 	
+	log.Printf("ChannelPubSub: Publishing to topic=%s, data=%s, subscribers=%d", topic, data, len(subscribers))
+	
 	// Use provided score or 0 if none provided
 	var eventScore float64 = 0
 	if len(score) > 0 {
@@ -47,17 +50,19 @@ func (cp *ChannelPubSub) Publish(ctx context.Context, topic string, data string,
 	}
 	
 	// Send to all current subscribers
+	sentCount := 0
 	for _, ch := range subscribers {
 		select {
 		case ch <- event:
-			// Successfully sent
+			sentCount++
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			// Channel is full, skip this subscriber to avoid blocking
+			log.Printf("ChannelPubSub: Skipping full channel for topic %s", topic)
 		}
 	}
 	
+	log.Printf("ChannelPubSub: Sent event to %d/%d subscribers for topic %s", sentCount, len(subscribers), topic)
 	return nil
 }
 
@@ -65,12 +70,15 @@ func (cp *ChannelPubSub) Publish(ctx context.Context, topic string, data string,
 func (cp *ChannelPubSub) Subscribe(ctx context.Context, topics []string) (<-chan Event, error) {
 	eventChan := make(chan Event, 100) // Buffered channel to avoid blocking publishers
 	
+	log.Printf("ChannelPubSub: New subscription to topics: %v", topics)
+	
 	cp.mu.Lock()
 	defer cp.mu.Unlock()
 	
 	// Add subscriber to each topic
 	for _, topic := range topics {
 		cp.subscribers[topic] = append(cp.subscribers[topic], eventChan)
+		log.Printf("ChannelPubSub: Added subscriber to topic %s (total: %d)", topic, len(cp.subscribers[topic]))
 	}
 	
 	// Start cleanup goroutine for this subscription

@@ -132,7 +132,7 @@ func (s *PostgresTopicDataStorage) createTables(ctx context.Context) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (topic, outpoint)
 		) PARTITION BY LIST (topic)`,
-		
+
 		// Events table - partitioned by topic
 		`CREATE TABLE IF NOT EXISTS events (
 			event TEXT NOT NULL,
@@ -142,7 +142,7 @@ func (s *PostgresTopicDataStorage) createTables(ctx context.Context) error {
 			topic TEXT NOT NULL,
 			PRIMARY KEY (topic, event, outpoint)
 		) PARTITION BY LIST (topic)`,
-		
+
 		// Transactions table - partitioned by topic
 		`CREATE TABLE IF NOT EXISTS transactions (
 			txid TEXT NOT NULL,
@@ -151,7 +151,7 @@ func (s *PostgresTopicDataStorage) createTables(ctx context.Context) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (topic, txid)
 		) PARTITION BY LIST (topic)`,
-		
+
 		// Output relationships table - partitioned by topic
 		`CREATE TABLE IF NOT EXISTS output_relationships (
 			consuming_outpoint TEXT NOT NULL,
@@ -167,7 +167,6 @@ func (s *PostgresTopicDataStorage) createTables(ctx context.Context) error {
 			return fmt.Errorf("failed to create parent table: %w", err)
 		}
 	}
-
 
 	return nil
 }
@@ -203,7 +202,7 @@ func (s *PostgresTopicDataStorage) ensureTopicPartitions(ctx context.Context) er
 			},
 		},
 		{
-			parentTable: "transactions", 
+			parentTable: "transactions",
 			partName:    fmt.Sprintf("transactions_%s", sanitizedTopic),
 			indexes: []string{
 				`CREATE INDEX IF NOT EXISTS idx_%[1]s_txid ON %[1]s(txid)`,
@@ -284,9 +283,9 @@ func (s *PostgresTopicDataStorage) InsertOutput(ctx context.Context, utxo *engin
 		consuming string
 		consumed  string
 	}
-	
+
 	var relationships []relationship
-	
+
 	// Collect all relationships
 	for _, consumed := range utxo.OutputsConsumed {
 		relationships = append(relationships, relationship{
@@ -294,41 +293,40 @@ func (s *PostgresTopicDataStorage) InsertOutput(ctx context.Context, utxo *engin
 			consumed:  consumed.String(),
 		})
 	}
-	
+
 	for _, consumedBy := range utxo.ConsumedBy {
 		relationships = append(relationships, relationship{
 			consuming: consumedBy.String(),
 			consumed:  utxo.Outpoint.String(),
 		})
 	}
-	
+
 	// Batch insert all relationships in single statement
 	if len(relationships) > 0 {
 		valueStrings := make([]string, len(relationships))
 		valueArgs := make([]interface{}, 0, len(relationships)*3)
-		
+
 		for i, rel := range relationships {
 			valueStrings[i] = fmt.Sprintf("($%d, $%d, $%d)", i*3+1, i*3+2, i*3+3)
 			valueArgs = append(valueArgs, rel.consuming, rel.consumed, s.topic)
 		}
-		
+
 		query := fmt.Sprintf(`
 			INSERT INTO output_relationships (consuming_outpoint, consumed_outpoint, topic)
 			VALUES %s
 			ON CONFLICT (topic, consuming_outpoint, consumed_outpoint) DO NOTHING`,
 			strings.Join(valueStrings, ","))
-		
+
 		_, err = s.pool.Exec(ctx, query, valueArgs...)
 		if err != nil {
 			return err
 		}
 	}
 
-
-	// Add topic as an event using SaveEvents (handles pubsub publishing)
-	if err := s.SaveEvents(ctx, &utxo.Outpoint, []string{s.topic}, utxo.Score, nil); err != nil {
-		return err
-	}
+	// // Add topic as an event using SaveEvents (handles pubsub publishing)
+	// if err := s.SaveEvents(ctx, &utxo.Outpoint, []string{s.topic}, utxo.Score, nil); err != nil {
+	// 	return err
+	// }
 
 	return nil
 }
@@ -446,7 +444,7 @@ func (s *PostgresTopicDataStorage) FindOutputs(ctx context.Context, outpoints []
 		}
 		resultsByOutpoint[output.Outpoint] = output
 	}
-	
+
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -569,7 +567,7 @@ func (s *PostgresTopicDataStorage) loadOutputRelations(ctx context.Context, outp
 func (s *PostgresTopicDataStorage) Close() error {
 	sharedPool.mutex.Lock()
 	defer sharedPool.mutex.Unlock()
-	
+
 	if sharedPool.initialized {
 		sharedPool.refCount--
 		if sharedPool.refCount == 0 {
@@ -1592,4 +1590,3 @@ func (s *PostgresTopicDataStorage) CountOutputs(ctx context.Context) (int64, err
 	err := s.pool.QueryRow(ctx, "SELECT COUNT(1) FROM outputs WHERE topic = $1", s.topic).Scan(&count)
 	return count, err
 }
-

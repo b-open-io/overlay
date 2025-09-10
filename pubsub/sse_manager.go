@@ -5,16 +5,26 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
+	"time"
 )
+
+// SSEClient represents an individual SSE connection
+type SSEClient struct {
+	writer interface{}
+	topics []string
+}
 
 // SSEManager manages SSE clients and their subscriptions
 type SSEManager struct {
-	pubsub  PubSub
-	clients map[string][]interface{} // topic -> slice of SSE clients
-	mu      sync.RWMutex
-	events  <-chan Event
-	ctx     context.Context
-	cancel  context.CancelFunc
+	pubsub             PubSub
+	clients            sync.Map                // clientID -> *SSEClient
+	topicClients       sync.Map                // topic -> []string (clientIDs)
+	events             atomic.Value            // <-chan Event (thread-safe channel replacement)
+	subscriptionCtx    context.Context         // Context for current subscription
+	subscriptionCancel context.CancelFunc     // Cancel function for current subscription
+	ctx                context.Context
+	cancel             context.CancelFunc
 }
 
 // NewSSEManager creates a new SSE manager
@@ -22,10 +32,9 @@ func NewSSEManager(ctx context.Context, pubsub PubSub) *SSEManager {
 	managerCtx, cancel := context.WithCancel(ctx)
 	
 	manager := &SSEManager{
-		pubsub:  pubsub,
-		clients: make(map[string][]interface{}),
-		ctx:     managerCtx,
-		cancel:  cancel,
+		pubsub: pubsub,
+		ctx:    managerCtx,
+		cancel: cancel,
 	}
 	
 	// Start broadcast loop immediately
@@ -34,43 +43,85 @@ func NewSSEManager(ctx context.Context, pubsub PubSub) *SSEManager {
 	return manager
 }
 
-// AddSSEClient registers an SSE client for a topic and updates subscriptions
-func (s *SSEManager) AddSSEClient(topic string, client interface{}) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// RegisterClient registers an SSE client for multiple topics and returns a clientID
+func (s *SSEManager) RegisterClient(topics []string, writer interface{}) string {
+	clientID := fmt.Sprintf("sse_%d_%p", time.Now().UnixNano(), writer)
 	
-	// Add client to topic
-	s.clients[topic] = append(s.clients[topic], client)
+	client := &SSEClient{
+		writer: writer,
+		topics: topics,
+	}
 	
-	// Rebuild subscription list dynamically
+	// Store client
+	s.clients.Store(clientID, client)
+	
+	// Add client to each topic's list
+	for _, topic := range topics {
+		s.addClientToTopic(topic, clientID)
+	}
+	
+	log.Printf("SSEManager: Registered client %s for topics: %v", clientID, topics)
+	
+	// Update global subscription
+	s.updateSubscriptions()
+	
+	return clientID
+}
+
+// DeregisterClient removes an SSE client and cleans up all subscriptions
+func (s *SSEManager) DeregisterClient(clientID string) error {
+	clientVal, exists := s.clients.Load(clientID)
+	if !exists {
+		return nil // Already removed
+	}
+	
+	client := clientVal.(*SSEClient)
+	
+	// Remove client from all topic lists
+	for _, topic := range client.topics {
+		s.removeClientFromTopic(topic, clientID)
+	}
+	
+	// Remove client
+	s.clients.Delete(clientID)
+	
+	log.Printf("SSEManager: Deregistered client %s", clientID)
+	
+	// Update global subscription
 	s.updateSubscriptions()
 	
 	return nil
 }
 
-// RemoveSSEClient unregisters an SSE client and updates subscriptions
-func (s *SSEManager) RemoveSSEClient(topic string, client interface{}) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// addClientToTopic adds a client ID to a topic's subscriber list (thread-safe)
+func (s *SSEManager) addClientToTopic(topic, clientID string) {
+	val, _ := s.topicClients.LoadOrStore(topic, []string{})
+	clientIDs := val.([]string)
+	clientIDs = append(clientIDs, clientID)
+	s.topicClients.Store(topic, clientIDs)
+}
+
+// removeClientFromTopic removes a client ID from a topic's subscriber list (thread-safe)
+func (s *SSEManager) removeClientFromTopic(topic, clientID string) {
+	val, exists := s.topicClients.Load(topic)
+	if !exists {
+		return
+	}
 	
-	// Remove client from topic
-	clients := s.clients[topic]
-	for i, c := range clients {
-		if c == client {
-			s.clients[topic] = append(clients[:i], clients[i+1:]...)
+	clientIDs := val.([]string)
+	for i, id := range clientIDs {
+		if id == clientID {
+			// Remove client from slice
+			clientIDs = append(clientIDs[:i], clientIDs[i+1:]...)
 			break
 		}
 	}
 	
-	// Clean up empty topics
-	if len(s.clients[topic]) == 0 {
-		delete(s.clients, topic)
+	if len(clientIDs) == 0 {
+		s.topicClients.Delete(topic)
+	} else {
+		s.topicClients.Store(topic, clientIDs)
 	}
-	
-	// Rebuild subscription list dynamically
-	s.updateSubscriptions()
-	
-	return nil
 }
 
 // updateSubscriptions rebuilds the subscription list based on current clients
@@ -80,19 +131,35 @@ func (s *SSEManager) updateSubscriptions() {
 	}
 	
 	// Build topic list from current clients
-	topics := make([]string, 0, len(s.clients))
-	for topic := range s.clients {
-		if len(s.clients[topic]) > 0 {
+	var topics []string
+	s.topicClients.Range(func(key, value interface{}) bool {
+		topic := key.(string)
+		clientIDs := value.([]string)
+		if len(clientIDs) > 0 {
 			topics = append(topics, topic)
 		}
-	}
+		return true
+	})
+	
+	log.Printf("SSEManager: updateSubscriptions called, active topics: %v", topics)
 	
 	// Update subscription
 	if len(topics) > 0 {
-		if events, err := s.pubsub.Subscribe(s.ctx, topics); err != nil {
-			log.Printf("Failed to update SSE subscriptions: %v", err)
+		// Cancel old subscription first (triggers ChannelPubSub cleanup)
+		if s.subscriptionCancel != nil {
+			log.Printf("SSEManager: Cancelling old subscription")
+			s.subscriptionCancel()
+		}
+		
+		// Create new context for new subscription
+		s.subscriptionCtx, s.subscriptionCancel = context.WithCancel(s.ctx)
+		
+		// Subscribe with new context
+		if events, err := s.pubsub.Subscribe(s.subscriptionCtx, topics); err != nil {
+			log.Printf("SSEManager: Failed to update subscriptions: %v", err)
 		} else {
-			s.events = events
+			log.Printf("SSEManager: Successfully subscribed to %d topics", len(topics))
+			s.events.Store(events)
 		}
 	}
 }
@@ -101,8 +168,25 @@ func (s *SSEManager) updateSubscriptions() {
 // broadcastLoop distributes events to SSE clients
 func (s *SSEManager) broadcastLoop() {
 	for {
+		// Get current events channel safely with atomic.Value
+		eventsVal := s.events.Load()
+		if eventsVal == nil {
+			// No subscription yet, wait for first client
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+				continue
+			}
+		}
+		
+		events := eventsVal.(<-chan Event)
 		select {
-		case event := <-s.events:
+		case event, ok := <-events:
+			if !ok {
+				// Channel closed, wait for new subscription
+				continue
+			}
 			s.broadcastToClients(event)
 		case <-s.ctx.Done():
 			return
@@ -112,24 +196,37 @@ func (s *SSEManager) broadcastLoop() {
 
 // broadcastToClients sends an event to all registered SSE clients for the topic
 func (s *SSEManager) broadcastToClients(event Event) {
-	s.mu.RLock()
-	clients := s.clients[event.Topic]
-	s.mu.RUnlock()
+	val, exists := s.topicClients.Load(event.Topic)
+	if !exists {
+		return // No clients for this topic
+	}
+	
+	clientIDs := val.([]string)
+	log.Printf("SSEManager: Broadcasting event %s to %d clients for topic %s", event.Member, len(clientIDs), event.Topic)
 	
 	// Broadcast to all clients for this topic
-	for _, client := range clients {
-		if writer, ok := client.(interface{ Write([]byte) (int, error); Flush() error }); ok {
-			var data string
-			if event.Score > 0 {
-				data = fmt.Sprintf("data: %s\nid: %.0f\n\n", event.Member, event.Score)
-			} else {
-				data = fmt.Sprintf("data: %s\n\n", event.Member)
-			}
-			if _, err := writer.Write([]byte(data)); err == nil {
-				writer.Flush()
+	sentCount := 0
+	for _, clientID := range clientIDs {
+		if clientVal, exists := s.clients.Load(clientID); exists {
+			client := clientVal.(*SSEClient)
+			if writer, ok := client.writer.(interface{ Write([]byte) (int, error); Flush() error }); ok {
+				var data string
+				if event.Score > 0 {
+					data = fmt.Sprintf("event: %s\ndata: %s\nid: %.0f\n\n", event.Topic, event.Member, event.Score)
+				} else {
+					data = fmt.Sprintf("event: %s\ndata: %s\n\n", event.Topic, event.Member)
+				}
+				if _, err := writer.Write([]byte(data)); err == nil {
+					writer.Flush()
+					sentCount++
+				} else {
+					log.Printf("SSEManager: Failed to write to client %s: %v", clientID, err)
+				}
 			}
 		}
 	}
+	
+	log.Printf("SSEManager: Successfully sent event to %d/%d clients", sentCount, len(clientIDs))
 }
 
 // Stop stops the SSE manager

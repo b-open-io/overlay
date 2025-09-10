@@ -48,7 +48,7 @@ func (s *RedisEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
-	
+
 	score := float64(time.Now().UnixNano())
 	_, err = s.DB.Pipelined(ctx, func(p redis.Pipeliner) error {
 		op := utxo.Outpoint.String()
@@ -74,12 +74,12 @@ func (s *RedisEventDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 		}
 		return nil
 	})
-	if err != nil {
-		return err
-	}
+	// if err != nil {
+	return err
+	// }
 
 	// Add topic as an event using SaveEvents (handles pubsub publishing)
-	return s.SaveEvents(ctx, &utxo.Outpoint, []string{utxo.Topic}, utxo.Topic, score, nil)
+	// return s.SaveEvents(ctx, &utxo.Outpoint, []string{utxo.Topic}, utxo.Topic, score, nil)
 }
 
 func (s *RedisEventDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, topic *string, spent *bool, includeBEEF bool) (o *engine.Output, err error) {

@@ -158,8 +158,8 @@ func getSharedMongoClient(connString string) (*mongo.Client, error) {
 	// Create MongoDB client with connection pooling settings
 	clientOpts := options.Client().ApplyURI(connString)
 	// Configure connection pool for shared usage
-	clientOpts.SetMaxPoolSize(100)    // Max connections in pool
-	clientOpts.SetMinPoolSize(10)     // Min connections to maintain
+	clientOpts.SetMaxPoolSize(100) // Max connections in pool
+	clientOpts.SetMinPoolSize(10)  // Min connections to maintain
 	clientOpts.SetMaxConnIdleTime(30 * time.Minute)
 
 	client, err := mongo.Connect(clientOpts)
@@ -205,12 +205,12 @@ func (s *MongoTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 		return err
 	}
 
-	// Manually publish topic event to pubsub since we're not using SaveEvents
-	if s.pubsub != nil {
-		if err := s.pubsub.Publish(ctx, s.topic, utxo.Outpoint.String()); err != nil {
-			log.Printf("Failed to publish topic event: %v", err)
-		}
-	}
+	// // Manually publish topic event to pubsub since we're not using SaveEvents
+	// if s.pubsub != nil {
+	// 	if err := s.pubsub.Publish(ctx, s.topic, utxo.Outpoint.String()); err != nil {
+	// 		log.Printf("Failed to publish topic event: %v", err)
+	// 	}
+	// }
 
 	return nil
 }
@@ -1156,7 +1156,7 @@ func (s *MongoTopicDataStorage) CountOutputs(ctx context.Context) (int64, error)
 func (s *MongoTopicDataStorage) Close() error {
 	sharedMongoClient.mutex.Lock()
 	defer sharedMongoClient.mutex.Unlock()
-	
+
 	if sharedMongoClient.initialized {
 		sharedMongoClient.refCount--
 		if sharedMongoClient.refCount == 0 {
