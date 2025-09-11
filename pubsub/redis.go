@@ -234,16 +234,7 @@ func (r *RedisPubSub) Stop() error {
 
 // Close closes the Redis connection
 func (r *RedisPubSub) Close() error {
-	r.cancel()
-	
-	// Close all subscriber channels
-	r.subscribers.Range(func(key, value any) bool {
-		subscriptions := value.([]*redisSubscription)
-		for _, sub := range subscriptions {
-			close(sub.channel)
-		}
-		return true
-	})
+	r.cancel() // This will trigger context-based cleanup goroutines to close channels
 	
 	if r.pubsub != nil {
 		r.pubsub.Close()

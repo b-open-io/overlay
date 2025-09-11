@@ -202,7 +202,6 @@ func (s *SSEManager) broadcastToClients(event Event) {
 	}
 	
 	clientIDs := val.([]string)
-	log.Printf("SSEManager: Broadcasting event %s to %d clients for topic %s", event.Member, len(clientIDs), event.Topic)
 	
 	// Broadcast to all clients for this topic
 	sentCount := 0
@@ -238,7 +237,6 @@ func (s *SSEManager) broadcastToClients(event Event) {
 		s.DeregisterClient(clientID)
 	}
 	
-	log.Printf("SSEManager: Successfully sent event to %d/%d clients", sentCount, len(clientIDs))
 }
 
 // Stop stops the SSE manager

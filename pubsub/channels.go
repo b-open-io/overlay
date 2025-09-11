@@ -137,16 +137,6 @@ func (cp *ChannelPubSub) Stop() error {
 
 // Close closes the pub/sub system
 func (cp *ChannelPubSub) Close() error {
-	cp.cancel()
-
-	// Close all subscriber channels
-	cp.subscribers.Range(func(key, value any) bool {
-		subscriptions := value.([]*channelSubscription)
-		for _, sub := range subscriptions {
-			close(sub.channel)
-		}
-		return true
-	})
-
+	cp.cancel() // This will trigger context-based cleanup goroutines to close channels
 	return nil
 }
