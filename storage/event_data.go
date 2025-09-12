@@ -43,6 +43,7 @@ type TopicDataStorage interface {
 	InsertOutput(ctx context.Context, utxo *engine.Output) error
 	FindOutput(ctx context.Context, outpoint *transaction.Outpoint, spent *bool, includeBEEF bool) (*engine.Output, error)
 	FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, spent *bool, includeBEEF bool) ([]*engine.Output, error)
+	HasOutputs(ctx context.Context, outpoints []*transaction.Outpoint) (map[transaction.Outpoint]bool, error)
 	FindUTXOsForTopic(ctx context.Context, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error)
 	DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint) error
 	MarkUTXOAsSpent(ctx context.Context, outpoint *transaction.Outpoint, beef []byte) error
@@ -221,6 +222,14 @@ func (s *EventDataStorage) FindOutputs(ctx context.Context, outpoints []*transac
 		return nil, err
 	}
 	return storage.FindOutputs(ctx, outpoints, spent, includeBEEF)
+}
+
+func (s *EventDataStorage) HasOutputs(ctx context.Context, outpoints []*transaction.Outpoint, topic string) (map[transaction.Outpoint]bool, error) {
+	storage, err := s.getTopicStorage(topic)
+	if err != nil {
+		return nil, err
+	}
+	return storage.HasOutputs(ctx, outpoints)
 }
 
 // Cross-topic method - query only relevant topics based on QueueStorage index

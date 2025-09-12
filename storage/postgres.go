@@ -580,6 +580,57 @@ func (s *PostgresTopicDataStorage) Close() error {
 	return nil
 }
 
+func (s *PostgresTopicDataStorage) HasOutputs(ctx context.Context, outpoints []*transaction.Outpoint) (map[transaction.Outpoint]bool, error) {
+	if len(outpoints) == 0 {
+		return make(map[transaction.Outpoint]bool), nil
+	}
+
+	// Build query with placeholders
+	placeholders := make([]string, len(outpoints))
+	args := make([]interface{}, 0, len(outpoints)+1)
+	args = append(args, s.topic)
+
+	for i, op := range outpoints {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args = append(args, op.String())
+	}
+
+	query := fmt.Sprintf(`SELECT outpoint FROM outputs WHERE topic = $1 AND outpoint IN (%s)`, strings.Join(placeholders, ","))
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query outpoints: %w", err)
+	}
+	defer rows.Close()
+
+	result := make(map[transaction.Outpoint]bool)
+	// Initialize all as false
+	for _, op := range outpoints {
+		result[*op] = false
+	}
+
+	// Mark existing ones as true
+	for rows.Next() {
+		var outpointStr string
+		if err := rows.Scan(&outpointStr); err != nil {
+			return nil, fmt.Errorf("failed to scan outpoint: %w", err)
+		}
+
+		outpoint, err := transaction.OutpointFromString(outpointStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse outpoint: %w", err)
+		}
+
+		result[*outpoint] = true
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("row iteration error: %w", err)
+	}
+
+	return result, nil
+}
+
 // FindOutputsForTransaction finds all outputs for a given transaction
 func (s *PostgresTopicDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
 	query := `SELECT outpoint, txid, script, satoshis, spend, block_height, block_idx, score, ancillary_beef 
