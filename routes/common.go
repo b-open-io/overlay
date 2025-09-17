@@ -8,14 +8,14 @@ import (
 	"github.com/b-open-io/overlay/storage"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
-	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker/headers_client"
+	"github.com/b-open-io/overlay/headers"
 	"github.com/gofiber/fiber/v2"
 )
 
 // CommonRoutesConfig holds the configuration for common 1sat routes
 type CommonRoutesConfig struct {
 	Storage      *storage.EventDataStorage
-	ChainTracker *headers_client.Client
+	ChainTracker *headers.Client
 	Engine       *engine.Engine
 }
 

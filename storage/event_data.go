@@ -43,7 +43,6 @@ type TopicDataStorage interface {
 	InsertOutput(ctx context.Context, utxo *engine.Output) error
 	FindOutput(ctx context.Context, outpoint *transaction.Outpoint, spent *bool, includeBEEF bool) (*engine.Output, error)
 	FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, spent *bool, includeBEEF bool) ([]*engine.Output, error)
-	HasOutputs(ctx context.Context, outpoints []*transaction.Outpoint) (map[transaction.Outpoint]bool, error)
 	FindUTXOsForTopic(ctx context.Context, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error)
 	DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint) error
 	MarkUTXOAsSpent(ctx context.Context, outpoint *transaction.Outpoint, beef []byte) error
@@ -52,7 +51,7 @@ type TopicDataStorage interface {
 	UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error
 	UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error
 
-	// Applied transaction tracking (topic-scoped)  
+	// Applied transaction tracking (topic-scoped)
 	InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error
 	DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error)
 
@@ -158,7 +157,6 @@ func (s *EventDataStorage) getTopicStorage(topic string) (TopicDataStorage, erro
 	return actual.(TopicDataStorage), nil
 }
 
-
 // Shared service accessors
 func (s *EventDataStorage) GetBeefStorage() beef.BeefStorage {
 	return s.beefStore
@@ -222,14 +220,6 @@ func (s *EventDataStorage) FindOutputs(ctx context.Context, outpoints []*transac
 		return nil, err
 	}
 	return storage.FindOutputs(ctx, outpoints, spent, includeBEEF)
-}
-
-func (s *EventDataStorage) HasOutputs(ctx context.Context, outpoints []*transaction.Outpoint, topic string) (map[transaction.Outpoint]bool, error) {
-	storage, err := s.getTopicStorage(topic)
-	if err != nil {
-		return nil, err
-	}
-	return storage.HasOutputs(ctx, outpoints)
 }
 
 // Cross-topic method - query only relevant topics based on QueueStorage index
@@ -321,7 +311,7 @@ func (s *EventDataStorage) InsertAppliedTransaction(ctx context.Context, tx *ove
 	if err := storage.InsertAppliedTransaction(ctx, tx); err != nil {
 		return err
 	}
-	
+
 	// Track transaction-topic association in QueueStorage for FindOutputsForTransaction
 	txKey := fmt.Sprintf("tx:%s", tx.Txid.String())
 	return s.queueStorage.SAdd(ctx, txKey, tx.Topic)
@@ -350,7 +340,7 @@ func (s *EventDataStorage) GetLastInteraction(ctx context.Context, host string, 
 	if scoreStr == "" {
 		return 0, nil
 	}
-	
+
 	score, err := strconv.ParseFloat(scoreStr, 64)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse interaction score: %w", err)
@@ -450,7 +440,7 @@ func (s *EventDataStorage) CountOutputs(ctx context.Context, topic string) (int6
 // Close closes all topic storages and shared services, cleaning up all resources
 func (s *EventDataStorage) Close() error {
 	var errs []error
-	
+
 	// Close all topic storages
 	s.topicStorages.Range(func(key, value interface{}) bool {
 		storage := value.(TopicDataStorage)
@@ -459,32 +449,31 @@ func (s *EventDataStorage) Close() error {
 		}
 		return true
 	})
-	
+
 	// Close shared services
 	if s.beefStore != nil {
 		if err := s.beefStore.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to close beef storage: %w", err))
 		}
 	}
-	
+
 	if s.pubsub != nil {
 		if err := s.pubsub.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to close pubsub: %w", err))
 		}
 	}
-	
+
 	if s.queueStorage != nil {
 		if err := s.queueStorage.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("failed to close queue storage: %w", err))
 		}
 	}
-	
+
 	// Clear all storages
 	s.topicStorages = sync.Map{}
-	
+
 	if len(errs) > 0 {
 		return fmt.Errorf("errors closing resources: %v", errs)
 	}
 	return nil
 }
-

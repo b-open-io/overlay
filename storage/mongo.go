@@ -281,54 +281,6 @@ func (s *MongoTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*tr
 	}
 }
 
-func (s *MongoTopicDataStorage) HasOutputs(ctx context.Context, outpoints []*transaction.Outpoint) (map[transaction.Outpoint]bool, error) {
-	if len(outpoints) == 0 {
-		return make(map[transaction.Outpoint]bool), nil
-	}
-
-	ops := make([]string, len(outpoints))
-	for i, outpoint := range outpoints {
-		ops[i] = outpoint.String()
-	}
-
-	query := bson.M{"outpoint": bson.M{"$in": ops}}
-	projection := bson.M{"outpoint": 1, "_id": 0}
-
-	cursor, err := s.DB.Collection("outputs").Find(ctx, query, options.Find().SetProjection(projection))
-	if err != nil {
-		return nil, fmt.Errorf("failed to query outpoints: %w", err)
-	}
-	defer cursor.Close(ctx)
-
-	result := make(map[transaction.Outpoint]bool)
-	// Initialize all as false
-	for _, op := range outpoints {
-		result[*op] = false
-	}
-
-	// Mark existing ones as true
-	for cursor.Next(ctx) {
-		var doc struct {
-			Outpoint string `bson:"outpoint"`
-		}
-		if err := cursor.Decode(&doc); err != nil {
-			return nil, fmt.Errorf("failed to decode outpoint: %w", err)
-		}
-
-		outpoint, err := transaction.OutpointFromString(doc.Outpoint)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse outpoint: %w", err)
-		}
-
-		result[*outpoint] = true
-	}
-
-	if err := cursor.Err(); err != nil {
-		return nil, fmt.Errorf("cursor iteration error: %w", err)
-	}
-
-	return result, nil
-}
 
 func (s *MongoTopicDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
 	query := bson.M{"txid": txid.String()}
@@ -448,6 +400,7 @@ func (s *MongoTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, out
 			"blockHeight":   blockHeight,
 			"blockIdx":      blockIndex,
 			"ancillaryBeef": ancelliaryBeef,
+			"score":         float64(time.Now().UnixNano()),
 		}},
 	)
 	return err

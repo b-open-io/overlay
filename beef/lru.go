@@ -210,3 +210,16 @@ func (lru *LRUBeefStorage) Close() error {
 	}
 	return nil
 }
+
+// UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
+func (lru *LRUBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	if lru.fallback != nil {
+		beefBytes, err := lru.fallback.UpdateMerklePath(ctx, txid)
+		if err == nil && len(beefBytes) > 0 {
+			// Update our own storage with the new beef
+			lru.SaveBeef(ctx, txid, beefBytes)
+		}
+		return beefBytes, err
+	}
+	return nil, ErrNotFound
+}

@@ -139,26 +139,6 @@ func (s *RedisEventDataStorage) FindOutputs(ctx context.Context, outpoints []*tr
 	return outputs, nil
 }
 
-func (s *RedisEventDataStorage) HasOutputs(ctx context.Context, outpoints []*transaction.Outpoint, topic string) (map[transaction.Outpoint]bool, error) {
-	result := make(map[transaction.Outpoint]bool)
-	
-	// Initialize all as false
-	for _, op := range outpoints {
-		result[*op] = false
-	}
-
-	// Check each outpoint individually
-	for _, outpoint := range outpoints {
-		key := fmt.Sprintf("ot:%s:%s", outpoint.String(), topic)
-		exists, err := s.DB.Exists(ctx, key).Result()
-		if err != nil {
-			return nil, fmt.Errorf("failed to check outpoint existence: %w", err)
-		}
-		result[*outpoint] = exists > 0
-	}
-
-	return result, nil
-}
 
 func (s *RedisEventDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
 	iter := s.DB.Scan(ctx, 0, "ot:"+txid.String()+"*", 0).Iterator()
@@ -334,6 +314,12 @@ func (s *RedisEventDataStorage) UpdateOutputBlockHeight(ctx context.Context, out
 			return err
 		}
 
+		if err := p.ZAdd(ctx, OutMembershipKey(topic), redis.Z{
+			Score:  float64(time.Now().UnixNano()),
+			Member: outpoint.String(),
+		}).Err(); err != nil {
+			return err
+		}
 		return nil
 	})
 	return err

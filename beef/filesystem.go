@@ -87,6 +87,14 @@ func (t *FilesystemBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Ha
 	return nil
 }
 
+// UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
+func (f *FilesystemBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	if f.fallback != nil {
+		return f.fallback.UpdateMerklePath(ctx, txid)
+	}
+	return nil, ErrNotFound
+}
+
 // Close closes the fallback storage
 func (f *FilesystemBeefStorage) Close() error {
 	if f.fallback != nil {

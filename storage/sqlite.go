@@ -395,55 +395,6 @@ func (s *SQLiteTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*t
 	return outputs, nil
 }
 
-func (s *SQLiteTopicDataStorage) HasOutputs(ctx context.Context, outpoints []*transaction.Outpoint) (map[transaction.Outpoint]bool, error) {
-	if len(outpoints) == 0 {
-		return make(map[transaction.Outpoint]bool), nil
-	}
-
-	// Build query with placeholders
-	placeholders := make([]string, len(outpoints))
-	args := make([]interface{}, len(outpoints))
-
-	for i, op := range outpoints {
-		placeholders[i] = "?"
-		args[i] = op.String()
-	}
-
-	query := fmt.Sprintf(`SELECT outpoint FROM outputs WHERE outpoint IN (%s)`, strings.Join(placeholders, ","))
-
-	rows, err := s.rdb.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to query outpoints: %w", err)
-	}
-	defer rows.Close()
-
-	result := make(map[transaction.Outpoint]bool)
-	// Initialize all as false
-	for _, op := range outpoints {
-		result[*op] = false
-	}
-
-	// Mark existing ones as true
-	for rows.Next() {
-		var outpointStr string
-		if err := rows.Scan(&outpointStr); err != nil {
-			return nil, fmt.Errorf("failed to scan outpoint: %w", err)
-		}
-
-		outpoint, err := transaction.OutpointFromString(outpointStr)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse outpoint: %w", err)
-		}
-
-		result[*outpoint] = true
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("row iteration error: %w", err)
-	}
-
-	return result, nil
-}
 
 func (s *SQLiteTopicDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
 	query := `SELECT outpoint, txid, script, satoshis, spend, 
@@ -565,7 +516,6 @@ func (s *SQLiteTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, txid
 }
 
 func (s *SQLiteTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
-	outpointStr := outpoint.String()
 
 	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
@@ -576,23 +526,17 @@ func (s *SQLiteTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, ou
 	// Update outputs table
 	_, err = tx.ExecContext(ctx, `
 		UPDATE outputs 
-		SET block_height = ?, block_idx = ?, ancillary_beef = ?
+		SET block_height = ?, block_idx = ?, ancillary_beef = ?, score = ?
 		WHERE outpoint = ?`,
-		blockHeight, blockIndex, ancillaryBeef,
-		outpointStr)
+		blockHeight,
+		blockIndex,
+		ancillaryBeef,
+		float64(time.Now().UnixNano()),
+		outpoint.String(),
+	)
 	if err != nil {
 		return err
 	}
-
-	// // Update score in events table for all events associated with this outpoint
-	// _, err = tx.ExecContext(ctx, `
-	// 	UPDATE events
-	// 	SET score = ?
-	// 	WHERE outpoint = ?`,
-	// 	score, outpointStr)
-	// if err != nil {
-	// 	return err
-	// }
 
 	return tx.Commit()
 }

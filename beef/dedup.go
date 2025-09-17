@@ -43,6 +43,11 @@ func (d *DedupBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, b
 	return d.saver.Save(*txid, beefBytes)
 }
 
+// UpdateMerklePath updates the merkle path for a transaction by delegating to the underlying chain
+func (d *DedupBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	return d.chain.UpdateMerklePath(ctx, txid)
+}
+
 // Close closes the underlying chain and cleans up deduplication
 func (d *DedupBeefStorage) Close() error {
 	d.loader.Clear()

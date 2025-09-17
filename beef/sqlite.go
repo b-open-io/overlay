@@ -85,3 +85,16 @@ func (t *SQLiteBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, 
 
 	return err
 }
+
+// UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
+func (t *SQLiteBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	if t.fallback != nil {
+		beefBytes, err := t.fallback.UpdateMerklePath(ctx, txid)
+		if err == nil && len(beefBytes) > 0 {
+			// Update our own storage with the new beef
+			t.SaveBeef(ctx, txid, beefBytes)
+		}
+		return beefBytes, err
+	}
+	return nil, ErrNotFound
+}

@@ -149,3 +149,16 @@ func (r *RedisBeefStorage) Close() error {
 	}
 	return nil
 }
+
+// UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
+func (r *RedisBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	if r.fallback != nil {
+		beefBytes, err := r.fallback.UpdateMerklePath(ctx, txid)
+		if err == nil && len(beefBytes) > 0 {
+			// Update our own storage with the new beef
+			r.SaveBeef(ctx, txid, beefBytes)
+		}
+		return beefBytes, err
+	}
+	return nil, ErrNotFound
+}
