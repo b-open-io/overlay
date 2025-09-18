@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -151,9 +152,9 @@ func (r *RedisBeefStorage) Close() error {
 }
 
 // UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
-func (r *RedisBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+func (r *RedisBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
 	if r.fallback != nil {
-		beefBytes, err := r.fallback.UpdateMerklePath(ctx, txid)
+		beefBytes, err := r.fallback.UpdateMerklePath(ctx, txid, ct)
 		if err == nil && len(beefBytes) > 0 {
 			// Update our own storage with the new beef
 			r.SaveBeef(ctx, txid, beefBytes)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -87,9 +88,9 @@ func (t *SQLiteBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, 
 }
 
 // UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
-func (t *SQLiteBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+func (t *SQLiteBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
 	if t.fallback != nil {
-		beefBytes, err := t.fallback.UpdateMerklePath(ctx, txid)
+		beefBytes, err := t.fallback.UpdateMerklePath(ctx, txid, ct)
 		if err == nil && len(beefBytes) > 0 {
 			// Update our own storage with the new beef
 			t.SaveBeef(ctx, txid, beefBytes)

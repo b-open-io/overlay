@@ -6,15 +6,17 @@ import (
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/transaction"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 )
 
 var BeefKey = "beef"
 var ErrNotFound = errors.New("not-found")
+var ErrInvalidMerkleProof = errors.New("invalid merkle proof")
 
 type BeefStorage interface {
 	LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error)
 	SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error
-	UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error)
+	UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error)
 	Close() error
 }
 

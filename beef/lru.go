@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 )
 
 type LRUBeefStorage struct {
@@ -212,9 +213,9 @@ func (lru *LRUBeefStorage) Close() error {
 }
 
 // UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
-func (lru *LRUBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+func (lru *LRUBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
 	if lru.fallback != nil {
-		beefBytes, err := lru.fallback.UpdateMerklePath(ctx, txid)
+		beefBytes, err := lru.fallback.UpdateMerklePath(ctx, txid, ct)
 		if err == nil && len(beefBytes) > 0 {
 			// Update our own storage with the new beef
 			lru.SaveBeef(ctx, txid, beefBytes)

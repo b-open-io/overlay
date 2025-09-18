@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 )
 
 // expandHomePath expands ~ to home directory if the path starts with ~/
@@ -204,4 +206,22 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 
 	// Wrap the entire chain with deduplication
 	return NewDedupBeefStorage(storage), nil
+}
+
+// CreateValidatingBeefStorage creates a BeefStorage with merkle proof validation.
+// It wraps the storage created by CreateBeefStorage with a ValidatingBeefStorage layer
+// that validates merkle proofs on load and updates invalid ones.
+func CreateValidatingBeefStorage(connectionString string, chainTracker chaintracker.ChainTracker) (BeefStorage, error) {
+	// Create the base storage chain
+	storage, err := CreateBeefStorage(connectionString)
+	if err != nil {
+		return nil, err
+	}
+
+	// Wrap with validation if chainTracker is provided
+	if chainTracker != nil {
+		storage = NewValidatingBeefStorage(storage, chainTracker)
+	}
+
+	return storage, nil
 }

@@ -102,6 +102,7 @@ storage, err := config.CreateEventStorage(
                       // "redis://localhost:6379" (shared config & cross-topic indexes)
                       // "" -> ~/.1sat/queue.db (SQLite default)
     pubsubURL,        // "redis://localhost:6379", "channels://" (shared pub/sub)
+    nil,              // ChainTracker for merkle proof validation (nil to disable)
 )
 ```
 

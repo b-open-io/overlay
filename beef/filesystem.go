@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 )
 
 type FilesystemBeefStorage struct {
@@ -88,9 +89,9 @@ func (t *FilesystemBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Ha
 }
 
 // UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
-func (f *FilesystemBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+func (f *FilesystemBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
 	if f.fallback != nil {
-		return f.fallback.UpdateMerklePath(ctx, txid)
+		return f.fallback.UpdateMerklePath(ctx, txid, ct)
 	}
 	return nil, ErrNotFound
 }

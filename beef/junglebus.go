@@ -9,6 +9,7 @@ import (
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/transaction"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 	"github.com/joho/godotenv"
 )
 
@@ -94,81 +95,40 @@ func (t *JunglebusBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Has
 	return nil
 }
 
-// FetchMerklePath retrieves the merkle proof for a transaction from JungleBus
-func (j *JunglebusBeefStorage) FetchMerklePath(ctx context.Context, txid *chainhash.Hash) (*transaction.MerklePath, error) {
-	if j.junglebusURL == "" {
-		return nil, ErrNotFound
-	}
-
-	// Acquire limiter before making HTTP request
-	select {
-	case j.limiter <- struct{}{}:
-		defer func() { <-j.limiter }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-
-	txidStr := txid.String()
-	url := fmt.Sprintf("%s/v1/transaction/proof/%s/bin", j.junglebusURL, txidStr)
-	resp, err := http.Get(url)
+// UpdateMerklePath updates the merkle path for a transaction by fetching fresh BEEF from JungleBus
+func (j *JunglebusBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
+	// LoadBeef from JungleBus will return the latest BEEF with updated merkle path
+	beefBytes, err := j.fetchBeef(txid)
 	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 404 {
-		return nil, ErrNotFound
-	} else if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("http-err-%d-%s", resp.StatusCode, txidStr)
-	}
-
-	proofBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	// Create MerklePath from binary data
-	merklePath, err := transaction.NewMerklePathFromBinary(proofBytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse merkle path: %w", err)
-	}
-
-	return merklePath, nil
-}
-
-// UpdateMerklePath updates the merkle path for a transaction by fetching from JungleBus
-func (j *JunglebusBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
-	merklePath, err := j.FetchMerklePath(ctx, txid)
-	if err != nil {
-		// If JungleBus fails, try fallback
-		if j.fallback != nil {
-			return j.fallback.UpdateMerklePath(ctx, txid)
+		// Only fall back if not found, not for other errors
+		if err == ErrNotFound && j.fallback != nil {
+			return j.fallback.UpdateMerklePath(ctx, txid, ct)
 		}
 		return nil, err
 	}
 
-	// If we got a merkle path, we need to load the current BEEF and update it
-	beefBytes, err := j.LoadBeef(ctx, txid)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the BEEF to get the transaction
+	// Parse the BEEF to get the merkle path for validation
 	_, tx, _, err := transaction.ParseBeef(beefBytes)
 	if err != nil {
 		return nil, err
 	}
 
-	// Update the transaction's merkle path
-	tx.MerklePath = merklePath
-
-	// Get the updated BEEF from the transaction
-	updatedBeefBytes, err := tx.BEEF()
-	if err != nil {
-		return nil, err
+	if tx.MerklePath != nil {
+		valid, err := tx.MerklePath.Verify(ctx, txid, ct)
+		if err != nil {
+			// If validation fails due to chain tracker issues, fall back
+			if j.fallback != nil {
+				return j.fallback.UpdateMerklePath(ctx, txid, ct)
+			}
+			return nil, err
+		}
+		if !valid {
+			// Merkle proof is invalid, return error
+			return nil, ErrInvalidMerkleProof
+		}
 	}
 
-	return updatedBeefBytes, nil
+	return beefBytes, nil
 }
 
 // Close closes the fallback storage (no persistent connections to close)

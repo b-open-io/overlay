@@ -5,6 +5,7 @@ import (
 
 	"github.com/b-open-io/overlay/dedup"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 )
 
 // DedupBeefStorage wraps a BeefStorage chain with deduplication
@@ -44,8 +45,8 @@ func (d *DedupBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, b
 }
 
 // UpdateMerklePath updates the merkle path for a transaction by delegating to the underlying chain
-func (d *DedupBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
-	return d.chain.UpdateMerklePath(ctx, txid)
+func (d *DedupBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
+	return d.chain.UpdateMerklePath(ctx, txid, ct)
 }
 
 // Close closes the underlying chain and cleans up deduplication
