@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/b-open-io/overlay/beef"
+	"github.com/b-open-io/overlay/headers"
 	"github.com/b-open-io/overlay/pubsub"
 	"github.com/b-open-io/overlay/queue"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
@@ -39,7 +40,7 @@ type MongoTopicDataStorage struct {
 }
 
 // NewMongoTopicDataStorage creates a new MongoDB topic storage using shared client
-func NewMongoTopicDataStorage(topic string, connString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) (TopicDataStorage, error) {
+func NewMongoTopicDataStorage(topic string, connString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, headersClient *headers.Client) (TopicDataStorage, error) {
 	// Get or create shared MongoDB client
 	client, err := getSharedMongoClient(connString)
 	if err != nil {
@@ -139,7 +140,7 @@ func NewMongoTopicDataStorage(topic string, connString string, beefStore beef.Be
 	}
 
 	return &MongoTopicDataStorage{
-		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub),
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub, headersClient),
 		DB:                   db,
 		topic:                topic,
 	}, nil
@@ -186,15 +187,33 @@ func (s *MongoTopicDataStorage) GetTopic() string {
 }
 
 func (s *MongoTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
+	utxo.Score = float64(time.Now().UnixNano())
+
+	// Save BEEF to storage first
 	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
-	utxo.Score = float64(time.Now().UnixNano())
+
+	// Extract merkle information from BEEF and set on output
+	blockHeight, blockIndex, merkleRoot, validationState, err := s.ExtractMerkleInfoFromBEEF(ctx, &utxo.Outpoint.Txid, utxo.Beef)
+	if err != nil {
+		return fmt.Errorf("failed to extract merkle info: %w", err)
+	}
+
+	// Always use the block height and index from BEEF extraction (0 if no merkle path)
+	utxo.BlockHeight = blockHeight
+	utxo.BlockIdx = blockIndex
+
+	// Set merkle info on output before converting to BSON
+	utxo.MerkleRoot = merkleRoot
+	utxo.MerkleState = validationState
+
+	// Create BSON output with merkle info already set
 	bo := NewBSONOutput(utxo)
 
-	// Insert or update the output in the "outputs" collection
+	// Insert or update the output in the "outputs" collection with all data in single operation
 	update := bson.M{
-		"$set": bo, // Set all fields including events (which already contains the topic)
+		"$set": bo, // Set all fields including merkle info
 	}
 
 	if _, err = s.DB.Collection("outputs").UpdateOne(ctx,
@@ -390,17 +409,47 @@ func (s *MongoTopicDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *
 }
 
 func (s *MongoTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
-	return s.beefStore.SaveBeef(ctx, txid, beef)
+	// Save BEEF to storage
+	if err := s.beefStore.SaveBeef(ctx, txid, beef); err != nil {
+		return err
+	}
+
+	// Extract merkle information from BEEF
+	blockHeight, blockIndex, merkleRoot, validationState, err := s.ExtractMerkleInfoFromBEEF(ctx, txid, beef)
+	if err != nil {
+		return fmt.Errorf("failed to extract merkle info: %w", err)
+	}
+
+	if merkleRoot == nil {
+		// No merkle path in this BEEF, nothing more to do
+		return nil
+	}
+
+	// Update all outputs for this transaction with the merkle root, validation state, block height AND index
+	_, err = s.DB.Collection("outputs").UpdateMany(ctx,
+		bson.M{"txid": txid.String()},
+		bson.M{"$set": bson.M{
+			"merkleRoot":            merkleRoot.String(),
+			"merkleValidationState": validationState,
+			"blockHeight":           blockHeight,
+			"blockIdx":              blockIndex,
+		}})
+
+	if err != nil {
+		return fmt.Errorf("failed to update outputs with merkle info: %w", err)
+	}
+
+	return nil
 }
 
 func (s *MongoTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
+	// Update outputs - removed score update
 	_, err := s.DB.Collection("outputs").UpdateOne(ctx,
 		bson.M{"outpoint": outpoint.String()},
 		bson.M{"$set": bson.M{
 			"blockHeight":   blockHeight,
 			"blockIdx":      blockIndex,
 			"ancillaryBeef": ancelliaryBeef,
-			"score":         float64(time.Now().UnixNano()),
 		}},
 	)
 	return err
@@ -1152,6 +1201,169 @@ func (s *MongoTopicDataStorage) LookupEventScores(ctx context.Context, event str
 // CountOutputs returns the total count of outputs in this topic
 func (s *MongoTopicDataStorage) CountOutputs(ctx context.Context) (int64, error) {
 	return s.DB.Collection("outputs").CountDocuments(ctx, bson.M{})
+}
+
+// FindOutputsByMerkleState finds outputs by their merkle validation state
+func (s *MongoTopicDataStorage) FindOutpointsByMerkleState(ctx context.Context, state engine.MerkleState, limit uint32) ([]*transaction.Outpoint, error) {
+	filter := bson.M{"merkleValidationState": state}
+
+	opts := options.Find().SetSort(bson.D{{Key: "score", Value: -1}})
+	if limit > 0 {
+		opts.SetLimit(int64(limit))
+	}
+	// Only project the outpoint field for efficiency
+	opts.SetProjection(bson.D{{Key: "outpoint", Value: 1}})
+
+	cursor, err := s.DB.Collection("outputs").Find(ctx, filter, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var outpoints []*transaction.Outpoint
+	for cursor.Next(ctx) {
+		var result struct {
+			Outpoint string `bson:"outpoint"`
+		}
+		if err := cursor.Decode(&result); err != nil {
+			return nil, err
+		}
+		outpoint, err := transaction.OutpointFromString(result.Outpoint)
+		if err != nil {
+			return nil, err
+		}
+		outpoints = append(outpoints, outpoint)
+	}
+
+	return outpoints, cursor.Err()
+}
+
+// ReconcileValidatedMerkleRoots finds all Validated outputs and reconciles those that need updating
+// This includes promoting to Immutable at sufficient depth or Invalidating if merkle root changed
+// Assumes merkle roots cache is already current via SyncMerkleRoots
+func (s *MongoTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Context) error {
+	if s.headersClient == nil {
+		return fmt.Errorf("headers client not configured")
+	}
+
+	// Get current chain tip for immutability calculations
+	chaintip, err := s.headersClient.GetChaintip(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get chaintip: %w", err)
+	}
+
+	// Find all unique block heights with Validated outputs
+	pipeline := bson.A{
+		bson.M{"$match": bson.M{"merkleValidationState": engine.MerkleStateValidated}},
+		bson.M{"$group": bson.M{
+			"_id":        "$blockHeight",
+			"merkleRoot": bson.M{"$first": "$merkleRoot"},
+		}},
+		bson.M{"$sort": bson.M{"_id": 1}},
+	}
+
+	cursor, err := s.DB.Collection("outputs").Aggregate(ctx, pipeline)
+	if err != nil {
+		return err
+	}
+	defer cursor.Close(ctx)
+
+	for cursor.Next(ctx) {
+		var result struct {
+			Height     uint32  `bson:"_id"`
+			MerkleRoot *string `bson:"merkleRoot"`
+		}
+
+		if err := cursor.Decode(&result); err != nil {
+			return err
+		}
+
+		// Get the correct merkle root from our cache
+		correctRoot, err := s.headersClient.GetMerkleRootForHeight(ctx, result.Height)
+		if err != nil {
+			// If we can't get the merkle root, skip this height
+			continue
+		}
+
+		// Check if we need to reconcile:
+		// 1. Height has reached immutable depth, OR
+		// 2. Merkle root has changed (indicating reorg)
+		needsReconcile := chaintip.Height-result.Height >= IMMUTABILITY_DEPTH
+
+		// Check if merkle root has changed
+		if !needsReconcile && result.MerkleRoot != nil && *result.MerkleRoot != "" {
+			storedRoot, err := chainhash.NewHashFromHex(*result.MerkleRoot)
+			if err != nil {
+				needsReconcile = true // If we can't parse it, reconcile it
+			} else if !storedRoot.IsEqual(correctRoot) {
+				needsReconcile = true
+			}
+		}
+
+		// Reconcile if needed
+		if needsReconcile {
+			if err := s.ReconcileMerkleRoot(ctx, result.Height, correctRoot); err != nil {
+				return fmt.Errorf("failed to reconcile height %d: %w", result.Height, err)
+			}
+		}
+	}
+
+	return cursor.Err()
+}
+
+// ReconcileMerkleRoot reconciles validation state for all outputs at a given block height
+func (s *MongoTopicDataStorage) ReconcileMerkleRoot(ctx context.Context, blockHeight uint32, merkleRoot *chainhash.Hash) error {
+	merkleRootStr := ""
+	if merkleRoot != nil {
+		merkleRootStr = merkleRoot.String()
+	}
+
+	// Determine if this height should be immutable
+	isImmutable := false
+	if s.headersClient != nil {
+		chaintip, err := s.headersClient.GetChaintip(ctx)
+		if err == nil && chaintip != nil {
+			depth := chaintip.Height - blockHeight
+			isImmutable = depth >= IMMUTABILITY_DEPTH
+		}
+	}
+
+	// Determine the validation state for matching roots
+	validState := engine.MerkleStateValidated
+	if isImmutable {
+		validState = engine.MerkleStateImmutable
+	}
+
+	// Build update operations based on merkle root comparison
+	// MongoDB doesn't have CASE statements, so we need multiple updates
+
+	// First, update outputs with matching merkle roots
+	_, err := s.DB.Collection("outputs").UpdateMany(ctx,
+		bson.M{
+			"blockHeight":           blockHeight,
+			"merkleRoot":            merkleRootStr,
+			"merkleValidationState": bson.M{"$lt": engine.MerkleStateImmutable},
+		},
+		bson.M{"$set": bson.M{"merkleValidationState": validState}},
+	)
+	if err != nil {
+		return err
+	}
+
+	// Second, invalidate outputs with non-matching merkle roots
+	_, err = s.DB.Collection("outputs").UpdateMany(ctx,
+		bson.M{
+			"blockHeight": blockHeight,
+			"merkleRoot": bson.M{
+				"$exists": true,
+				"$ne":     merkleRootStr,
+			},
+			"merkleValidationState": bson.M{"$lt": engine.MerkleStateImmutable},
+		},
+		bson.M{"$set": bson.M{"merkleValidationState": engine.MerkleStateInvalidated}},
+	)
+
+	return err
 }
 
 // Close closes the storage and decrements shared client reference count

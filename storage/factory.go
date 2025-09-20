@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/b-open-io/overlay/beef"
+	"github.com/b-open-io/overlay/headers"
 	"github.com/b-open-io/overlay/pubsub"
 	"github.com/b-open-io/overlay/queue"
 )
@@ -21,8 +22,8 @@ import (
 //   - ./overlay.db (inferred as SQLite)
 //
 // If no connection string is provided, defaults to ./overlay.db
-// The beefStore, queueStorage, and pubSub parameters are required dependencies.
-func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubSub pubsub.PubSub) (*EventDataStorage, error) {
+// The beefStore, queueStorage, pubSub, and headersClient parameters are required dependencies.
+func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubSub pubsub.PubSub, headersClient *headers.Client) (*EventDataStorage, error) {
 	// Create factory function based on storage type
 	var factory TopicDataStorageFactory
 
@@ -34,19 +35,19 @@ func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage,
 	case strings.HasPrefix(connectionString, "postgresql://"), strings.HasPrefix(connectionString, "postgres://"):
 		// Create PostgreSQL factory function
 		factory = func(topic string) (TopicDataStorage, error) {
-			return NewPostgresTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub)
+			return NewPostgresTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub, headersClient)
 		}
 
 	case strings.HasPrefix(connectionString, "mongodb://"), strings.HasPrefix(connectionString, "mongo://"):
 		// Create MongoDB factory function
 		factory = func(topic string) (TopicDataStorage, error) {
-			return NewMongoTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub)
+			return NewMongoTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub, headersClient)
 		}
 
 	case connectionString == "", strings.HasPrefix(connectionString, "sqlite://"), strings.HasSuffix(connectionString, ".db"), strings.HasSuffix(connectionString, ".sqlite"), filepath.IsAbs(connectionString) || strings.HasPrefix(connectionString, "./") || strings.HasPrefix(connectionString, "../"):
 		// SQLite (default or explicit path)
 		factory = func(topic string) (TopicDataStorage, error) {
-			return NewSQLiteTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub)
+			return NewSQLiteTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub, headersClient)
 		}
 
 	default:

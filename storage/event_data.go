@@ -72,6 +72,11 @@ type TopicDataStorage interface {
 	FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error)
 	CountOutputs(ctx context.Context) (int64, error)
 
+	// Reconciliation and validation
+	ReconcileValidatedMerkleRoots(ctx context.Context) error
+	ReconcileMerkleRoot(ctx context.Context, blockHeight uint32, merkleRoot *chainhash.Hash) error
+	FindOutpointsByMerkleState(ctx context.Context, state engine.MerkleState, limit uint32) ([]*transaction.Outpoint, error)
+
 	// Topic information
 	GetTopic() string
 
@@ -155,6 +160,39 @@ func (s *EventDataStorage) getTopicStorage(topic string) (TopicDataStorage, erro
 	// Store it atomically (LoadOrStore handles race conditions)
 	actual, _ := s.topicStorages.LoadOrStore(topic, storage)
 	return actual.(TopicDataStorage), nil
+}
+
+// ReconcileMerkleRoot reconciles outputs at a specific block height for a specific topic
+func (s *EventDataStorage) ReconcileMerkleRoot(ctx context.Context, topic string, blockHeight uint32, merkleRoot *chainhash.Hash) error {
+	storage, err := s.getTopicStorage(topic)
+	if err != nil {
+		return err
+	}
+	return storage.ReconcileMerkleRoot(ctx, blockHeight, merkleRoot)
+}
+
+// ReconcileValidatedMerkleRoots reconciles all validated outputs across all topics
+func (s *EventDataStorage) ReconcileValidatedMerkleRoots(ctx context.Context) error {
+	topics := s.GetActiveTopics()
+	for _, topic := range topics {
+		storage, err := s.getTopicStorage(topic)
+		if err != nil {
+			return fmt.Errorf("failed to get storage for topic %s: %w", topic, err)
+		}
+		if err := storage.ReconcileValidatedMerkleRoots(ctx); err != nil {
+			return fmt.Errorf("failed to reconcile validated outputs for topic %s: %w", topic, err)
+		}
+	}
+	return nil
+}
+
+// FindOutpointsByMerkleState finds outpoints by their merkle validation state for a topic
+func (s *EventDataStorage) FindOutpointsByMerkleState(ctx context.Context, topic string, state engine.MerkleState, limit uint32) ([]*transaction.Outpoint, error) {
+	storage, err := s.getTopicStorage(topic)
+	if err != nil {
+		return nil, err
+	}
+	return storage.FindOutpointsByMerkleState(ctx, state, limit)
 }
 
 // Shared service accessors

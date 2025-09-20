@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/b-open-io/overlay/beef"
+	"github.com/b-open-io/overlay/headers"
 	"github.com/b-open-io/overlay/pubsub"
 	"github.com/b-open-io/overlay/queue"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
@@ -40,7 +41,7 @@ type PostgresTopicDataStorage struct {
 }
 
 // NewPostgresTopicDataStorage creates a new PostgreSQL topic storage using shared connection pool
-func NewPostgresTopicDataStorage(topic string, connectionString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) (TopicDataStorage, error) {
+func NewPostgresTopicDataStorage(topic string, connectionString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, headersClient *headers.Client) (TopicDataStorage, error) {
 	// Get or create shared connection pool
 	pool, err := getSharedPool(connectionString)
 	if err != nil {
@@ -48,7 +49,7 @@ func NewPostgresTopicDataStorage(topic string, connectionString string, beefStor
 	}
 
 	storage := &PostgresTopicDataStorage{
-		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub),
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub, headersClient),
 		pool:                 pool,
 		topic:                topic,
 	}
@@ -168,6 +169,19 @@ func (s *PostgresTopicDataStorage) createTables(ctx context.Context) error {
 		}
 	}
 
+	// Add new columns if they don't exist (for existing databases)
+	// PostgreSQL supports IF NOT EXISTS for ALTER TABLE ADD COLUMN
+	migrations := []string{
+		`ALTER TABLE outputs ADD COLUMN IF NOT EXISTS merkle_root TEXT`,
+		`ALTER TABLE outputs ADD COLUMN IF NOT EXISTS merkle_validation_state SMALLINT DEFAULT 0`,
+	}
+
+	for _, migration := range migrations {
+		if _, err := s.pool.Exec(ctx, migration); err != nil {
+			log.Printf("Migration warning (may be normal): %v", err)
+		}
+	}
+
 	return nil
 }
 
@@ -191,6 +205,7 @@ func (s *PostgresTopicDataStorage) ensureTopicPartitions(ctx context.Context) er
 				`CREATE INDEX IF NOT EXISTS idx_%[1]s_score ON %[1]s(score)`,
 				`CREATE INDEX IF NOT EXISTS idx_%[1]s_spend_score ON %[1]s(spend, score)`,
 				`CREATE INDEX IF NOT EXISTS idx_%[1]s_block_height ON %[1]s(block_height)`,
+				`CREATE INDEX IF NOT EXISTS idx_%[1]s_merkle_validation_state ON %[1]s(merkle_validation_state)`,
 			},
 		},
 		{
@@ -245,25 +260,44 @@ func (s *PostgresTopicDataStorage) ensureTopicPartitions(ctx context.Context) er
 
 // InsertOutput inserts a new output into the database
 func (s *PostgresTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) error {
-	// Save BEEF to BEEF storage
+	// Calculate score
+	utxo.Score = float64(time.Now().UnixNano())
+
+	// Save BEEF to storage first
 	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
 
-	// Calculate score
-	utxo.Score = float64(time.Now().UnixNano())
+	// Extract merkle information from BEEF
+	blockHeight, blockIndex, merkleRoot, validationState, err := s.ExtractMerkleInfoFromBEEF(ctx, &utxo.Outpoint.Txid, utxo.Beef)
+	if err != nil {
+		return fmt.Errorf("failed to extract merkle info: %w", err)
+	}
 
-	// Insert output
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO outputs (outpoint, txid, script, satoshis, block_height, block_idx, score, ancillary_beef, topic)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	// Always use the block height and index from BEEF extraction (0 if no merkle path)
+	utxo.BlockHeight = blockHeight
+	utxo.BlockIdx = blockIndex
+
+	// Prepare merkle root string
+	merkleRootStr := ""
+	if merkleRoot != nil {
+		merkleRootStr = merkleRoot.String()
+	}
+
+	// Insert output with merkle info in a single operation
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO outputs (outpoint, txid, script, satoshis, block_height, block_idx, score, ancillary_beef,
+			merkle_root, merkle_validation_state, topic)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (topic, outpoint) DO UPDATE SET
 			script = EXCLUDED.script,
 			satoshis = EXCLUDED.satoshis,
 			block_height = EXCLUDED.block_height,
 			block_idx = EXCLUDED.block_idx,
 			score = EXCLUDED.score,
-			ancillary_beef = EXCLUDED.ancillary_beef`,
+			ancillary_beef = EXCLUDED.ancillary_beef,
+			merkle_root = EXCLUDED.merkle_root,
+			merkle_validation_state = EXCLUDED.merkle_validation_state`,
 		utxo.Outpoint.String(),
 		utxo.Outpoint.Txid.String(),
 		utxo.Script.Bytes(),
@@ -272,6 +306,8 @@ func (s *PostgresTopicDataStorage) InsertOutput(ctx context.Context, utxo *engin
 		utxo.BlockIdx,
 		utxo.Score,
 		utxo.AncillaryBeef,
+		merkleRootStr,
+		validationState,
 		s.topic,
 	)
 	if err != nil {
@@ -702,7 +738,42 @@ func (s *PostgresTopicDataStorage) UpdateConsumedBy(ctx context.Context, outpoin
 
 // UpdateTransactionBEEF updates BEEF data for a transaction
 func (s *PostgresTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
-	return s.beefStore.SaveBeef(ctx, txid, beef)
+	// Save BEEF to storage
+	if err := s.beefStore.SaveBeef(ctx, txid, beef); err != nil {
+		return err
+	}
+
+	// Extract merkle information from BEEF
+	blockHeight, blockIndex, merkleRoot, validationState, err := s.ExtractMerkleInfoFromBEEF(ctx, txid, beef)
+	if err != nil {
+		return fmt.Errorf("failed to extract merkle info: %w", err)
+	}
+
+	if merkleRoot == nil {
+		// No merkle path in this BEEF, nothing more to do
+		return nil
+	}
+
+	// Update all outputs for this transaction with the merkle root, validation state, block height AND index
+	_, err = s.pool.Exec(ctx, `
+		UPDATE outputs
+		SET merkle_root = $1,
+		    merkle_validation_state = $2,
+		    block_height = $3,
+		    block_idx = $4
+		WHERE topic = $5 AND txid = $6`,
+		merkleRoot.String(),
+		validationState,
+		blockHeight,
+		blockIndex,
+		s.topic,
+		txid.String())
+
+	if err != nil {
+		return fmt.Errorf("failed to update outputs with merkle info: %w", err)
+	}
+
+	return nil
 }
 
 // UpdateOutputBlockHeight updates block height information for an output
@@ -713,15 +784,14 @@ func (s *PostgresTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, 
 	}
 	defer tx.Rollback(ctx)
 
-	// Update outputs table
+	// Update outputs table - removed score update
 	_, err = tx.Exec(ctx, `
-		UPDATE outputs 
-		SET block_height = $1, block_idx = $2, ancillary_beef = $3, score = $4
-		WHERE topic = $5 AND outpoint = $6`,
+		UPDATE outputs
+		SET block_height = $1, block_idx = $2, ancillary_beef = $3
+		WHERE topic = $4 AND outpoint = $5`,
 		blockHeight,
 		blockIndex,
 		ancillaryBeef,
-		float64(time.Now().UnixNano()),
 		s.topic,
 		outpoint.String(),
 	)
@@ -1594,4 +1664,151 @@ func (s *PostgresTopicDataStorage) CountOutputs(ctx context.Context) (int64, err
 	var count int64
 	err := s.pool.QueryRow(ctx, "SELECT COUNT(1) FROM outputs WHERE topic = $1", s.topic).Scan(&count)
 	return count, err
+}
+
+// FindOutputsByMerkleState finds outputs by their merkle validation state
+func (s *PostgresTopicDataStorage) FindOutpointsByMerkleState(ctx context.Context, state engine.MerkleState, limit uint32) ([]*transaction.Outpoint, error) {
+	query := `
+		SELECT outpoint
+		FROM outputs
+		WHERE topic = $1 AND merkle_validation_state = $2
+		ORDER BY score DESC`
+
+	args := []interface{}{s.topic, state}
+	if limit > 0 {
+		query += " LIMIT $3"
+		args = append(args, limit)
+	}
+
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var outpoints []*transaction.Outpoint
+	for rows.Next() {
+		var outpointStr string
+
+		err := rows.Scan(&outpointStr)
+		if err != nil {
+			return nil, err
+		}
+
+		// Parse outpoint
+		outpoint, err := transaction.OutpointFromString(outpointStr)
+		if err != nil {
+			return nil, err
+		}
+		outpoints = append(outpoints, outpoint)
+	}
+
+	return outpoints, rows.Err()
+}
+
+// ReconcileValidatedMerkleRoots finds all Validated outputs and reconciles those that need updating
+// This includes promoting to Immutable at sufficient depth or Invalidating if merkle root changed
+// Assumes merkle roots cache is already current via SyncMerkleRoots
+func (s *PostgresTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Context) error {
+	if s.headersClient == nil {
+		return fmt.Errorf("headers client not configured")
+	}
+
+	// Get current chain tip for immutability calculations
+	chaintip, err := s.headersClient.GetChaintip(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get chaintip: %w", err)
+	}
+
+	// Find all unique block heights with Validated outputs
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT block_height, merkle_root
+		FROM outputs
+		WHERE topic = $1 AND merkle_validation_state = $2
+		ORDER BY block_height`,
+		s.topic, engine.MerkleStateValidated)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var height uint32
+		var storedRootStr *string
+
+		if err := rows.Scan(&height, &storedRootStr); err != nil {
+			return err
+		}
+
+		// Get the correct merkle root from our cache
+		correctRoot, err := s.headersClient.GetMerkleRootForHeight(ctx, height)
+		if err != nil {
+			// If we can't get the merkle root, skip this height
+			continue
+		}
+
+		// Check if we need to reconcile:
+		// 1. Height has reached immutable depth, OR
+		// 2. Merkle root has changed (indicating reorg)
+		needsReconcile := chaintip.Height-height >= IMMUTABILITY_DEPTH
+
+		// Check if merkle root has changed
+		if !needsReconcile && storedRootStr != nil && *storedRootStr != "" {
+			storedRoot, err := chainhash.NewHashFromHex(*storedRootStr)
+			if err != nil {
+				needsReconcile = true // If we can't parse it, reconcile it
+			} else if !storedRoot.IsEqual(correctRoot) {
+				needsReconcile = true
+			}
+		}
+
+		// Reconcile if needed
+		if needsReconcile {
+			if err := s.ReconcileMerkleRoot(ctx, height, correctRoot); err != nil {
+				return fmt.Errorf("failed to reconcile height %d: %w", height, err)
+			}
+		}
+	}
+
+	return rows.Err()
+}
+
+// ReconcileMerkleRoot reconciles validation state for all outputs at a given block height
+func (s *PostgresTopicDataStorage) ReconcileMerkleRoot(ctx context.Context, blockHeight uint32, merkleRoot *chainhash.Hash) error {
+	merkleRootStr := ""
+	if merkleRoot != nil {
+		merkleRootStr = merkleRoot.String()
+	}
+
+	// Determine if this height should be immutable
+	isImmutable := false
+	if s.headersClient != nil {
+		chaintip, err := s.headersClient.GetChaintip(ctx)
+		if err == nil && chaintip != nil {
+			depth := chaintip.Height - blockHeight
+			isImmutable = depth >= IMMUTABILITY_DEPTH
+		}
+	}
+
+	// Determine the validation state for matching roots
+	validState := engine.MerkleStateValidated
+	if isImmutable {
+		validState = engine.MerkleStateImmutable
+	}
+
+	// Update outputs based on merkle root comparison
+	_, err := s.pool.Exec(ctx, `
+		UPDATE outputs
+		SET merkle_validation_state = CASE
+			WHEN merkle_root = $1 THEN $2  -- Validated or Immutable
+			WHEN merkle_root IS NULL THEN merkle_validation_state  -- Keep current state
+			ELSE $3  -- Invalidated
+		END
+		WHERE topic = $4
+		  AND block_height = $5
+		  AND merkle_validation_state < $6  -- Not already immutable`,
+		merkleRootStr, validState, engine.MerkleStateInvalidated,
+		s.topic, blockHeight, engine.MerkleStateImmutable)
+
+	return err
 }

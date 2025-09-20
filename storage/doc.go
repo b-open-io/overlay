@@ -2,7 +2,7 @@
 // transaction outputs in overlay services.
 //
 // The package includes implementations for:
-//   - Redis: High-performance in-memory storage with persistence
+//   - PostgreSQL: Scalable relational database with connection pooling
 //   - MongoDB: Document-based storage with flexible querying
 //   - SQLite: Embedded database with full SQL support and WAL mode
 //
@@ -28,26 +28,21 @@
 //
 // Example Usage:
 //
-//	// Create Redis storage with EventDataStorage interface
-//	storage, err := storage.NewRedisEventDataStorage(
-//	    "redis://localhost:6379",
+//	// Create SQLite storage with EventDataStorage interface
+//	storage, err := storage.CreateEventDataStorage(
+//	    "/path/to/database.db",
 //	    beefStore,
-//	    publisher
+//	    queueStorage,
+//	    pubSub,
+//	    headersClient
 //	)
 //
 //	// Insert an output
-//	err = storage.InsertOutput(ctx, output)
+//	err = storage.InsertOutput(ctx, output, "my-topic")
 //
 //	// Find outputs for a topic
-//	outputs, err := storage.FindUTXOsForTopic(ctx, "my-topic", 0, 100)
+//	outputs, err := storage.FindUTXOsForTopic(ctx, "my-topic", 0, 100, true)
 //
 //	// Save events for an output
 //	err = storage.SaveEvents(ctx, outpoint, []string{"event1", "event2"}, "topic", 850000.000000123, eventData)
-//
-//	// Create SQLite storage with EventDataStorage interface
-//	sqliteStorage, err := storage.NewSQLiteEventDataStorage(
-//	    "/path/to/database.db",
-//	    beefStore,
-//	    publisher
-//	)
 package storage

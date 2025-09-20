@@ -102,22 +102,24 @@ type BSONBeef struct {
 }
 
 type BSONOutput struct {
-	Outpoint        string      `bson:"outpoint"`
-	Txid            string      `bson:"txid"`
-	Vout            uint32      `bson:"vout"`
-	Topic           string      `bson:"topic"`
-	Script          []byte      `bson:"script"`
-	Satoshis        uint64      `bson:"satoshis"`
-	Spend           *string     `bson:"spend"` // Changed from Spent bool to Spend *string
-	OutputsConsumed []string    `bson:"outputsConsumed"`
-	ConsumedBy      []string    `bson:"consumedBy"`
-	BlockHeight     uint32      `bson:"blockHeight"`
-	BlockIdx        uint64      `bson:"blockIdx"`
-	Score           float64     `bson:"score"`
-	AncillaryTxids  []string    `bson:"ancillaryTxids"`
-	AncillaryBeef   []byte      `bson:"ancillaryBeef"`
-	Events          []string    `bson:"events"`         // Event names this output is associated with
-	Data            interface{} `bson:"data,omitempty"` // Arbitrary data associated with the output
+	Outpoint        string             `bson:"outpoint"`
+	Txid            string             `bson:"txid"`
+	Vout            uint32             `bson:"vout"`
+	Topic           string             `bson:"topic"`
+	Script          []byte             `bson:"script"`
+	Satoshis        uint64             `bson:"satoshis"`
+	Spend           *string            `bson:"spend"` // Changed from Spent bool to Spend *string
+	OutputsConsumed []string           `bson:"outputsConsumed"`
+	ConsumedBy      []string           `bson:"consumedBy"`
+	BlockHeight     uint32             `bson:"blockHeight"`
+	BlockIdx        uint64             `bson:"blockIdx"`
+	Score           float64            `bson:"score"`
+	AncillaryTxids  []string           `bson:"ancillaryTxids"`
+	AncillaryBeef   []byte             `bson:"ancillaryBeef"`
+	Events          []string           `bson:"events"`         // Event names this output is associated with
+	Data            interface{}        `bson:"data,omitempty"` // Arbitrary data associated with the output
+	MerkleRoot      *string            `bson:"merkleRoot,omitempty"`
+	MerkleState     engine.MerkleState `bson:"merkleValidationState"`
 }
 
 func NewBSONOutput(o *engine.Output) *BSONOutput {
@@ -138,6 +140,13 @@ func NewBSONOutput(o *engine.Output) *BSONOutput {
 		ConsumedBy:      make([]string, 0, len(o.ConsumedBy)),
 		Events:          []string{o.Topic}, // Initialize with the topic as an event
 		Data:            nil,               // Initialize empty data
+		MerkleState:     o.MerkleState,
+	}
+
+	// Set merkle root if present
+	if o.MerkleRoot != nil {
+		merkleRootStr := o.MerkleRoot.String()
+		bo.MerkleRoot = &merkleRootStr
 	}
 	for _, oc := range o.OutputsConsumed {
 		bo.OutputsConsumed = append(bo.OutputsConsumed, oc.String())
@@ -166,6 +175,13 @@ func (o *BSONOutput) ToEngineOutput() *engine.Output {
 		AncillaryBeef:   o.AncillaryBeef,
 		OutputsConsumed: make([]*transaction.Outpoint, 0, len(o.OutputsConsumed)),
 		ConsumedBy:      make([]*transaction.Outpoint, 0, len(o.ConsumedBy)),
+		MerkleState:     o.MerkleState,
+	}
+
+	// Convert merkle root if present
+	if o.MerkleRoot != nil && *o.MerkleRoot != "" {
+		merkleRoot, _ := chainhash.NewHashFromHex(*o.MerkleRoot)
+		output.MerkleRoot = merkleRoot
 	}
 	for _, oc := range o.OutputsConsumed {
 		op, _ := transaction.OutpointFromString(oc)
