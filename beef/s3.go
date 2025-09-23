@@ -18,15 +18,13 @@ import (
 type S3BeefStorage struct {
 	client   *s3.Client
 	bucket   string
-	prefix   string
 	fallback BeefStorage
 }
 
 // NewS3BeefStorage creates a new S3-based BEEF storage
 // bucket: S3 bucket name
-// prefix: optional prefix for all keys (e.g., "beef/")
 // fallback: optional fallback storage
-func NewS3BeefStorage(bucket string, prefix string, fallback BeefStorage) (*S3BeefStorage, error) {
+func NewS3BeefStorage(bucket string, fallback BeefStorage) (*S3BeefStorage, error) {
 	// Load the default AWS configuration
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
@@ -38,17 +36,15 @@ func NewS3BeefStorage(bucket string, prefix string, fallback BeefStorage) (*S3Be
 	return &S3BeefStorage{
 		client:   client,
 		bucket:   bucket,
-		prefix:   prefix,
 		fallback: fallback,
 	}, nil
 }
 
 // NewS3BeefStorageWithClient creates a new S3-based BEEF storage with a provided client
-func NewS3BeefStorageWithClient(client *s3.Client, bucket string, prefix string, fallback BeefStorage) *S3BeefStorage {
+func NewS3BeefStorageWithClient(client *s3.Client, bucket string, fallback BeefStorage) *S3BeefStorage {
 	return &S3BeefStorage{
 		client:   client,
 		bucket:   bucket,
-		prefix:   prefix,
 		fallback: fallback,
 	}
 }
@@ -57,18 +53,17 @@ func NewS3BeefStorageWithClient(client *s3.Client, bucket string, prefix string,
 // Uses subdirectories based on first 2 chars of txid to avoid too many files in one prefix
 func (s *S3BeefStorage) getKey(txid *chainhash.Hash) string {
 	txidStr := txid.String()
-	// Create subdirectory structure: prefix/xx/xxxxxxxxxxxx.beef
+	// Create subdirectory structure: xx/xxxxxxxxxxxx.beef
 	subDir := txidStr[:2]
 	fileName := txidStr + ".beef"
-
-	if s.prefix != "" {
-		return s.prefix + subDir + "/" + fileName
-	}
 	return subDir + "/" + fileName
 }
 
 func (s *S3BeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	key := s.getKey(txid)
+
+	fmt.Printf("S3 LoadBeef: attempting to load txid=%s from bucket=%s, key=%s\n",
+		txid.String(), s.bucket, key)
 
 	// Try to load from S3 first
 	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
@@ -82,6 +77,7 @@ func (s *S3BeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]b
 		if err != nil {
 			return nil, fmt.Errorf("failed to read S3 object: %w", err)
 		}
+		fmt.Printf("S3 LoadBeef SUCCESS: loaded %d bytes from %s\n", len(beefBytes), key)
 		return beefBytes, nil
 	}
 
@@ -90,25 +86,23 @@ func (s *S3BeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]b
 	if errors.As(err, &nfe) {
 		// If not found and we have a fallback, try it
 		if s.fallback != nil {
-			beefBytes, err := s.fallback.LoadBeef(ctx, txid)
-			if err == nil {
-				// Save to S3 for future use
-				s.SaveBeef(ctx, txid, beefBytes)
-			}
-			return beefBytes, err
+			return s.fallback.LoadBeef(ctx, txid)
 		}
 		return nil, ErrNotFound
 	}
 
-	// For other errors, return them
-	return nil, fmt.Errorf("failed to get object from S3: %w", err)
+	// For other errors, return them with context
+	return nil, fmt.Errorf("S3 LoadBeef failed (bucket: %s, key: %s): %w", s.bucket, key, err)
 }
 
 func (s *S3BeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
 	key := s.getKey(txid)
 
+	fmt.Printf("S3 SaveBeef: attempting to save txid=%s to bucket=%s, key=%s, size=%d bytes\n",
+		txid.String(), s.bucket, key, len(beefBytes))
+
 	// Upload to S3
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+	result, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(key),
 		Body:        bytes.NewReader(beefBytes),
@@ -116,9 +110,11 @@ func (s *S3BeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beef
 	})
 
 	if err != nil {
-		return fmt.Errorf("failed to put object to S3: %w", err)
+		fmt.Printf("S3 SaveBeef ERROR: %v\n", err)
+		return fmt.Errorf("S3 SaveBeef failed (bucket: %s, key: %s): %w", s.bucket, key, err)
 	}
 
+	fmt.Printf("S3 SaveBeef SUCCESS: saved to %s, ETag=%s\n", key, aws.ToString(result.ETag))
 	return nil
 }
 
@@ -155,9 +151,12 @@ func (s *S3BeefStorage) Close() error {
 func CreateS3Config(endpoint, region, accessKey, secretKey string) (aws.Config, error) {
 	opts := []func(*config.LoadOptions) error{}
 
-	// Set region if provided
+	// Set region - default to "auto" for S3-compatible services if not provided
 	if region != "" {
 		opts = append(opts, config.WithRegion(region))
+	} else if endpoint != "" {
+		// For custom endpoints (like R2), we need to set a region even if it's not used
+		opts = append(opts, config.WithRegion("auto"))
 	}
 
 	// Set credentials if provided

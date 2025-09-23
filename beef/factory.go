@@ -37,8 +37,8 @@ func expandHomePath(path string) (string, error) {
 //   - redis://localhost:6379?ttl=24h (Redis with optional TTL parameter)
 //   - sqlite:///path/to/beef.db or sqlite://beef.db
 //   - file:///path/to/storage/dir
-//   - s3://bucket-name/prefix/?region=us-west-2&endpoint=https://s3.amazonaws.com
-//   - s3://access-key:secret-key@bucket-name/prefix/?endpoint=https://minio.example.com
+//   - s3://bucket-name/?region=us-west-2&endpoint=https://s3.amazonaws.com
+//   - s3://access-key:secret-key@bucket-name/?endpoint=https://minio.example.com
 //   - junglebus:// (fetches from JungleBus API)
 //   - ./beef.db (inferred as SQLite)
 //   - ./beef/ (inferred as filesystem)
@@ -121,7 +121,7 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 			}
 
 		case strings.HasPrefix(connectionString, "s3://"):
-			// Parse S3 URL: s3://[access-key:secret-key@]bucket-name/prefix/?region=us-west-2&endpoint=https://s3.amazonaws.com
+			// Parse S3 URL: s3://[access-key:secret-key@]bucket-name/?region=us-west-2&endpoint=https://s3.amazonaws.com
 			u, err := url.Parse(connectionString)
 			if err != nil {
 				return nil, fmt.Errorf("invalid S3 URL format: %w", err)
@@ -134,9 +134,8 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 				secretKey, _ = u.User.Password()
 			}
 
-			// Extract bucket and prefix from host and path
+			// Extract bucket from host
 			bucket := u.Host
-			prefix := strings.TrimPrefix(u.Path, "/")
 
 			// Check for custom endpoint (for MinIO/S3-compatible)
 			endpoint := u.Query().Get("endpoint")
@@ -151,13 +150,17 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 					return nil, fmt.Errorf("failed to create S3 config: %w", err)
 				}
 				client := NewS3ClientFromConfig(cfg)
-				s3Storage = NewS3BeefStorageWithClient(client, bucket, prefix, storage)
+				s3Storage = NewS3BeefStorageWithClient(client, bucket, storage)
+				fmt.Printf("S3 storage configured: bucket=%s, endpoint=%s, hasAuth=%v\n",
+					bucket, endpoint, accessKey != "")
 			} else {
 				// Use default AWS configuration
-				s3Storage, err = NewS3BeefStorage(bucket, prefix, storage)
+				s3Storage, err = NewS3BeefStorage(bucket, storage)
 				if err != nil {
 					return nil, err
 				}
+				fmt.Printf("S3 storage configured with default AWS config: bucket=%s\n",
+					bucket)
 			}
 			storage = s3Storage
 
