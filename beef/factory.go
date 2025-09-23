@@ -38,6 +38,7 @@ func expandHomePath(path string) (string, error) {
 //   - sqlite:///path/to/beef.db or sqlite://beef.db
 //   - file:///path/to/storage/dir
 //   - s3://bucket-name/prefix/?region=us-west-2&endpoint=https://s3.amazonaws.com
+//   - s3://access-key:secret-key@bucket-name/prefix/?endpoint=https://minio.example.com
 //   - junglebus:// (fetches from JungleBus API)
 //   - ./beef.db (inferred as SQLite)
 //   - ./beef/ (inferred as filesystem)
@@ -120,10 +121,17 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 			}
 
 		case strings.HasPrefix(connectionString, "s3://"):
-			// Parse S3 URL: s3://bucket-name/prefix/?region=us-west-2&endpoint=https://s3.amazonaws.com
+			// Parse S3 URL: s3://[access-key:secret-key@]bucket-name/prefix/?region=us-west-2&endpoint=https://s3.amazonaws.com
 			u, err := url.Parse(connectionString)
 			if err != nil {
 				return nil, fmt.Errorf("invalid S3 URL format: %w", err)
+			}
+
+			// Extract credentials if present
+			var accessKey, secretKey string
+			if u.User != nil {
+				accessKey = u.User.Username()
+				secretKey, _ = u.User.Password()
 			}
 
 			// Extract bucket and prefix from host and path
@@ -136,9 +144,9 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 
 			// Create S3 client configuration
 			var s3Storage *S3BeefStorage
-			if endpoint != "" || region != "" {
+			if endpoint != "" || region != "" || accessKey != "" {
 				// Custom configuration needed
-				cfg, err := CreateS3Config(endpoint, region)
+				cfg, err := CreateS3Config(endpoint, region, accessKey, secretKey)
 				if err != nil {
 					return nil, fmt.Errorf("failed to create S3 config: %w", err)
 				}

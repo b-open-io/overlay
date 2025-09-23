@@ -151,13 +151,25 @@ func (s *S3BeefStorage) Close() error {
 	return nil
 }
 
-// CreateS3Config creates an AWS config with custom endpoint and/or region
-func CreateS3Config(endpoint, region string) (aws.Config, error) {
+// CreateS3Config creates an AWS config with custom endpoint, region, and/or credentials
+func CreateS3Config(endpoint, region, accessKey, secretKey string) (aws.Config, error) {
 	opts := []func(*config.LoadOptions) error{}
 
 	// Set region if provided
 	if region != "" {
 		opts = append(opts, config.WithRegion(region))
+	}
+
+	// Set credentials if provided
+	if accessKey != "" && secretKey != "" {
+		opts = append(opts, config.WithCredentialsProvider(
+			aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
+				return aws.Credentials{
+					AccessKeyID:     accessKey,
+					SecretAccessKey: secretKey,
+				}, nil
+			}),
+		))
 	}
 
 	// Load config
