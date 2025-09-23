@@ -47,10 +47,10 @@ func NewMongoTopicDataStorage(topic string, connString string, beefStore beef.Be
 		return nil, fmt.Errorf("failed to get shared client: %w", err)
 	}
 
-	// Create topic-specific database name (truncate to MongoDB's 63-char limit)
+	// Create topic-specific database name (truncate to MongoDB's 38-char limit)
 	dbName := topic
-	if len(dbName) > 63 {
-		dbName = dbName[:63]
+	if len(dbName) > 38 {
+		dbName = dbName[:38]
 	}
 	db := client.Database(dbName)
 
@@ -299,7 +299,6 @@ func (s *MongoTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*tr
 		return outputs, nil // Return the list of outputs found
 	}
 }
-
 
 func (s *MongoTopicDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
 	query := bson.M{"txid": txid.String()}
