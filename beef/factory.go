@@ -37,6 +37,7 @@ func expandHomePath(path string) (string, error) {
 //   - redis://localhost:6379?ttl=24h (Redis with optional TTL parameter)
 //   - sqlite:///path/to/beef.db or sqlite://beef.db
 //   - file:///path/to/storage/dir
+//   - s3://bucket-name/prefix/?region=us-west-2&endpoint=https://s3.amazonaws.com
 //   - junglebus:// (fetches from JungleBus API)
 //   - ./beef.db (inferred as SQLite)
 //   - ./beef/ (inferred as filesystem)
@@ -117,6 +118,40 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 			if err != nil {
 				return nil, err
 			}
+
+		case strings.HasPrefix(connectionString, "s3://"):
+			// Parse S3 URL: s3://bucket-name/prefix/?region=us-west-2&endpoint=https://s3.amazonaws.com
+			u, err := url.Parse(connectionString)
+			if err != nil {
+				return nil, fmt.Errorf("invalid S3 URL format: %w", err)
+			}
+
+			// Extract bucket and prefix from host and path
+			bucket := u.Host
+			prefix := strings.TrimPrefix(u.Path, "/")
+
+			// Check for custom endpoint (for MinIO/S3-compatible)
+			endpoint := u.Query().Get("endpoint")
+			region := u.Query().Get("region")
+
+			// Create S3 client configuration
+			var s3Storage *S3BeefStorage
+			if endpoint != "" || region != "" {
+				// Custom configuration needed
+				cfg, err := CreateS3Config(endpoint, region)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create S3 config: %w", err)
+				}
+				client := NewS3ClientFromConfig(cfg)
+				s3Storage = NewS3BeefStorageWithClient(client, bucket, prefix, storage)
+			} else {
+				// Use default AWS configuration
+				s3Storage, err = NewS3BeefStorage(bucket, prefix, storage)
+				if err != nil {
+					return nil, err
+				}
+			}
+			storage = s3Storage
 
 		case strings.HasPrefix(connectionString, "junglebus://"):
 			// Convert junglebus://host to https://host
