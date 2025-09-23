@@ -327,8 +327,41 @@ func (s *EventDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *trans
 }
 
 func (s *EventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
-	// BEEF is stored in shared storage, not topic-specific
-	return s.beefStore.SaveBeef(ctx, txid, beef)
+	// Save BEEF to shared storage first
+	if err := s.beefStore.SaveBeef(ctx, txid, beef); err != nil {
+		return err
+	}
+
+	// Check which topics contain this transaction
+	txKey := fmt.Sprintf("tx:%s", txid.String())
+	topics, err := s.queueStorage.SMembers(ctx, txKey)
+	if err != nil {
+		fmt.Printf("ERROR: Failed to get topics for tx %s: %v\n", txid.String(), err)
+		return nil
+	}
+	if len(topics) == 0 {
+		fmt.Printf("INFO: No topics found for transaction %s in Redis key %s\n", txid.String(), txKey)
+		return nil
+	}
+
+	fmt.Printf("INFO: Found %d topics for transaction %s: %v\n", len(topics), txid.String(), topics)
+
+	// Update merkle validation state in each topic storage that has this transaction
+	for _, topic := range topics {
+		storage, err := s.getTopicStorage(topic)
+		if err != nil {
+			fmt.Printf("ERROR: Failed to get topic storage for %s: %v\n", topic, err)
+			continue
+		}
+		// Update the merkle validation state for outputs in this topic
+		fmt.Printf("INFO: Updating merkle validation state for topic %s, transaction %s\n", topic, txid.String())
+		if err := storage.UpdateTransactionBEEF(ctx, txid, beef); err != nil {
+			return fmt.Errorf("failed to update merkle state for topic %s: %w", topic, err)
+		}
+		fmt.Printf("INFO: Successfully updated merkle validation state for topic %s\n", topic)
+	}
+
+	return nil
 }
 
 func (s *EventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {

@@ -145,16 +145,27 @@ func (s *SSESync) handlePeerConnection(conn *SSEConnection) {
 
 	backoff := time.Second
 	maxBackoff := time.Minute * 5
+	reconnectCount := 0
 
 	for {
 		select {
 		case <-s.ctx.Done():
+			slog.Debug("SSE connection handler stopped", "peer", conn.peerURL, "reconnect_count", reconnectCount)
 			return
 		default:
 		}
 
+		startTime := time.Now()
 		if err := s.connectAndListen(conn); err != nil {
-			slog.Error("SSE connection failed", "peer", conn.peerURL, "error", err)
+			duration := time.Since(startTime)
+			reconnectCount++
+
+			slog.Error("SSE connection failed",
+				"peer", conn.peerURL,
+				"error", err,
+				"duration", duration,
+				"reconnect_count", reconnectCount,
+				"next_retry_in", backoff)
 
 			// Exponential backoff for reconnection
 			select {
@@ -164,10 +175,15 @@ func (s *SSESync) handlePeerConnection(conn *SSEConnection) {
 				if backoff < maxBackoff {
 					backoff *= 2
 				}
+				slog.Debug("Attempting SSE reconnection",
+					"peer", conn.peerURL,
+					"attempt", reconnectCount+1,
+					"backoff", backoff)
 			}
 		} else {
 			// Reset backoff on successful connection
 			backoff = time.Second
+			slog.Debug("SSE connection closed normally", "peer", conn.peerURL, "duration", time.Since(startTime))
 		}
 	}
 }
@@ -220,9 +236,13 @@ func (s *SSESync) processSSEStream(conn *SSEConnection, body io.Reader) error {
 		id        string
 	}
 
+	eventCount := 0
+	lastLogTime := time.Now()
+
 	for scanner.Scan() {
 		select {
 		case <-s.ctx.Done():
+			slog.Debug("SSE stream processing cancelled", "peer", conn.peerURL, "events_processed", eventCount)
 			return s.ctx.Err()
 		default:
 		}
@@ -233,6 +253,13 @@ func (s *SSESync) processSSEStream(conn *SSEConnection, body io.Reader) error {
 			// Empty line indicates end of event - process it
 			if currentEvent.data != "" && currentEvent.eventType != "" {
 				s.handleSSEEvent(conn, currentEvent.eventType, currentEvent.data)
+				eventCount++
+
+				// Log periodic status every minute
+				if time.Since(lastLogTime) > time.Minute {
+					slog.Debug("SSE stream status", "peer", conn.peerURL, "events_processed", eventCount, "uptime", time.Since(lastLogTime))
+					lastLogTime = time.Now()
+				}
 			}
 			currentEvent = struct {
 				eventType string
@@ -260,6 +287,12 @@ func (s *SSESync) processSSEStream(conn *SSEConnection, body io.Reader) error {
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		slog.Error("SSE stream scanner error", "peer", conn.peerURL, "error", err, "events_processed", eventCount)
+		return err
+	}
+
+	slog.Info("SSE stream ended", "peer", conn.peerURL, "events_processed", eventCount)
 	return scanner.Err()
 }
 
@@ -267,6 +300,7 @@ func (s *SSESync) processSSEStream(conn *SSEConnection, body io.Reader) error {
 func (s *SSESync) handleSSEEvent(conn *SSEConnection, eventType, data string) {
 	// Skip connection messages
 	if strings.HasPrefix(data, "Connected to events:") {
+		slog.Debug("SSE connection message", "peer", conn.peerURL, "message", data)
 		return
 	}
 
@@ -277,6 +311,8 @@ func (s *SSESync) handleSSEEvent(conn *SSEConnection, eventType, data string) {
 		return
 	}
 
+	slog.Debug("SSE event received", "peer", conn.peerURL, "topic", eventType, "txid", txid.String())
+
 	// Send to processing channel
 	select {
 	case conn.eventChan <- SSEEvent{
@@ -284,7 +320,9 @@ func (s *SSESync) handleSSEEvent(conn *SSEConnection, eventType, data string) {
 		Txid:    *txid,
 		PeerURL: conn.peerURL,
 	}:
+		slog.Debug("SSE event queued for processing", "peer", conn.peerURL, "topic", eventType, "txid", txid.String())
 	case <-s.ctx.Done():
+		slog.Debug("SSE event dropped - context cancelled", "peer", conn.peerURL, "topic", eventType, "txid", txid.String())
 	}
 }
 
