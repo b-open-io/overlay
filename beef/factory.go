@@ -151,16 +151,12 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 				}
 				client := NewS3ClientFromConfig(cfg)
 				s3Storage = NewS3BeefStorageWithClient(client, bucket, storage)
-				fmt.Printf("S3 storage configured: bucket=%s, endpoint=%s, hasAuth=%v\n",
-					bucket, endpoint, accessKey != "")
 			} else {
 				// Use default AWS configuration
 				s3Storage, err = NewS3BeefStorage(bucket, storage)
 				if err != nil {
 					return nil, err
 				}
-				fmt.Printf("S3 storage configured with default AWS config: bucket=%s\n",
-					bucket)
 			}
 			storage = s3Storage
 

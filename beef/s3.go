@@ -62,9 +62,6 @@ func (s *S3BeefStorage) getKey(txid *chainhash.Hash) string {
 func (s *S3BeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	key := s.getKey(txid)
 
-	fmt.Printf("S3 LoadBeef: attempting to load txid=%s from bucket=%s, key=%s\n",
-		txid.String(), s.bucket, key)
-
 	// Try to load from S3 first
 	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -77,7 +74,6 @@ func (s *S3BeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]b
 		if err != nil {
 			return nil, fmt.Errorf("failed to read S3 object: %w", err)
 		}
-		fmt.Printf("S3 LoadBeef SUCCESS: loaded %d bytes from %s\n", len(beefBytes), key)
 		return beefBytes, nil
 	}
 
@@ -98,11 +94,8 @@ func (s *S3BeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]b
 func (s *S3BeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
 	key := s.getKey(txid)
 
-	fmt.Printf("S3 SaveBeef: attempting to save txid=%s to bucket=%s, key=%s, size=%d bytes\n",
-		txid.String(), s.bucket, key, len(beefBytes))
-
 	// Upload to S3
-	result, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(key),
 		Body:        bytes.NewReader(beefBytes),
@@ -110,11 +103,9 @@ func (s *S3BeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beef
 	})
 
 	if err != nil {
-		fmt.Printf("S3 SaveBeef ERROR: %v\n", err)
 		return fmt.Errorf("S3 SaveBeef failed (bucket: %s, key: %s): %w", s.bucket, key, err)
 	}
 
-	fmt.Printf("S3 SaveBeef SUCCESS: saved to %s, ETag=%s\n", key, aws.ToString(result.ETag))
 	return nil
 }
 
