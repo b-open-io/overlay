@@ -424,13 +424,15 @@ func (s *SSESync) enqueueTransaction(event SSEEvent) {
 	case <-s.ctx.Done():
 		return
 	default:
-		slog.Warn("Topic queue full, dropping transaction", "txid", txid.String(), "topic", event.Topic, "peer", event.PeerURL)
+		logPrefix := fmt.Sprintf("[SSE Sync of %s with %s]", event.Topic, event.PeerURL)
+		slog.Warn(fmt.Sprintf("%s Topic queue full, dropping transaction", logPrefix), "txid", txid.String())
 	}
 }
 
 // processTransactionSync processes a single transaction event synchronously (called from topic queue)
 func (s *SSESync) processTransactionSync(event SSEEvent) {
 	txid := &event.Txid
+	logPrefix := fmt.Sprintf("[SSE Sync of %s with %s]", event.Topic, event.PeerURL)
 
 	// Mark transaction as in-flight
 	s.inFlightTxs.Store(*txid, struct{}{})
@@ -441,9 +443,9 @@ func (s *SSESync) processTransactionSync(event SSEEvent) {
 
 	// Process the transaction
 	if err := s.fetchAndSubmitTransaction(event); err != nil {
-		slog.Error("Failed to process transaction", "txid", txid.String(), "topic", event.Topic, "peer", event.PeerURL, "error", err)
+		slog.Error(fmt.Sprintf("%s Failed to process transaction", logPrefix), "txid", txid.String(), "error", err)
 	} else {
-		slog.Info("Successfully processed transaction", "txid", txid.String(), "topic", event.Topic, "peer", event.PeerURL)
+		slog.Info(fmt.Sprintf("%s Successfully processed transaction", logPrefix), "txid", txid.String())
 	}
 }
 

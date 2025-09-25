@@ -281,8 +281,6 @@ func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
 		topic := c.Params("topic")
 		txidStr := c.Params("txid")
 
-		log.Printf("BEEF request for topic %s, txid %s", topic, txidStr)
-
 		// Validate topic is enabled
 		if _, exists := eng.Managers[topic]; !exists {
 			return c.Status(fiber.StatusServiceUnavailable).JSON(fiber.Map{
@@ -312,7 +310,6 @@ func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
 		c.Set("Content-Type", "application/octet-stream")
 		c.Set("Content-Length", fmt.Sprintf("%d", len(completeBeef)))
 
-		log.Printf("Successfully served BEEF for topic %s, txid %s, size %d bytes", topic, txidStr, len(completeBeef))
 		return c.Send(completeBeef)
 	})
 }
