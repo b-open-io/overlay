@@ -5,18 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"runtime"
 
 	"github.com/b-open-io/overlay/queue"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 )
 
-const DefaultGASPConcurrency = 256
+var DefaultGASPConcurrency = 3 * runtime.NumCPU()
 
 // PeerSettings defines the configuration for a peer's capabilities
 type PeerSettings struct {
-	SSE       bool `json:"sse"`       // Server-Sent Events support
-	GASP      bool `json:"gasp"`      // GASP protocol support
-	Broadcast bool `json:"broadcast"` // Transaction broadcasting support
+	SSE         bool `json:"sse"`         // Server-Sent Events support
+	GASP        bool `json:"gasp"`        // GASP protocol support
+	Broadcast   bool `json:"broadcast"`   // Transaction broadcasting support
+	Concurrency int  `json:"concurrency"` // GASP concurrency (0 = use DefaultGASPConcurrency)
 }
 
 // PeerConfigKey returns the storage key for peer configuration for a given topic
@@ -55,6 +57,7 @@ func ConfigureSync(ctx context.Context, eng *engine.Engine, queueStore queue.Que
 
 		// Parse peer settings and build configurations
 		gaspPeers := make([]string, 0)
+		concurrency := DefaultGASPConcurrency
 
 		for peerURL, settingsJSON := range peerData {
 			var settings PeerSettings
@@ -67,6 +70,11 @@ func ConfigureSync(ctx context.Context, eng *engine.Engine, queueStore queue.Que
 			if settings.GASP {
 				// Add /api/v1 path for GASP endpoints
 				gaspPeers = append(gaspPeers, peerURL+"/api/v1")
+
+				// Use peer-specific concurrency if set (non-zero)
+				if settings.Concurrency > 0 {
+					concurrency = settings.Concurrency
+				}
 			}
 
 			totalPeers++
@@ -77,10 +85,10 @@ func ConfigureSync(ctx context.Context, eng *engine.Engine, queueStore queue.Que
 			newSyncConfig[topicId] = engine.SyncConfiguration{
 				Type:        engine.SyncConfigurationPeers,
 				Peers:       gaspPeers,
-				Concurrency: DefaultGASPConcurrency,
+				Concurrency: concurrency,
 			}
 			configuredTopics++
-			log.Printf("Configured GASP sync for topic %s with %d peers", topicId, len(gaspPeers))
+			log.Printf("Configured GASP sync for topic %s with %d peers (concurrency: %d)", topicId, len(gaspPeers), concurrency)
 		}
 	}
 
