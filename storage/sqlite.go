@@ -443,13 +443,12 @@ func (s *SQLiteTopicDataStorage) FindOutputsForTransaction(ctx context.Context, 
 }
 
 func (s *SQLiteTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
+
 	query := `SELECT outpoint, txid, script, satoshis, spend, 
 		block_height, block_idx, score, ancillary_beef 
 		FROM outputs 
-		WHERE score >= ?
+		WHERE score >= ? AND spend IS NULL
 		ORDER BY score`
-
-	// WHERE score >= ? AND spend IS NULL
 
 	args := []any{since}
 	if limit > 0 {
