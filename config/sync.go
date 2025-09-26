@@ -10,7 +10,7 @@ import (
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 )
 
-const DefaultGASPConcurrency = 8
+const DefaultGASPConcurrency = 256
 
 // PeerSettings defines the configuration for a peer's capabilities
 type PeerSettings struct {
