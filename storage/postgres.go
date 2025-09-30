@@ -616,7 +616,6 @@ func (s *PostgresTopicDataStorage) Close() error {
 	return nil
 }
 
-
 // FindOutputsForTransaction finds all outputs for a given transaction
 func (s *PostgresTopicDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
 	query := `SELECT outpoint, txid, script, satoshis, spend, block_height, block_idx, score, ancillary_beef 
@@ -784,14 +783,14 @@ func (s *PostgresTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, 
 	}
 	defer tx.Rollback(ctx)
 
-	// Update outputs table - removed score update
 	_, err = tx.Exec(ctx, `
 		UPDATE outputs
-		SET block_height = $1, block_idx = $2, ancillary_beef = $3
-		WHERE topic = $4 AND outpoint = $5`,
+		SET block_height = $1, block_idx = $2, ancillary_beef = $3, score = $4
+		WHERE topic = $5 AND outpoint = $6`,
 		blockHeight,
 		blockIndex,
 		ancillaryBeef,
+		float64(time.Now().UnixNano()),
 		s.topic,
 		outpoint.String(),
 	)

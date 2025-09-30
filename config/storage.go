@@ -26,8 +26,8 @@ import (
 //
 // Note: If your connection strings contain commas, use the JSON array format.
 //
-// When a headers client is provided, the BEEF storage will validate merkle proofs on load
-// and the storage will perform merkle root reconciliation.
+// When a headers client is provided, the storage will perform merkle root reconciliation.
+// Merkle path updates are handled explicitly via engine.HandleNewMerkleProof() calls.
 //
 // Example configurations:
 //
@@ -43,17 +43,9 @@ import (
 //  4. Default no-dependency setup:
 //     CreateEventStorage("", "", "", "", headersClient)  // Uses ~/.1sat/overlay.db, ~/.1sat/beef/, ~/.1sat/queue.db, channels://
 func CreateEventStorage(eventURL, beefURL, queueURL, pubsubURL string, headersClient *headers.Client) (*storage.EventDataStorage, error) {
-	// Create BEEF storage with optional validation
-	var beefStorage beef.BeefStorage
-	var err error
-
-	if headersClient != nil {
-		// Create validating BEEF storage when headers client is provided
-		beefStorage, err = beef.CreateValidatingBeefStorage(beefURL, headersClient)
-	} else {
-		// Create regular BEEF storage without validation
-		beefStorage, err = beef.CreateBeefStorage(beefURL)
-	}
+	// Create BEEF storage (without automatic validation)
+	// Merkle path updates are now handled explicitly via HandleNewMerkleProof
+	beefStorage, err := beef.CreateBeefStorage(beefURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create BEEF storage: %w", err)
 	}

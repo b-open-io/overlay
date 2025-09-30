@@ -573,21 +573,20 @@ func (s *SQLiteTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, txid
 }
 
 func (s *SQLiteTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
-
 	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	// Update outputs table - removed score update
 	_, err = tx.ExecContext(ctx, `
 		UPDATE outputs
-		SET block_height = ?, block_idx = ?, ancillary_beef = ?
+		SET block_height = ?, block_idx = ?, ancillary_beef = ?, score = ?
 		WHERE outpoint = ?`,
 		blockHeight,
 		blockIndex,
 		ancillaryBeef,
+		float64(time.Now().UnixNano()),
 		outpoint.String(),
 	)
 	if err != nil {

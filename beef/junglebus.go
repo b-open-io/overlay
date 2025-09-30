@@ -29,6 +29,11 @@ func NewJunglebusBeefStorage(junglebusURL string, fallback BeefStorage) *Jungleb
 		junglebusURL = os.Getenv("JUNGLEBUS")
 	}
 
+	// If still empty, use default
+	if junglebusURL == "" {
+		junglebusURL = "https://junglebus.gorillapool.io"
+	}
+
 	return &JunglebusBeefStorage{
 		junglebusURL: junglebusURL,
 		fallback:     fallback,

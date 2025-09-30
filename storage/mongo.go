@@ -449,6 +449,7 @@ func (s *MongoTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, out
 			"blockHeight":   blockHeight,
 			"blockIdx":      blockIndex,
 			"ancillaryBeef": ancelliaryBeef,
+			"score":         float64(time.Now().UnixNano()),
 		}},
 	)
 	return err

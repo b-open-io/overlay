@@ -162,12 +162,12 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 
 		case strings.HasPrefix(connectionString, "junglebus://"):
 			// Convert junglebus://host to https://host
-			// If no host specified (just "junglebus://"), use default
 			host := strings.TrimPrefix(connectionString, "junglebus://")
-			if host == "" {
-				host = "junglebus.gorillapool.io"
+			var junglebusURL string
+			if host != "" {
+				junglebusURL = "https://" + host
 			}
-			junglebusURL := "https://" + host
+			// Empty junglebusURL will use env var or default in NewJunglebusBeefStorage
 			storage = NewJunglebusBeefStorage(junglebusURL, storage)
 
 		case strings.HasPrefix(connectionString, "sqlite://"):
