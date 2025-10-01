@@ -49,10 +49,10 @@ github.com/aws/aws-sdk-go-v2/service/sts v1.38.5 h1:+LVB0xBqEgjQoqr9bGZbRzvg212B
 github.com/aws/aws-sdk-go-v2/service/sts v1.38.5/go.mod h1:xoaxeqnnUaZjPjaICgIy5B+MHCSb/ZSOn4MvkFNOUA0=
 github.com/aws/smithy-go v1.23.0 h1:8n6I3gXzWJB2DxBDnfxgBaSX6oe0d/t10qGz7OKqMCE=
 github.com/aws/smithy-go v1.23.0/go.mod h1:t1ufH5HMublsJYulve2RKmHDC15xu1f26kHCp/HgceI=
-github.com/b-open-io/go-overlay-services v0.0.0-20251001220929-549d62165551 h1:+pWo9yQBPP51SH5X82e2aEhPl0QxDIMl/2ZCZNxk+os=
-github.com/b-open-io/go-overlay-services v0.0.0-20251001220929-549d62165551/go.mod h1:3c/r8O/vrKBEer65bkhliu+tpax+5yf6oToC6bkHKiE=
-github.com/b-open-io/go-sdk v1.1.25-0.20251001222414-53a8f5db1645 h1:1FX+WSHofn147QKb9TaGkpI7vogn+OI/jYV8v0kGoOQ=
-github.com/b-open-io/go-sdk v1.1.25-0.20251001222414-53a8f5db1645/go.mod h1:C1r7iZbRUCbC015GjbhcpwH0jL5ubPn5XaQgjvUaPdU=
+github.com/b-open-io/go-overlay-services v0.0.0-20251001230433-ee0be7ff26de h1:A8PystAaR5G9Dq7an8sGZZf13fnPZZJn5i8CC0gO3D0=
+github.com/b-open-io/go-overlay-services v0.0.0-20251001230433-ee0be7ff26de/go.mod h1:Md0VZfGnSDbyp4Q2he5gPGJLxFQ4BUx0wdzhi7Vj55M=
+github.com/b-open-io/go-sdk v1.1.25-0.20251001225917-dadc6de38e4d h1:ZaWFGNYbVxJHRZc8wSeR/WKgM5LiZz7Br+S+reFoaqM=
+github.com/b-open-io/go-sdk v1.1.25-0.20251001225917-dadc6de38e4d/go.mod h1:C1r7iZbRUCbC015GjbhcpwH0jL5ubPn5XaQgjvUaPdU=
 github.com/benbjohnson/clock v1.3.5 h1:VvXlSJBzZpA/zum6Sj74hxwYI2DIxRWuNIoXAzHZz5o=
 github.com/benbjohnson/clock v1.3.5/go.mod h1:J11/hYXuz8f4ySSvYwY0FKfm+ezbsZBKZxNJlLklBHA=
 github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973/go.mod h1:Dwedo/Wpr24TaqPxmxbtue+5NUziq4I4S80YR8gNf3Q=
