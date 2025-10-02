@@ -447,7 +447,7 @@ func (s *SQLiteTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since fl
 	query := `SELECT outpoint, txid, script, satoshis, spend, 
 		block_height, block_idx, score, ancillary_beef 
 		FROM outputs 
-		WHERE score >= ? AND spend IS NULL
+		WHERE score >= ? -- AND spend IS NULL
 		ORDER BY score`
 
 	args := []any{since}

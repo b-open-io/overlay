@@ -23,9 +23,30 @@ type BeefStorage interface {
 // LoadTxFromBeef is a helper function that loads a transaction from BEEF bytes
 func LoadTxFromBeef(ctx context.Context, beefBytes []byte, txid *chainhash.Hash) (*transaction.Transaction, error) {
 	// Parse BEEF to get the transaction
-	_, tx, _, err := transaction.ParseBeef(beefBytes)
+	beef, tx, parsedTxid, err := transaction.ParseBeef(beefBytes)
 	if err != nil {
 		return nil, err
+	}
+
+	// If ParseBeef returned a txid, verify it matches what we requested
+	if parsedTxid != nil && !parsedTxid.IsEqual(txid) {
+		return nil, errors.New("txid mismatch: requested " + txid.String() + ", got " + parsedTxid.String())
+	}
+
+	// If no transaction was returned (e.g., BEEF_V2), find it in the BEEF document
+	if tx == nil && beef != nil {
+		tx = beef.FindTransaction(txid.String())
+	}
+
+	// Verify we got a transaction
+	if tx == nil {
+		return nil, errors.New("transaction " + txid.String() + " not found in BEEF")
+	}
+
+	// Verify the loaded transaction's txid matches what we requested
+	loadedTxid := tx.TxID()
+	if !loadedTxid.IsEqual(txid) {
+		return nil, errors.New("loaded transaction txid mismatch: requested " + txid.String() + ", got " + loadedTxid.String())
 	}
 
 	return tx, nil

@@ -331,7 +331,7 @@ func (s *MongoTopicDataStorage) FindOutputsForTransaction(ctx context.Context, t
 func (s *MongoTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
 	query := bson.M{
 		"score": bson.M{"$gte": since},
-		"spend": nil,
+		// "spend": nil,
 	}
 	findOpts := options.Find().SetSort(bson.M{"score": 1})
 	if limit > 0 {

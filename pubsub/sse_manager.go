@@ -19,7 +19,8 @@ type SSEClient struct {
 type SSEManager struct {
 	pubsub             PubSub
 	clients            sync.Map                // clientID -> *SSEClient
-	topicClients       sync.Map                // topic -> []string (clientIDs)
+	topicClients       map[string][]string     // topic -> []string (clientIDs)
+	topicMutex         sync.RWMutex            // Protects topicClients map
 	events             atomic.Value            // <-chan Event (thread-safe channel replacement)
 	subscriptionCtx    context.Context         // Context for current subscription
 	subscriptionCancel context.CancelFunc     // Cancel function for current subscription
@@ -32,9 +33,10 @@ func NewSSEManager(ctx context.Context, pubsub PubSub) *SSEManager {
 	managerCtx, cancel := context.WithCancel(ctx)
 	
 	manager := &SSEManager{
-		pubsub: pubsub,
-		ctx:    managerCtx,
-		cancel: cancel,
+		pubsub:       pubsub,
+		topicClients: make(map[string][]string),
+		ctx:          managerCtx,
+		cancel:       cancel,
 	}
 	
 	// Start broadcast loop immediately
@@ -95,32 +97,30 @@ func (s *SSEManager) DeregisterClient(clientID string) error {
 
 // addClientToTopic adds a client ID to a topic's subscriber list (thread-safe)
 func (s *SSEManager) addClientToTopic(topic, clientID string) {
-	val, _ := s.topicClients.LoadOrStore(topic, []string{})
-	clientIDs := val.([]string)
-	clientIDs = append(clientIDs, clientID)
-	s.topicClients.Store(topic, clientIDs)
+	s.topicMutex.Lock()
+	defer s.topicMutex.Unlock()
+
+	if s.topicClients[topic] == nil {
+		s.topicClients[topic] = []string{}
+	}
+	s.topicClients[topic] = append(s.topicClients[topic], clientID)
 }
 
 // removeClientFromTopic removes a client ID from a topic's subscriber list (thread-safe)
 func (s *SSEManager) removeClientFromTopic(topic, clientID string) {
-	val, exists := s.topicClients.Load(topic)
-	if !exists {
-		return
-	}
-	
-	clientIDs := val.([]string)
-	for i, id := range clientIDs {
+	s.topicMutex.Lock()
+	defer s.topicMutex.Unlock()
+
+	clients := s.topicClients[topic]
+	for i, id := range clients {
 		if id == clientID {
-			// Remove client from slice
-			clientIDs = append(clientIDs[:i], clientIDs[i+1:]...)
+			s.topicClients[topic] = append(clients[:i], clients[i+1:]...)
 			break
 		}
 	}
-	
-	if len(clientIDs) == 0 {
-		s.topicClients.Delete(topic)
-	} else {
-		s.topicClients.Store(topic, clientIDs)
+
+	if len(s.topicClients[topic]) == 0 {
+		delete(s.topicClients, topic)
 	}
 }
 
@@ -131,15 +131,14 @@ func (s *SSEManager) updateSubscriptions() {
 	}
 	
 	// Build topic list from current clients
+	s.topicMutex.RLock()
 	var topics []string
-	s.topicClients.Range(func(key, value interface{}) bool {
-		topic := key.(string)
-		clientIDs := value.([]string)
+	for topic, clientIDs := range s.topicClients {
 		if len(clientIDs) > 0 {
 			topics = append(topics, topic)
 		}
-		return true
-	})
+	}
+	s.topicMutex.RUnlock()
 	
 	log.Printf("SSEManager: updateSubscriptions called, active topics: %v", topics)
 	
@@ -196,18 +195,23 @@ func (s *SSEManager) broadcastLoop() {
 
 // broadcastToClients sends an event to all registered SSE clients for the topic
 func (s *SSEManager) broadcastToClients(event Event) {
-	val, exists := s.topicClients.Load(event.Topic)
+	s.topicMutex.RLock()
+	clientIDs, exists := s.topicClients[event.Topic]
 	if !exists {
+		s.topicMutex.RUnlock()
 		return // No clients for this topic
 	}
-	
-	clientIDs := val.([]string)
+
+	// Make a copy to avoid holding the lock during broadcast
+	clientIDsCopy := make([]string, len(clientIDs))
+	copy(clientIDsCopy, clientIDs)
+	s.topicMutex.RUnlock()
 	
 	// Broadcast to all clients for this topic
 	sentCount := 0
 	var disconnectedClients []string
 	
-	for _, clientID := range clientIDs {
+	for _, clientID := range clientIDsCopy {
 		if clientVal, exists := s.clients.Load(clientID); exists {
 			client := clientVal.(*SSEClient)
 			if writer, ok := client.writer.(interface{ Write([]byte) (int, error); Flush() error }); ok {
