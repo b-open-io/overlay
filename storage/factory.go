@@ -17,6 +17,7 @@ import (
 // Supported formats:
 //   - redis://localhost:6379 (deprecated)
 //   - postgresql://user:pass@localhost:5432/dbname or postgres://...
+//   - user:pass@tcp(host:port)/dbname or mysql://... (MySQL)
 //   - mongodb://localhost:27017/dbname
 //   - sqlite:///path/to/overlay.db or sqlite://overlay.db
 //   - ./overlay.db (inferred as SQLite)
@@ -36,6 +37,13 @@ func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage,
 		// Create PostgreSQL factory function
 		factory = func(topic string) (TopicDataStorage, error) {
 			return NewPostgresTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub, headersClient)
+		}
+
+	case strings.Contains(connectionString, "@tcp("), strings.Contains(connectionString, "mysql://"):
+		// Create MySQL factory function
+		// Supports both DSN format (user:pass@tcp(host:port)/dbname) and URL format (mysql://...)
+		factory = func(topic string) (TopicDataStorage, error) {
+			return NewMySQLTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub, headersClient)
 		}
 
 	case strings.HasPrefix(connectionString, "mongodb://"), strings.HasPrefix(connectionString, "mongo://"):
