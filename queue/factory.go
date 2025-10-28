@@ -13,6 +13,8 @@ func CreateQueueStorage(connString string) (QueueStorage, error) {
 		return NewRedisQueueStorage(connString)
 	case strings.HasPrefix(connString, "postgresql://"), strings.HasPrefix(connString, "postgres://"):
 		return NewPostgresQueueStorage(connString)
+	case strings.HasPrefix(connString, "mysql://"):
+		return NewMySQLQueueStorage(connString)
 	case strings.HasPrefix(connString, "mongodb://"):
 		return NewMongoQueueStorage(connString)
 	case connString == "", strings.HasPrefix(connString, "sqlite://"), strings.HasSuffix(connString, ".db"), filepath.IsAbs(connString) || strings.HasPrefix(connString, "./") || strings.HasPrefix(connString, "../") || !strings.Contains(connString, "://"):
