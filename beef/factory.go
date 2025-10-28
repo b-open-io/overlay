@@ -35,6 +35,7 @@ func expandHomePath(path string) (string, error) {
 // Supported storage formats:
 //   - lru://?size=100mb or lru://?size=1gb (in-memory LRU cache with size limit)
 //   - redis://localhost:6379?ttl=24h (Redis with optional TTL parameter)
+//   - mysql://user:password@host:port/database (MySQL database)
 //   - sqlite:///path/to/beef.db or sqlite://beef.db
 //   - file:///path/to/storage/dir
 //   - s3://bucket-name/?region=us-west-2&endpoint=https://s3.amazonaws.com
@@ -169,6 +170,13 @@ func CreateBeefStorage(connectionString string) (BeefStorage, error) {
 			}
 			// Empty junglebusURL will use env var or default in NewJunglebusBeefStorage
 			storage = NewJunglebusBeefStorage(junglebusURL, storage)
+
+		case strings.HasPrefix(connectionString, "mysql://"):
+			var err error
+			storage, err = NewMySQLBeefStorage(connectionString, storage)
+			if err != nil {
+				return nil, err
+			}
 
 		case strings.HasPrefix(connectionString, "sqlite://"):
 			// Remove sqlite:// prefix (can be sqlite:// or sqlite:///path)
