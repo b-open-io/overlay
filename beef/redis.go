@@ -29,7 +29,7 @@ func NewRedisBeefStorage(connString string, fallback BeefStorage) (*RedisBeefSto
 	// Parse TTL from query parameters if present
 	// Example: redis://localhost:6379?ttl=24h
 	var cacheTTL time.Duration
-	cleanConnString := connString
+	connStringForRedis := connString
 
 	if idx := strings.Index(connString, "?"); idx != -1 {
 		// Extract TTL from query string before parsing URL
@@ -41,13 +41,13 @@ func NewRedisBeefStorage(connString string, fallback BeefStorage) (*RedisBeefSto
 			}
 		}
 		// Redis ParseURL doesn't understand ttl parameter, so remove it
-		cleanConnString = connString[:idx]
+		connStringForRedis = connString[:idx]
 	}
 
 	r.ttl = cacheTTL
 
-	slog.Debug("Connecting to Redis BeefStorage", "url", utils.SanitizeConnectionString(cleanConnString))
-	if opts, err := redis.ParseURL(cleanConnString); err != nil {
+	slog.Debug("Connecting to Redis BeefStorage", "url", utils.SanitizeConnectionString(connStringForRedis))
+	if opts, err := redis.ParseURL(connStringForRedis); err != nil {
 		return nil, err
 	} else {
 		r.db = redis.NewClient(opts)
