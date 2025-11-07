@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/b-open-io/overlay/internal/utils"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 	"github.com/redis/go-redis/v9"
@@ -44,7 +45,7 @@ func NewRedisBeefStorage(connString string, fallback BeefStorage) (*RedisBeefSto
 
 	r.ttl = cacheTTL
 
-	log.Println("Connecting to Redis BeefStorage...", cleanConnString)
+	log.Println("Connecting to Redis BeefStorage...", utils.SanitizeConnectionString(cleanConnString))
 	if opts, err := redis.ParseURL(cleanConnString); err != nil {
 		return nil, err
 	} else {
