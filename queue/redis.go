@@ -2,7 +2,7 @@ package queue
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"strconv"
 
 	"github.com/b-open-io/overlay/internal/utils"
@@ -22,7 +22,7 @@ func (r *RedisQueueStorage) Close() error {
 }
 
 func NewRedisQueueStorage(connString string) (*RedisQueueStorage, error) {
-	log.Println("Connecting to Redis Queue Storage...", utils.SanitizeConnectionString(connString))
+	slog.Debug("Connecting to Redis Queue Storage", "url", utils.SanitizeConnectionString(connString))
 	opts, err := redis.ParseURL(connString)
 	if err != nil {
 		return nil, err

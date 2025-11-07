@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -45,7 +46,7 @@ func NewRedisBeefStorage(connString string, fallback BeefStorage) (*RedisBeefSto
 
 	r.ttl = cacheTTL
 
-	log.Println("Connecting to Redis BeefStorage...", utils.SanitizeConnectionString(cleanConnString))
+	slog.Debug("Connecting to Redis BeefStorage", "url", utils.SanitizeConnectionString(cleanConnString))
 	if opts, err := redis.ParseURL(cleanConnString); err != nil {
 		return nil, err
 	} else {
