@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/headers"
 	"github.com/b-open-io/overlay/pubsub"
 	"github.com/b-open-io/overlay/queue"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 )
 
 // CreateEventDataStorage creates the appropriate EventDataStorage implementation
@@ -22,8 +22,8 @@ import (
 //   - ./overlay.db (inferred as SQLite)
 //
 // If no connection string is provided, defaults to ./overlay.db
-// The beefStore, queueStorage, pubSub, and headersClient parameters are required dependencies.
-func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubSub pubsub.PubSub, headersClient *headers.Client) (*EventDataStorage, error) {
+// The beefStore, queueStorage, pubSub, and chainTracker parameters are required dependencies.
+func CreateEventDataStorage(connectionString string, beefStore *beef.Storage, queueStorage queue.QueueStorage, pubSub pubsub.PubSub, chainTracker chaintracker.ChainTracker) (*EventDataStorage, error) {
 	// Create factory function based on storage type
 	var factory TopicDataStorageFactory
 
@@ -35,19 +35,19 @@ func CreateEventDataStorage(connectionString string, beefStore beef.BeefStorage,
 	case strings.HasPrefix(connectionString, "postgresql://"), strings.HasPrefix(connectionString, "postgres://"):
 		// Create PostgreSQL factory function
 		factory = func(topic string) (TopicDataStorage, error) {
-			return NewPostgresTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub, headersClient)
+			return NewPostgresTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub, chainTracker)
 		}
 
 	case strings.HasPrefix(connectionString, "mongodb://"), strings.HasPrefix(connectionString, "mongo://"):
 		// Create MongoDB factory function
 		factory = func(topic string) (TopicDataStorage, error) {
-			return NewMongoTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub, headersClient)
+			return NewMongoTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub, chainTracker)
 		}
 
 	case connectionString == "", strings.HasPrefix(connectionString, "sqlite://"), strings.HasSuffix(connectionString, ".db"), strings.HasSuffix(connectionString, ".sqlite"), filepath.IsAbs(connectionString) || strings.HasPrefix(connectionString, "./") || strings.HasPrefix(connectionString, "../"):
 		// SQLite (default or explicit path)
 		factory = func(topic string) (TopicDataStorage, error) {
-			return NewSQLiteTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub, headersClient)
+			return NewSQLiteTopicDataStorage(topic, connectionString, beefStore, queueStorage, pubSub, chainTracker)
 		}
 
 	default:

@@ -2,27 +2,22 @@ package beef
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"strings"
 	"time"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
-	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 	"github.com/redis/go-redis/v9"
 )
 
 type RedisBeefStorage struct {
 	db               *redis.Client
 	ttl              time.Duration
-	fallback         BeefStorage
 	hexpireSupported bool
 }
 
-func NewRedisBeefStorage(connString string, fallback BeefStorage) (*RedisBeefStorage, error) {
-	r := &RedisBeefStorage{
-		fallback: fallback,
-	}
+func NewRedisBeefStorage(connString string) (*RedisBeefStorage, error) {
+	r := &RedisBeefStorage{}
 
 	// Parse TTL from query parameters if present
 	// Example: redis://localhost:6379?ttl=24h
@@ -62,27 +57,18 @@ func NewRedisBeefStorage(connString string, fallback BeefStorage) (*RedisBeefSto
 	}
 }
 
-func (t *RedisBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+func (t *RedisBeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	txidStr := txid.String()
 
-	// Try to load from Redis first
-	if beefBytes, err := t.db.HGet(ctx, BeefKey, txidStr).Bytes(); err != nil && err != redis.Nil {
+	beefBytes, err := t.db.HGet(ctx, BeefKey, txidStr).Bytes()
+	if err == redis.Nil {
+		return nil, ErrNotFound
+	}
+	if err != nil {
 		return nil, err
-	} else if err == nil && beefBytes != nil {
-		return beefBytes, nil
 	}
 
-	// Not found in Redis, try fallback
-	if t.fallback != nil {
-		beefBytes, err := t.fallback.LoadBeef(ctx, txid)
-		if err == nil {
-			// Cache the result from fallback
-			t.SaveBeef(ctx, txid, beefBytes)
-		}
-		return beefBytes, err
-	}
-
-	return nil, ErrNotFound
+	return beefBytes, nil
 }
 
 func (t *RedisBeefStorage) testHExpireSupport() bool {
@@ -102,7 +88,7 @@ func (t *RedisBeefStorage) testHExpireSupport() bool {
 	return err == nil
 }
 
-func (t *RedisBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
+func (t *RedisBeefStorage) Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
 	txidStr := txid.String()
 	_, err := t.db.Pipelined(ctx, func(p redis.Pipeliner) error {
 		if err := p.HSet(ctx, BeefKey, txidStr, beefBytes).Err(); err != nil {
@@ -129,37 +115,15 @@ func parseRedisQueryParams(query string) map[string]string {
 	return params
 }
 
-// Close closes the Redis client connection and fallback storage
-func (r *RedisBeefStorage) Close() error {
-	var errs []error
-	
-	if r.db != nil {
-		if err := r.db.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close Redis client: %w", err))
-		}
-	}
-	
-	if r.fallback != nil {
-		if err := r.fallback.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("failed to close fallback storage: %w", err))
-		}
-	}
-	
-	if len(errs) > 0 {
-		return fmt.Errorf("errors closing Redis beef storage: %v", errs)
-	}
-	return nil
+// UpdateMerklePath is not supported by Redis storage
+func (r *RedisBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	return nil, nil
 }
 
-// UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
-func (r *RedisBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
-	if r.fallback != nil {
-		beefBytes, err := r.fallback.UpdateMerklePath(ctx, txid, ct)
-		if err == nil && len(beefBytes) > 0 {
-			// Update our own storage with the new beef
-			r.SaveBeef(ctx, txid, beefBytes)
-		}
-		return beefBytes, err
+// Close closes the Redis client connection
+func (r *RedisBeefStorage) Close() error {
+	if r.db != nil {
+		return r.db.Close()
 	}
-	return nil, ErrNotFound
+	return nil
 }

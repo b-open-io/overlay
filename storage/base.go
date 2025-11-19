@@ -5,12 +5,12 @@ import (
 	"fmt"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/headers"
 	"github.com/b-open-io/overlay/pubsub"
 	"github.com/b-open-io/overlay/queue"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/transaction"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 )
 
 // IMMUTABILITY_DEPTH defines how many blocks deep an output must be to be considered immutable
@@ -19,24 +19,24 @@ const IMMUTABILITY_DEPTH = 100
 // BaseEventDataStorage provides common fields and methods for all EventDataStorage implementations
 // This uses Go's struct embedding to achieve code reuse across different storage backends
 type BaseEventDataStorage struct {
-	beefStore     beef.BeefStorage
-	pubsub        pubsub.PubSub      // Generic PubSub interface for event publishing and buffering
-	queueStorage  queue.QueueStorage // QueueStorage interface for Redis-like operations
-	headersClient *headers.Client    // Headers client for merkle validation and chain state
+	beefStore    *beef.Storage
+	pubsub       pubsub.PubSub                // Generic PubSub interface for event publishing and buffering
+	queueStorage queue.QueueStorage           // QueueStorage interface for Redis-like operations
+	chainTracker chaintracker.ChainTracker    // ChainTracker for merkle validation and chain state
 }
 
 // NewBaseEventDataStorage creates a new BaseEventDataStorage with the given dependencies
-func NewBaseEventDataStorage(beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, headersClient *headers.Client) BaseEventDataStorage {
+func NewBaseEventDataStorage(beefStore *beef.Storage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, chainTracker chaintracker.ChainTracker) BaseEventDataStorage {
 	return BaseEventDataStorage{
-		beefStore:     beefStore,
-		queueStorage:  queueStorage,
-		pubsub:        pubsub,
-		headersClient: headersClient,
+		beefStore:    beefStore,
+		queueStorage: queueStorage,
+		pubsub:       pubsub,
+		chainTracker: chainTracker,
 	}
 }
 
 // GetBeefStorage returns the underlying BEEF storage implementation
-func (b *BaseEventDataStorage) GetBeefStorage() beef.BeefStorage {
+func (b *BaseEventDataStorage) GetBeefStorage() *beef.Storage {
 	return b.beefStore
 }
 
@@ -51,9 +51,9 @@ func (b *BaseEventDataStorage) GetQueueStorage() queue.QueueStorage {
 	return b.queueStorage
 }
 
-// GetHeadersClient returns the Headers client for merkle validation and chain state
-func (b *BaseEventDataStorage) GetHeadersClient() *headers.Client {
-	return b.headersClient
+// GetChainTracker returns the ChainTracker for merkle validation and chain state
+func (b *BaseEventDataStorage) GetChainTracker() chaintracker.ChainTracker {
+	return b.chainTracker
 }
 
 // ExtractMerkleInfoFromBEEF parses BEEF and extracts merkle path information
@@ -96,10 +96,10 @@ func (b *BaseEventDataStorage) ExtractMerkleInfoFromBEEF(ctx context.Context, tx
 	validationState = engine.MerkleStateValidated
 
 	// Check if it should be immutable
-	if b.headersClient != nil {
-		chaintip, err := b.headersClient.GetChaintip(ctx)
-		if err == nil && chaintip != nil {
-			depth := chaintip.Height - blockHeight
+	if b.chainTracker != nil {
+		currentHeight, err := b.chainTracker.CurrentHeight(ctx)
+		if err == nil {
+			depth := currentHeight - blockHeight
 			if depth >= IMMUTABILITY_DEPTH {
 				validationState = engine.MerkleStateImmutable
 			}

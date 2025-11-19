@@ -12,14 +12,13 @@ import (
 	"time"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/headers"
 	"github.com/b-open-io/overlay/pubsub"
 	"github.com/b-open-io/overlay/queue"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
-	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -32,10 +31,10 @@ type SQLiteTopicDataStorage struct {
 
 // GetBeefStorage is inherited from BaseEventDataStorage
 
-func NewSQLiteTopicDataStorage(topic string, connectionString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, headersClient *headers.Client) (TopicDataStorage, error) {
+func NewSQLiteTopicDataStorage(topic string, connectionString string, beefStore *beef.Storage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, chainTracker chaintracker.ChainTracker) (TopicDataStorage, error) {
 	var err error
 	s := &SQLiteTopicDataStorage{
-		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub, headersClient),
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub, chainTracker),
 		topic:                topic,
 	}
 
@@ -143,13 +142,11 @@ func (s *SQLiteTopicDataStorage) createTables() error {
 		`CREATE TABLE IF NOT EXISTS outputs (
 			outpoint TEXT NOT NULL PRIMARY KEY,
 			txid TEXT NOT NULL,
-			script BLOB NOT NULL,
-			satoshis INTEGER NOT NULL,
 			spend TEXT,
 			block_height INTEGER,
 			block_idx INTEGER,
 			score REAL,
-			ancillary_beef BLOB,
+			metadata TEXT,
 			data TEXT,
 			merkle_root TEXT,
 			merkle_validation_state INTEGER DEFAULT 0,
@@ -176,14 +173,6 @@ func (s *SQLiteTopicDataStorage) createTables() error {
 			score REAL,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)`,
-
-		`CREATE TABLE IF NOT EXISTS output_relationships (
-			consuming_outpoint TEXT NOT NULL,
-			consumed_outpoint TEXT NOT NULL,
-			PRIMARY KEY (consuming_outpoint, consumed_outpoint)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_output_rel_consuming ON output_relationships(consuming_outpoint)`,
-		`CREATE INDEX IF NOT EXISTS idx_output_rel_consumed ON output_relationships(consumed_outpoint)`,
 	}
 
 	for _, query := range queries {
@@ -220,62 +209,55 @@ func (s *SQLiteTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 		merkleRootStr = merkleRoot.String()
 	}
 
-	// Begin transaction
-	tx, err := s.wdb.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+	// Build metadata object
+	metadata := OutputMetadata{}
 
-	// Insert output with merkle info in a single operation
-	_, err = tx.ExecContext(ctx, `
-		INSERT OR REPLACE INTO outputs (outpoint, txid, script, satoshis,
-			block_height, block_idx, score, ancillary_beef,
+	// Convert AncillaryTxids to string array
+	if len(utxo.AncillaryTxids) > 0 {
+		metadata.AncillaryTxids = make([]string, len(utxo.AncillaryTxids))
+		for i, txid := range utxo.AncillaryTxids {
+			metadata.AncillaryTxids[i] = txid.String()
+		}
+	}
+
+	// Convert OutputsConsumed to string array
+	if len(utxo.OutputsConsumed) > 0 {
+		metadata.OutputsConsumed = make([]string, len(utxo.OutputsConsumed))
+		for i, outpoint := range utxo.OutputsConsumed {
+			metadata.OutputsConsumed[i] = outpoint.String()
+		}
+	}
+
+	// Convert ConsumedBy to string array
+	if len(utxo.ConsumedBy) > 0 {
+		metadata.ConsumedBy = make([]string, len(utxo.ConsumedBy))
+		for i, outpoint := range utxo.ConsumedBy {
+			metadata.ConsumedBy[i] = outpoint.String()
+		}
+	}
+
+	// Marshal metadata to JSON
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	// Insert output with merkle info and metadata in a single operation
+	_, err = s.wdb.ExecContext(ctx, `
+		INSERT OR REPLACE INTO outputs (outpoint, txid,
+			block_height, block_idx, score, metadata,
 			merkle_root, merkle_validation_state)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		utxo.Outpoint.String(),
 		utxo.Outpoint.Txid.String(),
-		utxo.Script.Bytes(),
-		utxo.Satoshis,
 		utxo.BlockHeight,
 		utxo.BlockIdx,
 		utxo.Score,
-		utxo.AncillaryBeef,
+		string(metadataJSON),
 		merkleRootStr,
 		validationState,
 	)
 	if err != nil {
-		return err
-	}
-
-	// Insert output relationships
-	// For OutputsConsumed: this output consumes others
-	for _, consumed := range utxo.OutputsConsumed {
-		_, err = tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO output_relationships (consuming_outpoint, consumed_outpoint)
-			VALUES (?, ?)`,
-			utxo.Outpoint.String(), // This output is the consumer
-			consumed.String(),      // This is what it consumes
-		)
-		if err != nil {
-			return err
-		}
-	}
-
-	// For ConsumedBy: other outputs consume this one
-	for _, consumedBy := range utxo.ConsumedBy {
-		_, err = tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO output_relationships (consuming_outpoint, consumed_outpoint)
-			VALUES (?, ?)`,
-			consumedBy.String(),    // The other output is the consumer
-			utxo.Outpoint.String(), // This output is being consumed
-		)
-		if err != nil {
-			return err
-		}
-	}
-
-	if err = tx.Commit(); err != nil {
 		return err
 	}
 
@@ -288,8 +270,8 @@ func (s *SQLiteTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 }
 
 func (s *SQLiteTopicDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, spent *bool, includeBEEF bool) (*engine.Output, error) {
-	query := `SELECT outpoint, txid, script, satoshis, spend, 
-		block_height, block_idx, score, ancillary_beef 
+	query := `SELECT outpoint, txid, spend,
+		block_height, block_idx, score, metadata
 		FROM outputs WHERE outpoint = ?`
 	args := []interface{}{outpoint.String()}
 
@@ -306,20 +288,17 @@ func (s *SQLiteTopicDataStorage) FindOutput(ctx context.Context, outpoint *trans
 
 	var output engine.Output
 	var outpointStr, txidStr string
-	var scriptBytes []byte
-	var ancillaryBeef []byte
+	var metadataJSON sql.NullString
 	var spendTxid *string
 
 	err := s.rdb.QueryRowContext(ctx, query, args...).Scan(
 		&outpointStr,
 		&txidStr,
-		&scriptBytes,
-		&output.Satoshis,
-		&spendTxid, // Now scanning spend field as *string
+		&spendTxid,
 		&output.BlockHeight,
 		&output.BlockIdx,
 		&output.Score,
-		&ancillaryBeef,
+		&metadataJSON,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -340,23 +319,57 @@ func (s *SQLiteTopicDataStorage) FindOutput(ctx context.Context, outpoint *trans
 	// Set spent status based on whether spend field has a value
 	output.Spent = spendTxid != nil
 
-	// Parse script
-	output.Script = script.NewFromBytes(scriptBytes)
+	// Parse metadata from JSON
+	if metadataJSON.Valid && metadataJSON.String != "" {
+		var metadata OutputMetadata
+		if err := json.Unmarshal([]byte(metadataJSON.String), &metadata); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
+		}
 
-	output.AncillaryBeef = ancillaryBeef
+		// Parse ancillary txids
+		if len(metadata.AncillaryTxids) > 0 {
+			output.AncillaryTxids = make([]*chainhash.Hash, 0, len(metadata.AncillaryTxids))
+			for _, txidStr := range metadata.AncillaryTxids {
+				hash, err := chainhash.NewHashFromHex(txidStr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid ancillary txid %s: %w", txidStr, err)
+				}
+				output.AncillaryTxids = append(output.AncillaryTxids, hash)
+			}
+		}
+
+		// Parse outputs consumed
+		if len(metadata.OutputsConsumed) > 0 {
+			output.OutputsConsumed = make([]*transaction.Outpoint, 0, len(metadata.OutputsConsumed))
+			for _, opStr := range metadata.OutputsConsumed {
+				op, err := transaction.OutpointFromString(opStr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid outputs consumed outpoint %s: %w", opStr, err)
+				}
+				output.OutputsConsumed = append(output.OutputsConsumed, op)
+			}
+		}
+
+		// Parse consumed by
+		if len(metadata.ConsumedBy) > 0 {
+			output.ConsumedBy = make([]*transaction.Outpoint, 0, len(metadata.ConsumedBy))
+			for _, opStr := range metadata.ConsumedBy {
+				op, err := transaction.OutpointFromString(opStr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid consumed by outpoint %s: %w", opStr, err)
+				}
+				output.ConsumedBy = append(output.ConsumedBy, op)
+			}
+		}
+	}
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid)
+		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, output.AncillaryTxids)
 		if err != nil {
 			return nil, err
 		}
 		output.Beef = beef
-	}
-
-	// Load consumed outputs
-	if err = s.loadOutputRelations(ctx, &output); err != nil {
-		return nil, err
 	}
 
 	return &output, nil
@@ -376,8 +389,8 @@ func (s *SQLiteTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*t
 		args = append(args, op.String())
 	}
 
-	query := fmt.Sprintf(`SELECT outpoint, txid, script, satoshis, spend, 
-		block_height, block_idx, score, ancillary_beef 
+	query := fmt.Sprintf(`SELECT outpoint, txid, spend,
+		block_height, block_idx, score, metadata
 		FROM outputs WHERE outpoint IN (%s)`, strings.Join(placeholders, ","))
 
 	if spent != nil {
@@ -420,8 +433,8 @@ func (s *SQLiteTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*t
 }
 
 func (s *SQLiteTopicDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
-	query := `SELECT outpoint, txid, script, satoshis, spend, 
-		block_height, block_idx, score, ancillary_beef 
+	query := `SELECT outpoint, txid, spend,
+		block_height, block_idx, score, metadata
 		FROM outputs WHERE txid = ?`
 
 	rows, err := s.rdb.QueryContext(ctx, query, txid.String())
@@ -444,9 +457,9 @@ func (s *SQLiteTopicDataStorage) FindOutputsForTransaction(ctx context.Context, 
 
 func (s *SQLiteTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
 
-	query := `SELECT outpoint, txid, script, satoshis, spend, 
-		block_height, block_idx, score, ancillary_beef 
-		FROM outputs 
+	query := `SELECT outpoint, txid, spend,
+		block_height, block_idx, score, metadata
+		FROM outputs
 		WHERE score >= ? -- AND spend IS NULL
 		ORDER BY score`
 
@@ -572,7 +585,7 @@ func (s *SQLiteTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, txid
 	return nil
 }
 
-func (s *SQLiteTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
+func (s *SQLiteTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64) error {
 	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -581,11 +594,10 @@ func (s *SQLiteTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, ou
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE outputs
-		SET block_height = ?, block_idx = ?, ancillary_beef = ?, score = ?
+		SET block_height = ?, block_idx = ?, score = ?
 		WHERE outpoint = ?`,
 		blockHeight,
 		blockIndex,
-		ancillaryBeef,
 		float64(time.Now().UnixNano()),
 		outpoint.String(),
 	)
@@ -646,20 +658,17 @@ func (s *SQLiteTopicDataStorage) Close() error {
 func (s *SQLiteTopicDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*engine.Output, error) {
 	var output engine.Output
 	var outpointStr, txidStr string
-	var scriptBytes []byte
-	var ancillaryBeef []byte
-	var spendTxid *string // Changed from Spent bool to spendTxid *string
+	var metadataJSON sql.NullString
+	var spendTxid *string
 
 	err := rows.Scan(
 		&outpointStr,
 		&txidStr,
-		&scriptBytes,
-		&output.Satoshis,
-		&spendTxid, // Now scanning the spend field as *string
+		&spendTxid,
 		&output.BlockHeight,
 		&output.BlockIdx,
 		&output.Score,
-		&ancillaryBeef,
+		&metadataJSON,
 	)
 	if err != nil {
 		return nil, err
@@ -678,14 +687,56 @@ func (s *SQLiteTopicDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*
 	// Set spent status based on whether spend field has a value
 	output.Spent = spendTxid != nil
 
-	// Parse script
-	output.Script = script.NewFromBytes(scriptBytes)
+	// Parse metadata from JSON
+	if metadataJSON.Valid && metadataJSON.String != "" {
+		var metadata OutputMetadata
+		if err := json.Unmarshal([]byte(metadataJSON.String), &metadata); err != nil {
+			log.Printf("Failed to unmarshal metadata: %v", err)
+		} else {
+			// Parse ancillary txids
+			if len(metadata.AncillaryTxids) > 0 {
+				output.AncillaryTxids = make([]*chainhash.Hash, 0, len(metadata.AncillaryTxids))
+				for _, txidStr := range metadata.AncillaryTxids {
+					hash, err := chainhash.NewHashFromHex(txidStr)
+					if err != nil {
+						log.Printf("Invalid ancillary txid %s: %v", txidStr, err)
+						continue
+					}
+					output.AncillaryTxids = append(output.AncillaryTxids, hash)
+				}
+			}
 
-	output.AncillaryBeef = ancillaryBeef
+			// Parse outputs consumed
+			if len(metadata.OutputsConsumed) > 0 {
+				output.OutputsConsumed = make([]*transaction.Outpoint, 0, len(metadata.OutputsConsumed))
+				for _, opStr := range metadata.OutputsConsumed {
+					op, err := transaction.OutpointFromString(opStr)
+					if err != nil {
+						log.Printf("Invalid outputs consumed outpoint %s: %v", opStr, err)
+						continue
+					}
+					output.OutputsConsumed = append(output.OutputsConsumed, op)
+				}
+			}
+
+			// Parse consumed by
+			if len(metadata.ConsumedBy) > 0 {
+				output.ConsumedBy = make([]*transaction.Outpoint, 0, len(metadata.ConsumedBy))
+				for _, opStr := range metadata.ConsumedBy {
+					op, err := transaction.OutpointFromString(opStr)
+					if err != nil {
+						log.Printf("Invalid consumed by outpoint %s: %v", opStr, err)
+						continue
+					}
+					output.ConsumedBy = append(output.ConsumedBy, op)
+				}
+			}
+		}
+	}
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid)
+		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid, output.AncillaryTxids)
 		if err != nil {
 			log.Printf("Failed to load BEEF for %s: %v", output.Outpoint.Txid, err)
 		} else {
@@ -693,65 +744,15 @@ func (s *SQLiteTopicDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*
 		}
 	}
 
-	// Load relations
-	if err = s.loadOutputRelations(context.Background(), &output); err != nil {
-		return nil, err
-	}
-
 	return &output, nil
 }
 
-func (s *SQLiteTopicDataStorage) loadOutputRelations(ctx context.Context, output *engine.Output) error {
-	// Load outputs consumed by this output (this output is the consumer)
-	rows, err := s.rdb.QueryContext(ctx,
-		"SELECT consumed_outpoint FROM output_relationships WHERE consuming_outpoint = ?",
-		output.Outpoint.String())
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var opStr string
-		if err := rows.Scan(&opStr); err != nil {
-			return err
-		}
-		op, err := transaction.OutpointFromString(opStr)
-		if err != nil {
-			return err
-		}
-		output.OutputsConsumed = append(output.OutputsConsumed, op)
-	}
-
-	// Load outputs that consume this output (this output is being consumed)
-	rows2, err := s.rdb.QueryContext(ctx,
-		"SELECT consuming_outpoint FROM output_relationships WHERE consumed_outpoint = ?",
-		output.Outpoint.String())
-	if err != nil {
-		return err
-	}
-	defer rows2.Close()
-
-	for rows2.Next() {
-		var opStr string
-		if err := rows2.Scan(&opStr); err != nil {
-			return err
-		}
-		op, err := transaction.OutpointFromString(opStr)
-		if err != nil {
-			return err
-		}
-		output.ConsumedBy = append(output.ConsumedBy, op)
-	}
-
-	return nil
-}
 
 // GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height
 func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, height uint32) ([]*TransactionData, error) {
 	// Query 1: Get all outputs for the topic and block height, including data field
-	query := `SELECT outpoint, txid, script, satoshis, spend, data 
-	         FROM outputs 
+	query := `SELECT outpoint, txid, spend, data
+	         FROM outputs
 	         WHERE block_height = ?
 	         ORDER BY txid, outpoint`
 
@@ -766,12 +767,10 @@ func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, he
 
 	for rows.Next() {
 		var outpointStr, txidStr string
-		var scriptBytes []byte
-		var satoshis uint64
 		var spendTxid *string
 		var dataJSON *string
 
-		err := rows.Scan(&outpointStr, &txidStr, &scriptBytes, &satoshis, &spendTxid, &dataJSON)
+		err := rows.Scan(&outpointStr, &txidStr, &spendTxid, &dataJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -794,8 +793,6 @@ func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, he
 		outputData := &OutputData{
 			Vout:     outpoint.Index,
 			Data:     data,
-			Script:   scriptBytes,
-			Satoshis: satoshis,
 		}
 
 		// Parse txid
@@ -829,7 +826,7 @@ func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, he
 		args[i] = txid
 	}
 
-	inputQuery := fmt.Sprintf(`SELECT outpoint, txid, script, satoshis, spend, data 
+	inputQuery := fmt.Sprintf(`SELECT outpoint, txid, spend, data
 	                          FROM outputs WHERE spend IN (%s)`, strings.Join(placeholders, ","))
 
 	inputRows, err := s.rdb.QueryContext(ctx, inputQuery, args...)
@@ -842,12 +839,10 @@ func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, he
 	txInputMap := make(map[chainhash.Hash][]*OutputData)
 	for inputRows.Next() {
 		var outpointStr, txidStr string
-		var scriptBytes []byte
-		var satoshis uint64
 		var spendTxidStr *string
 		var dataJSON *string
 
-		err := inputRows.Scan(&outpointStr, &txidStr, &scriptBytes, &satoshis, &spendTxidStr, &dataJSON)
+		err := inputRows.Scan(&outpointStr, &txidStr, &spendTxidStr, &dataJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -877,8 +872,6 @@ func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, he
 			TxID:     sourceTxid,
 			Vout:     outpoint.Index,
 			Data:     data,
-			Script:   scriptBytes,
-			Satoshis: satoshis,
 		}
 
 		// Add to the spending transaction's inputs
@@ -910,8 +903,8 @@ func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, he
 // GetTransactionByTopic returns a single transaction for a topic by txid
 func (s *SQLiteTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid *chainhash.Hash, includeBeef ...bool) (*TransactionData, error) {
 	// Query 1: Get all outputs for the specific transaction and topic
-	query := `SELECT outpoint, txid, script, satoshis, spend, data, block_height, block_idx
-	         FROM outputs 
+	query := `SELECT outpoint, txid, spend, data, block_height, block_idx
+	         FROM outputs
 	         WHERE txid = ?
 	         ORDER BY outpoint`
 
@@ -928,12 +921,10 @@ func (s *SQLiteTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid 
 	// Process outputs
 	for rows.Next() {
 		var outpointStr, txidStr string
-		var scriptBytes []byte
-		var satoshis uint64
 		var spendStr sql.NullString
 		var dataJSON sql.NullString
 
-		err := rows.Scan(&outpointStr, &txidStr, &scriptBytes, &satoshis, &spendStr, &dataJSON, &blockHeight, &blockIndex)
+		err := rows.Scan(&outpointStr, &txidStr, &spendStr, &dataJSON, &blockHeight, &blockIndex)
 		if err != nil {
 			return nil, err
 		}
@@ -962,8 +953,6 @@ func (s *SQLiteTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid 
 			// TxID:     txid,
 			Vout:     outpoint.Index,
 			Data:     data,
-			Script:   scriptBytes,
-			Satoshis: satoshis,
 			Spend:    spend,
 		}
 
@@ -977,8 +966,8 @@ func (s *SQLiteTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid 
 
 	// Query 2: Get all inputs for this transaction using spend references
 	var inputs []*OutputData
-	inputQuery := `SELECT outpoint, txid, script, satoshis, data 
-	              FROM outputs 
+	inputQuery := `SELECT outpoint, txid, data
+	              FROM outputs
 	              WHERE spend = ?`
 
 	inputRows, err := s.rdb.QueryContext(ctx, inputQuery, txid.String())
@@ -989,11 +978,9 @@ func (s *SQLiteTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid 
 
 	for inputRows.Next() {
 		var outpointStr, txidStr string
-		var script []byte
-		var satoshis uint64
 		var dataJSON sql.NullString
 
-		err := inputRows.Scan(&outpointStr, &txidStr, &script, &satoshis, &dataJSON)
+		err := inputRows.Scan(&outpointStr, &txidStr, &dataJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -1018,8 +1005,6 @@ func (s *SQLiteTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid 
 			TxID:     &sourceTxid,
 			Vout:     outpoint.Index,
 			Data:     data,
-			Script:   script,
-			Satoshis: satoshis,
 		}
 
 		inputs = append(inputs, input)
@@ -1367,34 +1352,50 @@ func (s *SQLiteTopicDataStorage) GetOutputData(ctx context.Context, outpoint *tr
 
 // LoadBeefByTxidAndTopic loads merged BEEF for a transaction within a topic context
 func (s *SQLiteTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
-	// Find any output for this txid in the specified topic
-	var ancillaryBeef []byte
+	// Find any output for this txid and load its metadata
+	var metadataJSON sql.NullString
 	err := s.rdb.QueryRowContext(ctx,
-		"SELECT ancillary_beef FROM outputs WHERE txid = ? LIMIT 1",
+		"SELECT metadata FROM outputs WHERE txid = ? LIMIT 1",
 		txid.String(),
-	).Scan(&ancillaryBeef)
+	).Scan(&metadataJSON)
 
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("transaction %s not found in topic %s", txid.String(), s.topic)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("transaction %s not found in topic %s: %w", txid.String(), s.topic, err)
+		return nil, fmt.Errorf("failed to check transaction %s in topic %s: %w", txid.String(), s.topic, err)
 	}
 
-	// Get BEEF from beef storage
-	beefBytes, err := s.beefStore.LoadBeef(ctx, txid)
+	// Parse metadata from JSON
+	var ancillaryTxids []*chainhash.Hash
+	if metadataJSON.Valid && metadataJSON.String != "" {
+		var metadata OutputMetadata
+		if err := json.Unmarshal([]byte(metadataJSON.String), &metadata); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
+		}
+
+		// Parse ancillary txids
+		if len(metadata.AncillaryTxids) > 0 {
+			for _, txidStr := range metadata.AncillaryTxids {
+				hash, err := chainhash.NewHashFromHex(txidStr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid ancillary txid %s: %w", txidStr, err)
+				}
+				ancillaryTxids = append(ancillaryTxids, hash)
+			}
+		}
+	}
+
+	// Get BEEF from beef storage with ancillary txids (LoadBeef will merge them)
+	beefBytes, err := s.beefStore.LoadBeef(ctx, txid, ancillaryTxids)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load BEEF: %w", err)
 	}
 
-	// Parse the main BEEF
+	// Parse the BEEF
 	beef, _, _, err := transaction.ParseBeef(beefBytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse main BEEF: %w", err)
-	}
-
-	// Merge AncillaryBeef if present (field is optional)
-	if len(ancillaryBeef) > 0 {
-		if err := beef.MergeBeefBytes(ancillaryBeef); err != nil {
-			return nil, fmt.Errorf("failed to merge AncillaryBeef: %w", err)
-		}
+		return nil, fmt.Errorf("failed to parse BEEF: %w", err)
 	}
 
 	// Get atomic BEEF bytes for the specific transaction
@@ -1413,7 +1414,7 @@ func (s *SQLiteTopicDataStorage) FindOutputData(ctx context.Context, question *E
 
 	// Base query selecting OutputData fields including txid and spending txid
 	query.WriteString(`
-		SELECT DISTINCT o.outpoint, o.script, o.satoshis, o.data, o.spend, o.score
+		SELECT DISTINCT o.outpoint, o.data, o.spend, o.score
 		FROM outputs o
 	`)
 	// LEFT JOIN outputs s ON s.spend = o.txid AND s.topic = o.topic
@@ -1492,13 +1493,11 @@ func (s *SQLiteTopicDataStorage) FindOutputData(ctx context.Context, question *E
 	var results []*OutputData
 	for rows.Next() {
 		var outpointStr string
-		var script []byte
-		var satoshis uint64
 		var dataJSON *string
 		var spendingTxidStr *string
 		var score float64
 
-		if err := rows.Scan(&outpointStr, &script, &satoshis, &dataJSON, &spendingTxidStr, &score); err != nil {
+		if err := rows.Scan(&outpointStr, &dataJSON, &spendingTxidStr, &score); err != nil {
 			return nil, err
 		}
 
@@ -1519,8 +1518,6 @@ func (s *SQLiteTopicDataStorage) FindOutputData(ctx context.Context, question *E
 		result := &OutputData{
 			TxID:     &outpoint.Txid,
 			Vout:     outpoint.Index,
-			Script:   script,
-			Satoshis: satoshis,
 			Spend:    spendTxid,
 			Score:    score,
 		}
@@ -1614,14 +1611,14 @@ func (s *SQLiteTopicDataStorage) FindOutpointsByMerkleState(ctx context.Context,
 // This includes promoting to Immutable at sufficient depth or Invalidating if merkle root changed
 // Assumes merkle roots cache is already current via SyncMerkleRoots
 func (s *SQLiteTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Context) error {
-	if s.headersClient == nil {
-		return fmt.Errorf("headers client not configured")
+	if s.chainTracker == nil {
+		return fmt.Errorf("chain tracker not configured")
 	}
 
 	// Get current chain tip for immutability calculations
-	chaintip, err := s.headersClient.GetChaintip(ctx)
+	currentHeight, err := s.chainTracker.CurrentHeight(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get chaintip: %w", err)
+		return fmt.Errorf("failed to get current height: %w", err)
 	}
 
 	// Find all unique block heights with Validated outputs
@@ -1644,29 +1641,29 @@ func (s *SQLiteTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Conte
 			return err
 		}
 
-		// Get the correct merkle root from our cache
-		correctRoot, err := s.headersClient.GetMerkleRootForHeight(ctx, height)
-		if err != nil {
-			// If we can't get the merkle root, skip this height
-			continue
-		}
-
 		// Check if we need to reconcile:
 		// 1. Height has reached immutable depth, OR
 		// 2. Merkle root has changed (indicating reorg)
-		needsReconcile := chaintip.Height-height >= IMMUTABILITY_DEPTH
+		needsReconcile := currentHeight-height >= IMMUTABILITY_DEPTH
 
-		// Check if merkle root has changed
+		// Check if merkle root has changed (if we have a stored root)
+		var correctRoot *chainhash.Hash
 		if !needsReconcile && storedRootStr != nil && *storedRootStr != "" {
 			storedRoot, err := chainhash.NewHashFromHex(*storedRootStr)
 			if err != nil {
 				needsReconcile = true // If we can't parse it, reconcile it
-			} else if !storedRoot.IsEqual(correctRoot) {
-				needsReconcile = true
+			} else {
+				// Validate if this root is correct for this height
+				isValid, err := s.chainTracker.IsValidRootForHeight(ctx, storedRoot, height)
+				if err != nil || !isValid {
+					needsReconcile = true
+				}
 			}
 		}
 
 		// Reconcile if needed
+		// Note: correctRoot is nil here since we're using IsValidRootForHeight
+		// The ReconcileMerkleRoot will need to handle validation differently
 		if needsReconcile {
 			if err := s.ReconcileMerkleRoot(ctx, height, correctRoot); err != nil {
 				return fmt.Errorf("failed to reconcile height %d: %w", height, err)
@@ -1686,10 +1683,10 @@ func (s *SQLiteTopicDataStorage) ReconcileMerkleRoot(ctx context.Context, blockH
 
 	// Determine if this height should be immutable
 	isImmutable := false
-	if s.headersClient != nil {
-		chaintip, err := s.headersClient.GetChaintip(ctx)
-		if err == nil && chaintip != nil {
-			depth := chaintip.Height - blockHeight
+	if s.chainTracker != nil {
+		currentHeight, err := s.chainTracker.CurrentHeight(ctx)
+		if err == nil {
+			depth := currentHeight - blockHeight
 			isImmutable = depth >= IMMUTABILITY_DEPTH
 		}
 	}

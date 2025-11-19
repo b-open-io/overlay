@@ -53,7 +53,7 @@ type LibP2PSync struct {
 	inFlightMutex *sync.RWMutex
 	engine       engine.OverlayEngineProvider
 	storage      engine.Storage
-	beefStorage  beef.BeefStorage
+	beefStorage  *beef.Storage
 	
 	// Lifecycle management
 	ctx    context.Context
@@ -69,7 +69,7 @@ type LibP2PEvent struct {
 }
 
 // NewLibP2PSync creates a new libp2p-based sync manager
-func NewLibP2PSync(engine engine.OverlayEngineProvider, storage engine.Storage, beefStorage beef.BeefStorage) (*LibP2PSync, error) {
+func NewLibP2PSync(engine engine.OverlayEngineProvider, storage engine.Storage, beefStorage *beef.Storage) (*LibP2PSync, error) {
 	// Load or create Bitcoin secp256k1 private key
 	privKey, err := loadOrCreatePrivateKey()
 	if err != nil {
