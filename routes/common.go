@@ -15,7 +15,7 @@ import (
 // RoutesConfig holds the configuration for common 1sat routes
 type RoutesConfig struct {
 	Storage      *storage.EventDataStorage
-	ChainTracker *chaintracks.ChainManager
+	ChainTracker chaintracks.Chaintracks
 	Engine       *engine.Engine
 }
 

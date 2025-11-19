@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.39.1
 	github.com/aws/aws-sdk-go-v2/config v1.31.10
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.88.2
-	github.com/bsv-blockchain/go-chaintracks v0.0.0-00010101000000-000000000000
+	github.com/bsv-blockchain/go-chaintracks v1.0.2
 	github.com/bsv-blockchain/go-overlay-services v0.1.1
 	github.com/bsv-blockchain/go-sdk v1.2.12
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
@@ -184,8 +184,6 @@ replace github.com/bsv-blockchain/go-overlay-services => github.com/bsv-blockcha
 
 // replace github.com/bsv-blockchain/go-overlay-services => ../go-overlay-services
 
-replace github.com/bsv-blockchain/go-sdk => github.com/bsv-blockchain/go-sdk v1.2.12-0.20251119144503-b56b04569fb3
+replace github.com/bsv-blockchain/go-sdk => github.com/bsv-blockchain/go-sdk v1.2.12-0.20251119181029-d6554738622b
 
 // replace github.com/bsv-blockchain/go-sdk => ../go-sdk
-
-replace github.com/bsv-blockchain/go-chaintracks => github.com/bsv-blockchain/go-chaintracks v0.0.0-20251118174625-5aa03aeb7dcc
