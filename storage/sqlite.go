@@ -747,7 +747,6 @@ func (s *SQLiteTopicDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*
 	return &output, nil
 }
 
-
 // GetTransactionsByTopicAndHeight returns all transactions for a topic at a specific block height
 func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, height uint32) ([]*TransactionData, error) {
 	// Query 1: Get all outputs for the topic and block height, including data field
@@ -791,8 +790,8 @@ func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, he
 
 		// Create OutputData
 		outputData := &OutputData{
-			Vout:     outpoint.Index,
-			Data:     data,
+			Vout: outpoint.Index,
+			Data: data,
 		}
 
 		// Parse txid
@@ -869,9 +868,9 @@ func (s *SQLiteTopicDataStorage) GetTransactionsByHeight(ctx context.Context, he
 
 		// Create OutputData for input (includes source txid)
 		inputData := &OutputData{
-			TxID:     sourceTxid,
-			Vout:     outpoint.Index,
-			Data:     data,
+			TxID: sourceTxid,
+			Vout: outpoint.Index,
+			Data: data,
 		}
 
 		// Add to the spending transaction's inputs
@@ -950,10 +949,9 @@ func (s *SQLiteTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid 
 		}
 
 		output := &OutputData{
-			// TxID:     txid,
-			Vout:     outpoint.Index,
-			Data:     data,
-			Spend:    spend,
+			Vout:  outpoint.Index,
+			Data:  data,
+			Spend: spend,
 		}
 
 		outputs = append(outputs, output)
@@ -1002,9 +1000,9 @@ func (s *SQLiteTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid 
 		// Create OutputData for input with source txid
 		sourceTxid := outpoint.Txid
 		input := &OutputData{
-			TxID:     &sourceTxid,
-			Vout:     outpoint.Index,
-			Data:     data,
+			TxID: &sourceTxid,
+			Vout: outpoint.Index,
+			Data: data,
 		}
 
 		inputs = append(inputs, input)
@@ -1516,10 +1514,10 @@ func (s *SQLiteTopicDataStorage) FindOutputData(ctx context.Context, question *E
 		}
 
 		result := &OutputData{
-			TxID:     &outpoint.Txid,
-			Vout:     outpoint.Index,
-			Spend:    spendTxid,
-			Score:    score,
+			TxID:  &outpoint.Txid,
+			Vout:  outpoint.Index,
+			Spend: spendTxid,
+			Score: score,
 		}
 
 		// Parse data if present
