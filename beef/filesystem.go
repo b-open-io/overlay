@@ -7,15 +7,13 @@ import (
 	"path/filepath"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
-	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 )
 
 type FilesystemBeefStorage struct {
 	basePath string
-	fallback BeefStorage
 }
 
-func NewFilesystemBeefStorage(basePath string, fallback BeefStorage) (*FilesystemBeefStorage, error) {
+func NewFilesystemBeefStorage(basePath string) (*FilesystemBeefStorage, error) {
 	// Create base directory if it doesn't exist
 	if err := os.MkdirAll(basePath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create base directory: %w", err)
@@ -23,7 +21,6 @@ func NewFilesystemBeefStorage(basePath string, fallback BeefStorage) (*Filesyste
 
 	return &FilesystemBeefStorage{
 		basePath: basePath,
-		fallback: fallback,
 	}, nil
 }
 
@@ -37,33 +34,21 @@ func (t *FilesystemBeefStorage) getFilePath(txid *chainhash.Hash) string {
 	return filepath.Join(t.basePath, subDir, fileName)
 }
 
-func (t *FilesystemBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+func (t *FilesystemBeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	filePath := t.getFilePath(txid)
 
-	// Try to load from filesystem first
 	beefBytes, err := os.ReadFile(filePath)
-	if err == nil {
-		return beefBytes, nil
-	}
-
-	// If file doesn't exist, try fallback
 	if os.IsNotExist(err) {
-		if t.fallback != nil {
-			beefBytes, err = t.fallback.LoadBeef(ctx, txid)
-			if err == nil {
-				// Save to filesystem for future use
-				t.SaveBeef(ctx, txid, beefBytes)
-			}
-			return beefBytes, err
-		}
 		return nil, ErrNotFound
 	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
 
-	// For other errors, return them
-	return nil, fmt.Errorf("failed to read file: %w", err)
+	return beefBytes, nil
 }
 
-func (t *FilesystemBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
+func (t *FilesystemBeefStorage) Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
 	filePath := t.getFilePath(txid)
 
 	// Create subdirectory if it doesn't exist
@@ -88,18 +73,12 @@ func (t *FilesystemBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Ha
 	return nil
 }
 
-// UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
-func (f *FilesystemBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
-	if f.fallback != nil {
-		return f.fallback.UpdateMerklePath(ctx, txid, ct)
-	}
-	return nil, ErrNotFound
+// UpdateMerklePath is not supported by filesystem storage
+func (f *FilesystemBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	return nil, nil
 }
 
-// Close closes the fallback storage
+// Close is a no-op for filesystem storage
 func (f *FilesystemBeefStorage) Close() error {
-	if f.fallback != nil {
-		return f.fallback.Close()
-	}
 	return nil
 }

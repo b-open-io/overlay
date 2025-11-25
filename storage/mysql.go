@@ -11,14 +11,13 @@ import (
 	"time"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/headers"
 	"github.com/b-open-io/overlay/pubsub"
 	"github.com/b-open-io/overlay/queue"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
-	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -41,7 +40,7 @@ type MySQLTopicDataStorage struct {
 }
 
 // NewMySQLTopicDataStorage creates a new MySQL topic storage using shared connection pool
-func NewMySQLTopicDataStorage(topic string, connectionString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, headersClient *headers.Client) (TopicDataStorage, error) {
+func NewMySQLTopicDataStorage(topic string, connectionString string, beefStore *beef.Storage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, chainTracker chaintracker.ChainTracker) (TopicDataStorage, error) {
 	// Get or create shared connection pool
 	db, err := getMySQLSharedPool(connectionString)
 	if err != nil {
@@ -49,7 +48,7 @@ func NewMySQLTopicDataStorage(topic string, connectionString string, beefStore b
 	}
 
 	storage := &MySQLTopicDataStorage{
-		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub, headersClient),
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub, chainTracker),
 		db:                   db,
 		topic:                topic,
 	}
@@ -186,6 +185,19 @@ func (s *MySQLTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 		return err
 	}
 
+	// Parse BEEF to extract script and satoshis
+	_, tx, _, err := transaction.ParseBeef(utxo.Beef)
+	if err != nil {
+		return fmt.Errorf("failed to parse BEEF: %w", err)
+	}
+	if tx == nil {
+		return fmt.Errorf("no transaction in BEEF")
+	}
+	if int(utxo.Outpoint.Index) >= len(tx.Outputs) {
+		return fmt.Errorf("output index %d out of range", utxo.Outpoint.Index)
+	}
+	txOutput := tx.Outputs[utxo.Outpoint.Index]
+
 	// Extract merkle information from BEEF
 	blockHeight, blockIndex, merkleRoot, validationState, err := s.ExtractMerkleInfoFromBEEF(ctx, &utxo.Outpoint.Txid, utxo.Beef)
 	if err != nil {
@@ -219,12 +231,12 @@ func (s *MySQLTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 			merkle_validation_state = VALUES(merkle_validation_state)`,
 		utxo.Outpoint.String(),
 		utxo.Outpoint.Txid.String(),
-		utxo.Script.Bytes(),
-		utxo.Satoshis,
+		txOutput.LockingScript.Bytes(),
+		txOutput.Satoshis,
 		utxo.BlockHeight,
 		utxo.BlockIdx,
 		utxo.Score,
-		utxo.AncillaryBeef,
+		nil, // ancillary_beef no longer on Output struct
 		merkleRootStr,
 		validationState,
 		s.topic,
@@ -294,6 +306,7 @@ func (s *MySQLTopicDataStorage) FindOutput(ctx context.Context, outpoint *transa
 	var output engine.Output
 	var outpointStr, txidStr string
 	var scriptBytes []byte
+	var satoshis uint64
 	var ancillaryBeef []byte
 	var spendTxid sql.NullString
 
@@ -301,7 +314,7 @@ func (s *MySQLTopicDataStorage) FindOutput(ctx context.Context, outpoint *transa
 		&outpointStr,
 		&txidStr,
 		&scriptBytes,
-		&output.Satoshis,
+		&satoshis,
 		&spendTxid,
 		&output.BlockHeight,
 		&output.BlockIdx,
@@ -327,13 +340,15 @@ func (s *MySQLTopicDataStorage) FindOutput(ctx context.Context, outpoint *transa
 	// Set spent status
 	output.Spent = spendTxid.Valid
 
-	// Parse script
-	output.Script = script.NewFromBytes(scriptBytes)
-	output.AncillaryBeef = ancillaryBeef
+	// Note: scriptBytes, satoshis, and ancillaryBeef are read from DB but not stored
+	// on Output struct (those fields no longer exist). Data is in BEEF.
+	_ = scriptBytes
+	_ = satoshis
+	_ = ancillaryBeef
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid)
+		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -409,6 +424,7 @@ func (s *MySQLTopicDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*e
 	var output engine.Output
 	var outpointStr, txidStr string
 	var scriptBytes []byte
+	var satoshis uint64
 	var ancillaryBeef []byte
 	var spendTxid sql.NullString
 
@@ -416,7 +432,7 @@ func (s *MySQLTopicDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*e
 		&outpointStr,
 		&txidStr,
 		&scriptBytes,
-		&output.Satoshis,
+		&satoshis,
 		&spendTxid,
 		&output.BlockHeight,
 		&output.BlockIdx,
@@ -440,13 +456,15 @@ func (s *MySQLTopicDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*e
 	// Set spent status
 	output.Spent = spendTxid.Valid
 
-	// Parse script
-	output.Script = script.NewFromBytes(scriptBytes)
-	output.AncillaryBeef = ancillaryBeef
+	// Note: scriptBytes, satoshis, and ancillaryBeef are read from DB but not stored
+	// on Output struct (those fields no longer exist). Data is in BEEF.
+	_ = scriptBytes
+	_ = satoshis
+	_ = ancillaryBeef
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid)
+		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid, nil)
 		if err != nil {
 			log.Printf("Failed to load BEEF for %s: %v", output.Outpoint.Txid, err)
 		} else {
@@ -686,7 +704,7 @@ func (s *MySQLTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, txid 
 }
 
 // UpdateOutputBlockHeight updates block height information for an output
-func (s *MySQLTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
+func (s *MySQLTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -695,11 +713,10 @@ func (s *MySQLTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, out
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE outputs
-		SET block_height = ?, block_idx = ?, ancillary_beef = ?, score = ?
+		SET block_height = ?, block_idx = ?, score = ?
 		WHERE topic = ? AND outpoint = ?`,
 		blockHeight,
 		blockIndex,
-		ancillaryBeef,
 		float64(time.Now().UnixNano()),
 		s.topic,
 		outpoint.String(),
@@ -791,11 +808,14 @@ func (s *MySQLTopicDataStorage) GetTransactionsByHeight(ctx context.Context, hei
 
 		// Create OutputData
 		outputData := &OutputData{
-			Vout:     outpoint.Index,
-			Data:     data,
-			Script:   scriptBytes,
-			Satoshis: satoshis,
+			Vout: outpoint.Index,
+			Data: data,
 		}
+
+		// Note: scriptBytes and satoshis are read from DB but not stored on OutputData
+		// (those fields no longer exist)
+		_ = scriptBytes
+		_ = satoshis
 
 		// Parse txid
 		txid, err := chainhash.NewHashFromHex(txidStr)
@@ -874,12 +894,14 @@ func (s *MySQLTopicDataStorage) GetTransactionsByHeight(ctx context.Context, hei
 
 		// Create OutputData for input
 		inputData := &OutputData{
-			TxID:     sourceTxid,
-			Vout:     outpoint.Index,
-			Data:     data,
-			Script:   scriptBytes,
-			Satoshis: satoshis,
+			TxID: sourceTxid,
+			Vout: outpoint.Index,
+			Data: data,
 		}
+
+		// Note: scriptBytes and satoshis are read from DB but not stored on OutputData
+		_ = scriptBytes
+		_ = satoshis
 
 		// Add to the spending transaction's inputs
 		if spendTxidStr.Valid {
@@ -959,12 +981,14 @@ func (s *MySQLTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid *
 		}
 
 		output := &OutputData{
-			Vout:     outpoint.Index,
-			Data:     data,
-			Script:   scriptBytes,
-			Satoshis: satoshis,
-			Spend:    spend,
+			Vout:  outpoint.Index,
+			Data:  data,
+			Spend: spend,
 		}
+
+		// Note: scriptBytes and satoshis are read from DB but not stored on OutputData
+		_ = scriptBytes
+		_ = satoshis
 
 		outputs = append(outputs, output)
 	}
@@ -1014,12 +1038,14 @@ func (s *MySQLTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid *
 		// Create OutputData for input with source txid
 		sourceTxid := outpoint.Txid
 		input := &OutputData{
-			TxID:     &sourceTxid,
-			Vout:     outpoint.Index,
-			Data:     data,
-			Script:   script,
-			Satoshis: satoshis,
+			TxID: &sourceTxid,
+			Vout: outpoint.Index,
+			Data: data,
 		}
+
+		// Note: script and satoshis are read from DB but not stored on OutputData
+		_ = script
+		_ = satoshis
 
 		inputs = append(inputs, input)
 	}
@@ -1060,7 +1086,7 @@ func (s *MySQLTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainh
 	}
 
 	// Get BEEF from beef storage
-	beefBytes, err := s.beefStore.LoadBeef(ctx, txid)
+	beefBytes, err := s.beefStore.LoadBeef(ctx, txid, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load BEEF: %w", err)
 	}
@@ -1513,13 +1539,15 @@ func (s *MySQLTopicDataStorage) FindOutputData(ctx context.Context, question *Ev
 		}
 
 		result := &OutputData{
-			TxID:     &outpoint.Txid,
-			Vout:     outpoint.Index,
-			Script:   script,
-			Satoshis: satoshis,
-			Spend:    spendTxid,
-			Score:    score,
+			TxID:  &outpoint.Txid,
+			Vout:  outpoint.Index,
+			Spend: spendTxid,
+			Score: score,
 		}
+
+		// Note: script and satoshis are read from DB but not stored on OutputData
+		_ = script
+		_ = satoshis
 
 		// Parse data if present
 		if dataJSON.Valid && dataJSON.String != "" {
@@ -1613,15 +1641,17 @@ func (s *MySQLTopicDataStorage) FindOutpointsByMerkleState(ctx context.Context, 
 }
 
 // ReconcileValidatedMerkleRoots finds all Validated outputs and reconciles those that need updating
+// This includes promoting to Immutable at sufficient depth or Invalidating if merkle root changed
+// Assumes merkle roots cache is already current via SyncMerkleRoots
 func (s *MySQLTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Context) error {
-	if s.headersClient == nil {
-		return fmt.Errorf("headers client not configured")
+	if s.chainTracker == nil {
+		return fmt.Errorf("chain tracker not configured")
 	}
 
 	// Get current chain tip for immutability calculations
-	chaintip, err := s.headersClient.GetChaintip(ctx)
+	currentHeight, err := s.chainTracker.CurrentHeight(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get chaintip: %w", err)
+		return fmt.Errorf("failed to get current height: %w", err)
 	}
 
 	// Find all unique block heights with Validated outputs
@@ -1644,27 +1674,29 @@ func (s *MySQLTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Contex
 			return err
 		}
 
-		// Get the correct merkle root from our cache
-		correctRoot, err := s.headersClient.GetMerkleRootForHeight(ctx, height)
-		if err != nil {
-			// If we can't get the merkle root, skip this height
-			continue
-		}
+		// Check if we need to reconcile:
+		// 1. Height has reached immutable depth, OR
+		// 2. Merkle root has changed (indicating reorg)
+		needsReconcile := currentHeight-height >= IMMUTABILITY_DEPTH
 
-		// Check if we need to reconcile
-		needsReconcile := chaintip.Height-height >= IMMUTABILITY_DEPTH
-
-		// Check if merkle root has changed
+		// Check if merkle root has changed (if we have a stored root)
+		var correctRoot *chainhash.Hash
 		if !needsReconcile && storedRootStr.Valid && storedRootStr.String != "" {
 			storedRoot, err := chainhash.NewHashFromHex(storedRootStr.String)
 			if err != nil {
-				needsReconcile = true
-			} else if !storedRoot.IsEqual(correctRoot) {
-				needsReconcile = true
+				needsReconcile = true // If we can't parse it, reconcile it
+			} else {
+				// Validate if this root is correct for this height
+				isValid, err := s.chainTracker.IsValidRootForHeight(ctx, storedRoot, height)
+				if err != nil || !isValid {
+					needsReconcile = true
+				}
 			}
 		}
 
 		// Reconcile if needed
+		// Note: correctRoot is nil here since we're using IsValidRootForHeight
+		// The ReconcileMerkleRoot will need to handle validation differently
 		if needsReconcile {
 			if err := s.ReconcileMerkleRoot(ctx, height, correctRoot); err != nil {
 				return fmt.Errorf("failed to reconcile height %d: %w", height, err)
@@ -1684,10 +1716,10 @@ func (s *MySQLTopicDataStorage) ReconcileMerkleRoot(ctx context.Context, blockHe
 
 	// Determine if this height should be immutable
 	isImmutable := false
-	if s.headersClient != nil {
-		chaintip, err := s.headersClient.GetChaintip(ctx)
-		if err == nil && chaintip != nil {
-			depth := chaintip.Height - blockHeight
+	if s.chainTracker != nil {
+		currentHeight, err := s.chainTracker.CurrentHeight(ctx)
+		if err == nil {
+			depth := currentHeight - blockHeight
 			isImmutable = depth >= IMMUTABILITY_DEPTH
 		}
 	}

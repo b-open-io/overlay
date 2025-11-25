@@ -6,16 +6,14 @@ import (
 	"fmt"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
-	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 	_ "github.com/mattn/go-sqlite3"
 )
 
 type SQLiteBeefStorage struct {
-	db       *sql.DB
-	fallback BeefStorage
+	db *sql.DB
 }
 
-func NewSQLiteBeefStorage(dbPath string, fallback BeefStorage) (*SQLiteBeefStorage, error) {
+func NewSQLiteBeefStorage(dbPath string) (*SQLiteBeefStorage, error) {
 	db, err := sql.Open("sqlite3", dbPath)
 	if err != nil {
 		return nil, err
@@ -41,8 +39,7 @@ func NewSQLiteBeefStorage(dbPath string, fallback BeefStorage) (*SQLiteBeefStora
 	db.SetConnMaxLifetime(0) // No connection lifetime limit
 
 	return &SQLiteBeefStorage{
-		db:       db,
-		fallback: fallback,
+		db: db,
 	}, nil
 }
 
@@ -50,36 +47,25 @@ func (t *SQLiteBeefStorage) Close() error {
 	return t.db.Close()
 }
 
-func (t *SQLiteBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+func (t *SQLiteBeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	txidStr := txid.String()
 
-	// Try to load from SQLite first
 	var beefBytes []byte
 	err := t.db.QueryRowContext(ctx, "SELECT beef FROM beef_storage WHERE txid = ?", txidStr).Scan(&beefBytes)
 
-	if err == nil {
-		return beefBytes, nil
-	} else if err != sql.ErrNoRows {
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
 		return nil, fmt.Errorf("database error: %w", err)
 	}
 
-	// Not found in SQLite, try fallback
-	if t.fallback != nil {
-		beefBytes, err = t.fallback.LoadBeef(ctx, txid)
-		if err == nil {
-			// Save to SQLite for future use
-			t.SaveBeef(ctx, txid, beefBytes)
-		}
-		return beefBytes, err
-	}
-
-	return nil, ErrNotFound
+	return beefBytes, nil
 }
 
-func (t *SQLiteBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
+func (t *SQLiteBeefStorage) Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
 	txidStr := txid.String()
 
-	// Use INSERT OR REPLACE to handle duplicates
 	_, err := t.db.ExecContext(ctx,
 		"INSERT OR REPLACE INTO beef_storage (txid, beef) VALUES (?, ?)",
 		txidStr, beefBytes)
@@ -87,15 +73,7 @@ func (t *SQLiteBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, 
 	return err
 }
 
-// UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
-func (t *SQLiteBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
-	if t.fallback != nil {
-		beefBytes, err := t.fallback.UpdateMerklePath(ctx, txid, ct)
-		if err == nil && len(beefBytes) > 0 {
-			// Update our own storage with the new beef
-			t.SaveBeef(ctx, txid, beefBytes)
-		}
-		return beefBytes, err
-	}
-	return nil, ErrNotFound
+// UpdateMerklePath is not supported by SQLite storage
+func (t *SQLiteBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	return nil, nil
 }

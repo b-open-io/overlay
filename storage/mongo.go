@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/headers"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 	"github.com/b-open-io/overlay/pubsub"
 	"github.com/b-open-io/overlay/queue"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
@@ -40,7 +40,7 @@ type MongoTopicDataStorage struct {
 }
 
 // NewMongoTopicDataStorage creates a new MongoDB topic storage using shared client
-func NewMongoTopicDataStorage(topic string, connString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, headersClient *headers.Client) (TopicDataStorage, error) {
+func NewMongoTopicDataStorage(topic string, connString string, beefStore *beef.Storage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, chainTracker chaintracker.ChainTracker) (TopicDataStorage, error) {
 	// Get or create shared MongoDB client
 	client, err := getSharedMongoClient(connString)
 	if err != nil {
@@ -140,7 +140,7 @@ func NewMongoTopicDataStorage(topic string, connString string, beefStore beef.Be
 	}
 
 	return &MongoTopicDataStorage{
-		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub, headersClient),
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub, chainTracker),
 		DB:                   db,
 		topic:                topic,
 	}, nil
@@ -255,7 +255,7 @@ func (s *MongoTopicDataStorage) FindOutput(ctx context.Context, outpoint *transa
 	}
 	o = bo.ToEngineOutput()
 	if includeBEEF {
-		if o.Beef, err = s.beefStore.LoadBeef(ctx, &outpoint.Txid); err != nil {
+		if o.Beef, err = s.beefStore.LoadBeef(ctx, &outpoint.Txid, o.AncillaryTxids); err != nil {
 			return nil, err
 		}
 	}
@@ -282,7 +282,7 @@ func (s *MongoTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*tr
 			}
 			output := result.ToEngineOutput()
 			if includeBEEF {
-				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
+				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, output.AncillaryTxids); err != nil {
 					return nil, err
 				}
 			}
@@ -315,7 +315,7 @@ func (s *MongoTopicDataStorage) FindOutputsForTransaction(ctx context.Context, t
 			}
 			output := result.ToEngineOutput()
 			if includeBEEF {
-				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
+				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, output.AncillaryTxids); err != nil {
 					return nil, err
 				}
 			}
@@ -349,7 +349,7 @@ func (s *MongoTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since flo
 			}
 			output := result.ToEngineOutput()
 			if includeBEEF {
-				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
+				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, output.AncillaryTxids); err != nil {
 					return nil, err
 				}
 			}
@@ -441,15 +441,14 @@ func (s *MongoTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, txid 
 	return nil
 }
 
-func (s *MongoTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
+func (s *MongoTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64) error {
 	// Update outputs - removed score update
 	_, err := s.DB.Collection("outputs").UpdateOne(ctx,
 		bson.M{"outpoint": outpoint.String()},
 		bson.M{"$set": bson.M{
-			"blockHeight":   blockHeight,
-			"blockIdx":      blockIndex,
-			"ancillaryBeef": ancelliaryBeef,
-			"score":         float64(time.Now().UnixNano()),
+			"blockHeight": blockHeight,
+			"blockIdx":    blockIndex,
+			"score":       float64(time.Now().UnixNano()),
 		}},
 	)
 	return err
@@ -578,10 +577,8 @@ func (s *MongoTopicDataStorage) GetTransactionsByHeight(ctx context.Context, hei
 			}
 
 			outputData := &OutputData{
-				Vout:     outpoint.Index,
-				Data:     output.Data,
-				Script:   output.Script,
-				Satoshis: output.Satoshis,
+				Vout: outpoint.Index,
+				Data: output.Data,
 			}
 			txData.Outputs = append(txData.Outputs, outputData)
 		}
@@ -617,11 +614,9 @@ func (s *MongoTopicDataStorage) GetTransactionsByHeight(ctx context.Context, hei
 				}
 
 				inputData := &OutputData{
-					TxID:     sourceTxid,
-					Vout:     inputOutpoint.Index,
-					Data:     inputOutput.Data,
-					Script:   inputOutput.Script,
-					Satoshis: inputOutput.Satoshis,
+					TxID: sourceTxid,
+					Vout: inputOutpoint.Index,
+					Data: inputOutput.Data,
 				}
 				txData.Inputs = append(txData.Inputs, inputData)
 			}
@@ -650,8 +645,6 @@ func (s *MongoTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid *
 			{Key: "outputs", Value: bson.D{{Key: "$push", Value: bson.D{
 				{Key: "outpoint", Value: "$outpoint"},
 				{Key: "vout", Value: "$vout"},
-				{Key: "script", Value: "$script"},
-				{Key: "satoshis", Value: "$satoshis"},
 				{Key: "spend", Value: "$spend"},
 				{Key: "data", Value: "$data"},
 			}}}},
@@ -669,8 +662,6 @@ func (s *MongoTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid *
 		Outputs []struct {
 			Outpoint string      `bson:"outpoint"`
 			Vout     uint32      `bson:"vout"`
-			Script   []byte      `bson:"script"`
-			Satoshis uint64      `bson:"satoshis"`
 			Spend    string      `bson:"spend,omitempty"`
 			Data     interface{} `bson:"data,omitempty"`
 		} `bson:"outputs"`
@@ -701,12 +692,10 @@ func (s *MongoTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid *
 		}
 
 		outputData := &OutputData{
-			TxID:     txid,
-			Vout:     output.Vout,
-			Data:     output.Data,
-			Script:   output.Script,
-			Satoshis: output.Satoshis,
-			Spend:    spend,
+			TxID:  txid,
+			Vout:  output.Vout,
+			Data:  output.Data,
+			Spend: spend,
 		}
 
 		txData.Outputs = append(txData.Outputs, outputData)
@@ -732,8 +721,6 @@ func (s *MongoTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid *
 			Outpoint string      `bson:"outpoint"`
 			TxID     string      `bson:"txid"`
 			Vout     uint32      `bson:"vout"`
-			Script   []byte      `bson:"script"`
-			Satoshis uint64      `bson:"satoshis"`
 			Data     interface{} `bson:"data,omitempty"`
 		}
 
@@ -748,11 +735,9 @@ func (s *MongoTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid *
 		}
 
 		inputData := &OutputData{
-			TxID:     sourceTxid,
-			Vout:     input.Vout,
-			Data:     input.Data,
-			Script:   input.Script,
-			Satoshis: input.Satoshis,
+			TxID: sourceTxid,
+			Vout: input.Vout,
+			Data: input.Data,
 		}
 
 		txData.Inputs = append(txData.Inputs, inputData)
@@ -990,7 +975,7 @@ func (s *MongoTopicDataStorage) GetOutputData(ctx context.Context, outpoint *tra
 func (s *MongoTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	// Find any output for this txid in the specified topic
 	var result struct {
-		AncillaryBeef []byte `bson:"ancillaryBeef"`
+		AncillaryTxids []string `bson:"ancillaryTxids"`
 	}
 
 	err := s.DB.Collection("outputs").FindOne(ctx, bson.M{
@@ -1001,23 +986,26 @@ func (s *MongoTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainh
 		return nil, fmt.Errorf("transaction %s not found in topic %s: %w", txid.String(), s.topic, err)
 	}
 
-	// Get BEEF from beef storage
-	beefBytes, err := s.beefStore.LoadBeef(ctx, txid)
+	// Convert ancillary txid strings to chainhash.Hash pointers
+	var ancillaryTxids []*chainhash.Hash
+	for _, txidStr := range result.AncillaryTxids {
+		hash, err := chainhash.NewHashFromHex(txidStr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ancillary txid %s: %w", txidStr, err)
+		}
+		ancillaryTxids = append(ancillaryTxids, hash)
+	}
+
+	// Get BEEF from beef storage with ancillary txids (LoadBeef will merge them)
+	beefBytes, err := s.beefStore.LoadBeef(ctx, txid, ancillaryTxids)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load BEEF: %w", err)
 	}
 
-	// Parse the main BEEF
+	// Parse the BEEF
 	beef, _, _, err := transaction.ParseBeef(beefBytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse main BEEF: %w", err)
-	}
-
-	// Merge AncillaryBeef if present (field is optional)
-	if len(result.AncillaryBeef) > 0 {
-		if err := beef.MergeBeefBytes(result.AncillaryBeef); err != nil {
-			return nil, fmt.Errorf("failed to merge AncillaryBeef: %w", err)
-		}
+		return nil, fmt.Errorf("failed to parse BEEF: %w", err)
 	}
 
 	// Get atomic BEEF bytes for the specific transaction
@@ -1082,8 +1070,6 @@ func (s *MongoTopicDataStorage) FindOutputData(ctx context.Context, question *Ev
 			"$project": bson.M{
 				"outpoint": 1,
 				"vout":     1,
-				"script":   1,
-				"satoshis": 1,
 				"data":     1,
 				"score":    1,
 				"spend":    1,
@@ -1114,8 +1100,6 @@ func (s *MongoTopicDataStorage) FindOutputData(ctx context.Context, question *Ev
 		var doc struct {
 			Outpoint string      `bson:"outpoint"`
 			Vout     uint32      `bson:"vout"`
-			Script   []byte      `bson:"script"`
-			Satoshis uint64      `bson:"satoshis"`
 			Data     interface{} `bson:"data"`
 			Spend    *string     `bson:"spend"`
 			Score    float64     `bson:"score"`
@@ -1140,12 +1124,10 @@ func (s *MongoTopicDataStorage) FindOutputData(ctx context.Context, question *Ev
 		}
 
 		result := &OutputData{
-			TxID:     &outpoint.Txid,
-			Vout:     doc.Vout,
-			Script:   doc.Script,
-			Satoshis: doc.Satoshis,
-			Spend:    spendTxid,
-			Score:    doc.Score,
+			TxID:  &outpoint.Txid,
+			Vout:  doc.Vout,
+			Spend: spendTxid,
+			Score: doc.Score,
 		}
 
 		// Convert data through JSON to get clean types
@@ -1242,12 +1224,12 @@ func (s *MongoTopicDataStorage) FindOutpointsByMerkleState(ctx context.Context, 
 // This includes promoting to Immutable at sufficient depth or Invalidating if merkle root changed
 // Assumes merkle roots cache is already current via SyncMerkleRoots
 func (s *MongoTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Context) error {
-	if s.headersClient == nil {
-		return fmt.Errorf("headers client not configured")
+	if s.chainTracker == nil {
+		return fmt.Errorf("chain tracker not configured")
 	}
 
 	// Get current chain tip for immutability calculations
-	chaintip, err := s.headersClient.GetChaintip(ctx)
+	currentHeight, err := s.chainTracker.CurrentHeight(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get chaintip: %w", err)
 	}
@@ -1278,29 +1260,29 @@ func (s *MongoTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Contex
 			return err
 		}
 
-		// Get the correct merkle root from our cache
-		correctRoot, err := s.headersClient.GetMerkleRootForHeight(ctx, result.Height)
-		if err != nil {
-			// If we can't get the merkle root, skip this height
-			continue
-		}
-
 		// Check if we need to reconcile:
 		// 1. Height has reached immutable depth, OR
 		// 2. Merkle root has changed (indicating reorg)
-		needsReconcile := chaintip.Height-result.Height >= IMMUTABILITY_DEPTH
+		needsReconcile := currentHeight-result.Height >= IMMUTABILITY_DEPTH
 
-		// Check if merkle root has changed
+		// Check if merkle root has changed (if we have a stored root)
+		var correctRoot *chainhash.Hash
 		if !needsReconcile && result.MerkleRoot != nil && *result.MerkleRoot != "" {
 			storedRoot, err := chainhash.NewHashFromHex(*result.MerkleRoot)
 			if err != nil {
 				needsReconcile = true // If we can't parse it, reconcile it
-			} else if !storedRoot.IsEqual(correctRoot) {
-				needsReconcile = true
+			} else {
+				// Validate if this root is correct for this height
+				isValid, err := s.chainTracker.IsValidRootForHeight(ctx, storedRoot, result.Height)
+				if err != nil || !isValid {
+					needsReconcile = true
+				}
 			}
 		}
 
 		// Reconcile if needed
+		// Note: correctRoot is nil here since we're using IsValidRootForHeight
+		// The ReconcileMerkleRoot will need to handle validation differently
 		if needsReconcile {
 			if err := s.ReconcileMerkleRoot(ctx, result.Height, correctRoot); err != nil {
 				return fmt.Errorf("failed to reconcile height %d: %w", result.Height, err)
@@ -1320,10 +1302,10 @@ func (s *MongoTopicDataStorage) ReconcileMerkleRoot(ctx context.Context, blockHe
 
 	// Determine if this height should be immutable
 	isImmutable := false
-	if s.headersClient != nil {
-		chaintip, err := s.headersClient.GetChaintip(ctx)
-		if err == nil && chaintip != nil {
-			depth := chaintip.Height - blockHeight
+	if s.chainTracker != nil {
+		currentHeight, err := s.chainTracker.CurrentHeight(ctx)
+		if err == nil {
+			depth := currentHeight - blockHeight
 			isImmutable = depth >= IMMUTABILITY_DEPTH
 		}
 	}

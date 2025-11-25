@@ -6,16 +6,16 @@ import (
 	"strconv"
 
 	"github.com/b-open-io/overlay/storage"
+	"github.com/bsv-blockchain/go-chaintracks/pkg/chaintracks"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
-	"github.com/b-open-io/overlay/headers"
 	"github.com/gofiber/fiber/v2"
 )
 
-// CommonRoutesConfig holds the configuration for common 1sat routes
-type CommonRoutesConfig struct {
+// RoutesConfig holds the configuration for common 1sat routes
+type RoutesConfig struct {
 	Storage      *storage.EventDataStorage
-	ChainTracker *headers.Client
+	ChainTracker chaintracks.Chaintracks
 	Engine       *engine.Engine
 }
 
@@ -49,8 +49,8 @@ func ParseEventQuery(c *fiber.Ctx) *storage.EventQuestion {
 	}
 }
 
-// RegisterCommonRoutes registers common 1sat API routes that are generic across overlay services
-func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
+// RegisterRoutes registers common 1sat API routes that are generic across overlay services
+func RegisterRoutes(group fiber.Router, config *RoutesConfig) {
 	if config == nil || config.Storage == nil || config.ChainTracker == nil || config.Engine == nil {
 		log.Fatal("RegisterCommonRoutes: config, storage, chaintracker, and engine are required")
 	}
@@ -221,25 +221,16 @@ func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
 
 	group.Get("/block/tip", func(c *fiber.Ctx) error {
 		// Get current block tip from chaintracker
-		tip, err := chaintracker.GetChaintip(c.Context())
-		if err != nil {
-			log.Printf("Failed to get block tip: %v", err)
+		tip := chaintracker.GetTip()
+		if tip == nil {
+			log.Printf("Failed to get block tip: tip is nil")
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"message": "Failed to get current block tip",
 			})
 		}
 
 		// Return header with height and properly formatted hash strings
-		return c.JSON(fiber.Map{
-			"height":            tip.Height,
-			"hash":              tip.Header.Hash.String(),
-			"version":           tip.Header.Version,
-			"prevBlockHash":     tip.Header.PreviousBlock.String(),
-			"merkleRoot":        tip.Header.MerkleRoot.String(),
-			"creationTimestamp": tip.Header.Timestamp,
-			"difficultyTarget":  tip.Header.Bits,
-			"nonce":             tip.Header.Nonce,
-		})
+		return c.JSON(tip)
 	})
 
 	group.Get("/block/:height", func(c *fiber.Ctx) error {
@@ -255,7 +246,7 @@ func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
 		height := uint32(height64)
 
 		// Get block header by height
-		blockHeader, err := chaintracker.BlockByHeight(c.Context(), height)
+		blockHeader, err := chaintracker.GetHeaderByHeight(height)
 		if err != nil {
 			log.Printf("Failed to get block header for height %d: %v", height, err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -264,16 +255,7 @@ func RegisterCommonRoutes(group fiber.Router, config *CommonRoutesConfig) {
 		}
 
 		// Return header with height and properly formatted hash strings
-		return c.JSON(fiber.Map{
-			"height":            height,
-			"hash":              blockHeader.Hash.String(),
-			"version":           blockHeader.Version,
-			"prevBlockHash":     blockHeader.PreviousBlock.String(),
-			"merkleRoot":        blockHeader.MerkleRoot.String(),
-			"creationTimestamp": blockHeader.Timestamp,
-			"difficultyTarget":  blockHeader.Bits,
-			"nonce":             blockHeader.Nonce,
-		})
+		return c.JSON(blockHeader)
 	})
 
 	// BEEF endpoint for SSE and peer synchronization

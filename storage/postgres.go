@@ -10,14 +10,13 @@ import (
 	"time"
 
 	"github.com/b-open-io/overlay/beef"
-	"github.com/b-open-io/overlay/headers"
 	"github.com/b-open-io/overlay/pubsub"
 	"github.com/b-open-io/overlay/queue"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/overlay"
-	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
+	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -41,7 +40,7 @@ type PostgresTopicDataStorage struct {
 }
 
 // NewPostgresTopicDataStorage creates a new PostgreSQL topic storage using shared connection pool
-func NewPostgresTopicDataStorage(topic string, connectionString string, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, headersClient *headers.Client) (TopicDataStorage, error) {
+func NewPostgresTopicDataStorage(topic string, connectionString string, beefStore *beef.Storage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, chainTracker chaintracker.ChainTracker) (TopicDataStorage, error) {
 	// Get or create shared connection pool
 	pool, err := getSharedPool(connectionString)
 	if err != nil {
@@ -49,7 +48,7 @@ func NewPostgresTopicDataStorage(topic string, connectionString string, beefStor
 	}
 
 	storage := &PostgresTopicDataStorage{
-		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub, headersClient),
+		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub, chainTracker),
 		pool:                 pool,
 		topic:                topic,
 	}
@@ -127,7 +126,7 @@ func (s *PostgresTopicDataStorage) createTables(ctx context.Context) error {
 			block_height INTEGER,
 			block_idx INTEGER,
 			score DOUBLE PRECISION,
-			ancillary_beef BYTEA,
+			metadata JSONB,
 			data JSONB,
 			topic TEXT NOT NULL,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -151,14 +150,6 @@ func (s *PostgresTopicDataStorage) createTables(ctx context.Context) error {
 			topic TEXT NOT NULL,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			PRIMARY KEY (topic, txid)
-		) PARTITION BY LIST (topic)`,
-
-		// Output relationships table - partitioned by topic
-		`CREATE TABLE IF NOT EXISTS output_relationships (
-			consuming_outpoint TEXT NOT NULL,
-			consumed_outpoint TEXT NOT NULL,
-			topic TEXT NOT NULL,
-			PRIMARY KEY (topic, consuming_outpoint, consumed_outpoint)
 		) PARTITION BY LIST (topic)`,
 	}
 
@@ -224,14 +215,6 @@ func (s *PostgresTopicDataStorage) ensureTopicPartitions(ctx context.Context) er
 				`CREATE INDEX IF NOT EXISTS idx_%[1]s_score ON %[1]s(score)`,
 			},
 		},
-		{
-			parentTable: "output_relationships",
-			partName:    fmt.Sprintf("output_relationships_%s", sanitizedTopic),
-			indexes: []string{
-				`CREATE INDEX IF NOT EXISTS idx_%[1]s_consuming ON %[1]s(consuming_outpoint)`,
-				`CREATE INDEX IF NOT EXISTS idx_%[1]s_consumed ON %[1]s(consumed_outpoint)`,
-			},
-		},
 	}
 
 	for _, partition := range partitions {
@@ -284,79 +267,63 @@ func (s *PostgresTopicDataStorage) InsertOutput(ctx context.Context, utxo *engin
 		merkleRootStr = merkleRoot.String()
 	}
 
-	// Insert output with merkle info in a single operation
+	// Build metadata object
+	metadata := OutputMetadata{}
+
+	// Convert AncillaryTxids to string array
+	if len(utxo.AncillaryTxids) > 0 {
+		metadata.AncillaryTxids = make([]string, len(utxo.AncillaryTxids))
+		for i, txid := range utxo.AncillaryTxids {
+			metadata.AncillaryTxids[i] = txid.String()
+		}
+	}
+
+	// Convert OutputsConsumed to string array
+	if len(utxo.OutputsConsumed) > 0 {
+		metadata.OutputsConsumed = make([]string, len(utxo.OutputsConsumed))
+		for i, outpoint := range utxo.OutputsConsumed {
+			metadata.OutputsConsumed[i] = outpoint.String()
+		}
+	}
+
+	// Convert ConsumedBy to string array
+	if len(utxo.ConsumedBy) > 0 {
+		metadata.ConsumedBy = make([]string, len(utxo.ConsumedBy))
+		for i, outpoint := range utxo.ConsumedBy {
+			metadata.ConsumedBy[i] = outpoint.String()
+		}
+	}
+
+	// Marshal metadata to JSON
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	// Insert output with merkle info and metadata in a single operation
 	_, err = s.pool.Exec(ctx, `
-		INSERT INTO outputs (outpoint, txid, script, satoshis, block_height, block_idx, score, ancillary_beef,
+		INSERT INTO outputs (outpoint, txid, block_height, block_idx, score, metadata,
 			merkle_root, merkle_validation_state, topic)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (topic, outpoint) DO UPDATE SET
-			script = EXCLUDED.script,
-			satoshis = EXCLUDED.satoshis,
 			block_height = EXCLUDED.block_height,
 			block_idx = EXCLUDED.block_idx,
 			score = EXCLUDED.score,
-			ancillary_beef = EXCLUDED.ancillary_beef,
+			metadata = EXCLUDED.metadata,
 			merkle_root = EXCLUDED.merkle_root,
 			merkle_validation_state = EXCLUDED.merkle_validation_state`,
 		utxo.Outpoint.String(),
 		utxo.Outpoint.Txid.String(),
-		utxo.Script.Bytes(),
-		utxo.Satoshis,
 		utxo.BlockHeight,
 		utxo.BlockIdx,
 		utxo.Score,
-		utxo.AncillaryBeef,
+		string(metadataJSON),
 		merkleRootStr,
 		validationState,
 		s.topic,
 	)
 	if err != nil {
 		return err
-	}
-
-	// Batch insert output relationships
-	type relationship struct {
-		consuming string
-		consumed  string
-	}
-
-	var relationships []relationship
-
-	// Collect all relationships
-	for _, consumed := range utxo.OutputsConsumed {
-		relationships = append(relationships, relationship{
-			consuming: utxo.Outpoint.String(),
-			consumed:  consumed.String(),
-		})
-	}
-
-	for _, consumedBy := range utxo.ConsumedBy {
-		relationships = append(relationships, relationship{
-			consuming: consumedBy.String(),
-			consumed:  utxo.Outpoint.String(),
-		})
-	}
-
-	// Batch insert all relationships in single statement
-	if len(relationships) > 0 {
-		valueStrings := make([]string, len(relationships))
-		valueArgs := make([]interface{}, 0, len(relationships)*3)
-
-		for i, rel := range relationships {
-			valueStrings[i] = fmt.Sprintf("($%d, $%d, $%d)", i*3+1, i*3+2, i*3+3)
-			valueArgs = append(valueArgs, rel.consuming, rel.consumed, s.topic)
-		}
-
-		query := fmt.Sprintf(`
-			INSERT INTO output_relationships (consuming_outpoint, consumed_outpoint, topic)
-			VALUES %s
-			ON CONFLICT (topic, consuming_outpoint, consumed_outpoint) DO NOTHING`,
-			strings.Join(valueStrings, ","))
-
-		_, err = s.pool.Exec(ctx, query, valueArgs...)
-		if err != nil {
-			return err
-		}
 	}
 
 	// // Add topic as an event using SaveEvents (handles pubsub publishing)
@@ -369,7 +336,7 @@ func (s *PostgresTopicDataStorage) InsertOutput(ctx context.Context, utxo *engin
 
 // FindOutput finds a single output by outpoint
 func (s *PostgresTopicDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, spent *bool, includeBEEF bool) (*engine.Output, error) {
-	query := `SELECT outpoint, txid, script, satoshis, spend, block_height, block_idx, score, ancillary_beef 
+	query := `SELECT outpoint, txid, spend, block_height, block_idx, score, metadata
 		FROM outputs WHERE topic = $1 AND outpoint = $2`
 	args := []interface{}{s.topic, outpoint.String()}
 
@@ -383,20 +350,17 @@ func (s *PostgresTopicDataStorage) FindOutput(ctx context.Context, outpoint *tra
 
 	var output engine.Output
 	var outpointStr, txidStr string
-	var scriptBytes []byte
-	var ancillaryBeef []byte
+	var metadataJSON []byte
 	var spendTxid *string
 
 	err := s.pool.QueryRow(ctx, query, args...).Scan(
 		&outpointStr,
 		&txidStr,
-		&scriptBytes,
-		&output.Satoshis,
 		&spendTxid,
 		&output.BlockHeight,
 		&output.BlockIdx,
 		&output.Score,
-		&ancillaryBeef,
+		&metadataJSON,
 	)
 	if err == pgx.ErrNoRows {
 		return nil, nil
@@ -417,22 +381,57 @@ func (s *PostgresTopicDataStorage) FindOutput(ctx context.Context, outpoint *tra
 	// Set spent status based on whether spend field has a value
 	output.Spent = spendTxid != nil
 
-	// Parse script
-	output.Script = script.NewFromBytes(scriptBytes)
-	output.AncillaryBeef = ancillaryBeef
+	// Parse metadata from JSON
+	if len(metadataJSON) > 0 {
+		var metadata OutputMetadata
+		if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
+		}
+
+		// Parse ancillary txids
+		if len(metadata.AncillaryTxids) > 0 {
+			output.AncillaryTxids = make([]*chainhash.Hash, 0, len(metadata.AncillaryTxids))
+			for _, txidStr := range metadata.AncillaryTxids {
+				hash, err := chainhash.NewHashFromHex(txidStr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid ancillary txid %s: %w", txidStr, err)
+				}
+				output.AncillaryTxids = append(output.AncillaryTxids, hash)
+			}
+		}
+
+		// Parse outputs consumed
+		if len(metadata.OutputsConsumed) > 0 {
+			output.OutputsConsumed = make([]*transaction.Outpoint, 0, len(metadata.OutputsConsumed))
+			for _, opStr := range metadata.OutputsConsumed {
+				op, err := transaction.OutpointFromString(opStr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid outputs consumed outpoint %s: %w", opStr, err)
+				}
+				output.OutputsConsumed = append(output.OutputsConsumed, op)
+			}
+		}
+
+		// Parse consumed by
+		if len(metadata.ConsumedBy) > 0 {
+			output.ConsumedBy = make([]*transaction.Outpoint, 0, len(metadata.ConsumedBy))
+			for _, opStr := range metadata.ConsumedBy {
+				op, err := transaction.OutpointFromString(opStr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid consumed by outpoint %s: %w", opStr, err)
+				}
+				output.ConsumedBy = append(output.ConsumedBy, op)
+			}
+		}
+	}
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid)
+		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, output.AncillaryTxids)
 		if err != nil {
 			return nil, err
 		}
 		output.Beef = beef
-	}
-
-	// Load consumed outputs
-	if err = s.loadOutputRelations(ctx, &output); err != nil {
-		return nil, err
 	}
 
 	return &output, nil
@@ -454,7 +453,7 @@ func (s *PostgresTopicDataStorage) FindOutputs(ctx context.Context, outpoints []
 		args = append(args, op.String())
 	}
 
-	query := fmt.Sprintf(`SELECT outpoint, txid, script, satoshis, spend, block_height, block_idx, score, ancillary_beef 
+	query := fmt.Sprintf(`SELECT outpoint, txid, spend, block_height, block_idx, score, metadata
 		FROM outputs WHERE topic = $1 AND outpoint IN (%s)`, strings.Join(placeholders, ","))
 
 	if spent != nil {
@@ -498,20 +497,17 @@ func (s *PostgresTopicDataStorage) FindOutputs(ctx context.Context, outpoints []
 func (s *PostgresTopicDataStorage) scanOutput(rows pgx.Rows, includeBEEF bool) (*engine.Output, error) {
 	var output engine.Output
 	var outpointStr, txidStr string
-	var scriptBytes []byte
-	var ancillaryBeef []byte
+	var metadataJSON []byte
 	var spendTxid *string
 
 	err := rows.Scan(
 		&outpointStr,
 		&txidStr,
-		&scriptBytes,
-		&output.Satoshis,
 		&spendTxid,
 		&output.BlockHeight,
 		&output.BlockIdx,
 		&output.Score,
-		&ancillaryBeef,
+		&metadataJSON,
 	)
 	if err != nil {
 		return nil, err
@@ -530,13 +526,56 @@ func (s *PostgresTopicDataStorage) scanOutput(rows pgx.Rows, includeBEEF bool) (
 	// Set spent status based on whether spend field has a value
 	output.Spent = spendTxid != nil
 
-	// Parse script
-	output.Script = script.NewFromBytes(scriptBytes)
-	output.AncillaryBeef = ancillaryBeef
+	// Parse metadata from JSON
+	if len(metadataJSON) > 0 {
+		var metadata OutputMetadata
+		if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+			log.Printf("Failed to unmarshal metadata: %v", err)
+		} else {
+			// Parse ancillary txids
+			if len(metadata.AncillaryTxids) > 0 {
+				output.AncillaryTxids = make([]*chainhash.Hash, 0, len(metadata.AncillaryTxids))
+				for _, txidStr := range metadata.AncillaryTxids {
+					hash, err := chainhash.NewHashFromHex(txidStr)
+					if err != nil {
+						log.Printf("Invalid ancillary txid %s: %v", txidStr, err)
+						continue
+					}
+					output.AncillaryTxids = append(output.AncillaryTxids, hash)
+				}
+			}
+
+			// Parse outputs consumed
+			if len(metadata.OutputsConsumed) > 0 {
+				output.OutputsConsumed = make([]*transaction.Outpoint, 0, len(metadata.OutputsConsumed))
+				for _, opStr := range metadata.OutputsConsumed {
+					op, err := transaction.OutpointFromString(opStr)
+					if err != nil {
+						log.Printf("Invalid outputs consumed outpoint %s: %v", opStr, err)
+						continue
+					}
+					output.OutputsConsumed = append(output.OutputsConsumed, op)
+				}
+			}
+
+			// Parse consumed by
+			if len(metadata.ConsumedBy) > 0 {
+				output.ConsumedBy = make([]*transaction.Outpoint, 0, len(metadata.ConsumedBy))
+				for _, opStr := range metadata.ConsumedBy {
+					op, err := transaction.OutpointFromString(opStr)
+					if err != nil {
+						log.Printf("Invalid consumed by outpoint %s: %v", opStr, err)
+						continue
+					}
+					output.ConsumedBy = append(output.ConsumedBy, op)
+				}
+			}
+		}
+	}
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid)
+		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid, output.AncillaryTxids)
 		if err != nil {
 			log.Printf("Failed to load BEEF for %s: %v", output.Outpoint.Txid, err)
 		} else {
@@ -544,60 +583,9 @@ func (s *PostgresTopicDataStorage) scanOutput(rows pgx.Rows, includeBEEF bool) (
 		}
 	}
 
-	// Load relations
-	if err = s.loadOutputRelations(context.Background(), &output); err != nil {
-		return nil, err
-	}
-
 	return &output, nil
 }
 
-// loadOutputRelations loads the input/output relationships for an output
-func (s *PostgresTopicDataStorage) loadOutputRelations(ctx context.Context, output *engine.Output) error {
-	// Load outputs consumed by this output
-	rows, err := s.pool.Query(ctx,
-		"SELECT consumed_outpoint FROM output_relationships WHERE topic = $1 AND consuming_outpoint = $2",
-		s.topic, output.Outpoint.String())
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var opStr string
-		if err := rows.Scan(&opStr); err != nil {
-			return err
-		}
-		op, err := transaction.OutpointFromString(opStr)
-		if err != nil {
-			return err
-		}
-		output.OutputsConsumed = append(output.OutputsConsumed, op)
-	}
-
-	// Load outputs that consume this output
-	rows2, err := s.pool.Query(ctx,
-		"SELECT consuming_outpoint FROM output_relationships WHERE topic = $1 AND consumed_outpoint = $2",
-		s.topic, output.Outpoint.String())
-	if err != nil {
-		return err
-	}
-	defer rows2.Close()
-
-	for rows2.Next() {
-		var opStr string
-		if err := rows2.Scan(&opStr); err != nil {
-			return err
-		}
-		op, err := transaction.OutpointFromString(opStr)
-		if err != nil {
-			return err
-		}
-		output.ConsumedBy = append(output.ConsumedBy, op)
-	}
-
-	return nil
-}
 
 // Close closes the storage and decrements shared pool reference count
 func (s *PostgresTopicDataStorage) Close() error {
@@ -618,7 +606,7 @@ func (s *PostgresTopicDataStorage) Close() error {
 
 // FindOutputsForTransaction finds all outputs for a given transaction
 func (s *PostgresTopicDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
-	query := `SELECT outpoint, txid, script, satoshis, spend, block_height, block_idx, score, ancillary_beef 
+	query := `SELECT outpoint, txid, spend, block_height, block_idx, score, metadata
 		FROM outputs WHERE topic = $1 AND txid = $2`
 
 	rows, err := s.pool.Query(ctx, query, s.topic, txid.String())
@@ -641,8 +629,8 @@ func (s *PostgresTopicDataStorage) FindOutputsForTransaction(ctx context.Context
 
 // FindUTXOsForTopic finds unspent outputs for the topic since a given score
 func (s *PostgresTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
-	query := `SELECT outpoint, txid, script, satoshis, spend, block_height, block_idx, score, ancillary_beef 
-		FROM outputs 
+	query := `SELECT outpoint, txid, spend, block_height, block_idx, score, metadata
+		FROM outputs
 		WHERE topic = $1 AND score >= $2 -- AND spend IS NULL
 		ORDER BY score`
 
@@ -776,7 +764,7 @@ func (s *PostgresTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, tx
 }
 
 // UpdateOutputBlockHeight updates block height information for an output
-func (s *PostgresTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64, ancillaryBeef []byte) error {
+func (s *PostgresTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -785,11 +773,10 @@ func (s *PostgresTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, 
 
 	_, err = tx.Exec(ctx, `
 		UPDATE outputs
-		SET block_height = $1, block_idx = $2, ancillary_beef = $3, score = $4
-		WHERE topic = $5 AND outpoint = $6`,
+		SET block_height = $1, block_idx = $2, score = $3
+		WHERE topic = $4 AND outpoint = $5`,
 		blockHeight,
 		blockIndex,
-		ancillaryBeef,
 		float64(time.Now().UnixNano()),
 		s.topic,
 		outpoint.String(),
@@ -881,10 +868,8 @@ func (s *PostgresTopicDataStorage) GetTransactionsByHeight(ctx context.Context, 
 
 		// Create OutputData
 		outputData := &OutputData{
-			Vout:     outpoint.Index,
-			Data:     data,
-			Script:   scriptBytes,
-			Satoshis: satoshis,
+			Vout: outpoint.Index,
+			Data: data,
 		}
 
 		// Parse txid
@@ -964,11 +949,9 @@ func (s *PostgresTopicDataStorage) GetTransactionsByHeight(ctx context.Context, 
 
 		// Create OutputData for input
 		inputData := &OutputData{
-			TxID:     sourceTxid,
-			Vout:     outpoint.Index,
-			Data:     data,
-			Script:   scriptBytes,
-			Satoshis: satoshis,
+			TxID: sourceTxid,
+			Vout: outpoint.Index,
+			Data: data,
 		}
 
 		// Add to the spending transaction's inputs
@@ -1049,11 +1032,9 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 		}
 
 		output := &OutputData{
-			Vout:     outpoint.Index,
-			Data:     data,
-			Script:   scriptBytes,
-			Satoshis: satoshis,
-			Spend:    spend,
+			Vout:  outpoint.Index,
+			Data:  data,
+			Spend: spend,
 		}
 
 		outputs = append(outputs, output)
@@ -1066,8 +1047,8 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 
 	// Query inputs for this transaction
 	var inputs []*OutputData
-	inputQuery := `SELECT outpoint, txid, script, satoshis, data 
-	              FROM outputs 
+	inputQuery := `SELECT outpoint, txid, data
+	              FROM outputs
 	              WHERE topic = $1 AND spend = $2`
 
 	inputRows, err := s.pool.Query(ctx, inputQuery, s.topic, txid.String())
@@ -1078,11 +1059,9 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 
 	for inputRows.Next() {
 		var outpointStr, txidStr string
-		var script []byte
-		var satoshis uint64
 		var dataJSON *string
 
-		err := inputRows.Scan(&outpointStr, &txidStr, &script, &satoshis, &dataJSON)
+		err := inputRows.Scan(&outpointStr, &txidStr, &dataJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -1104,11 +1083,9 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 		// Create OutputData for input with source txid
 		sourceTxid := outpoint.Txid
 		input := &OutputData{
-			TxID:     &sourceTxid,
-			Vout:     outpoint.Index,
-			Data:     data,
-			Script:   script,
-			Satoshis: satoshis,
+			TxID: &sourceTxid,
+			Vout: outpoint.Index,
+			Data: data,
 		}
 
 		inputs = append(inputs, input)
@@ -1138,34 +1115,50 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 
 // LoadBeefByTxid loads merged BEEF for a transaction within a topic context
 func (s *PostgresTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
-	// Find any output for this txid in the specified topic
-	var ancillaryBeef []byte
+	// Find any output for this txid and load its metadata
+	var metadataJSON []byte
 	err := s.pool.QueryRow(ctx,
-		"SELECT ancillary_beef FROM outputs WHERE topic = $1 AND txid = $2 LIMIT 1",
+		"SELECT metadata FROM outputs WHERE topic = $1 AND txid = $2 LIMIT 1",
 		s.topic, txid.String(),
-	).Scan(&ancillaryBeef)
+	).Scan(&metadataJSON)
 
+	if err == pgx.ErrNoRows {
+		return nil, fmt.Errorf("transaction %s not found in topic %s", txid.String(), s.topic)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("transaction %s not found in topic %s: %w", txid.String(), s.topic, err)
+		return nil, fmt.Errorf("failed to check transaction %s in topic %s: %w", txid.String(), s.topic, err)
 	}
 
-	// Get BEEF from beef storage
-	beefBytes, err := s.beefStore.LoadBeef(ctx, txid)
+	// Parse metadata from JSON
+	var ancillaryTxids []*chainhash.Hash
+	if len(metadataJSON) > 0 {
+		var metadata OutputMetadata
+		if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
+		}
+
+		// Parse ancillary txids
+		if len(metadata.AncillaryTxids) > 0 {
+			for _, txidStr := range metadata.AncillaryTxids {
+				hash, err := chainhash.NewHashFromHex(txidStr)
+				if err != nil {
+					return nil, fmt.Errorf("invalid ancillary txid %s: %w", txidStr, err)
+				}
+				ancillaryTxids = append(ancillaryTxids, hash)
+			}
+		}
+	}
+
+	// Get BEEF from beef storage with ancillary txids (LoadBeef will merge them)
+	beefBytes, err := s.beefStore.LoadBeef(ctx, txid, ancillaryTxids)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load BEEF: %w", err)
 	}
 
-	// Parse the main BEEF
+	// Parse the BEEF
 	beef, _, _, err := transaction.ParseBeef(beefBytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse main BEEF: %w", err)
-	}
-
-	// Merge AncillaryBeef if present
-	if len(ancillaryBeef) > 0 {
-		if err := beef.MergeBeefBytes(ancillaryBeef); err != nil {
-			return nil, fmt.Errorf("failed to merge AncillaryBeef: %w", err)
-		}
+		return nil, fmt.Errorf("failed to parse BEEF: %w", err)
 	}
 
 	// Get atomic BEEF bytes for the specific transaction
@@ -1502,7 +1495,7 @@ func (s *PostgresTopicDataStorage) FindOutputData(ctx context.Context, question 
 
 	// Base query selecting OutputData fields
 	query.WriteString(`
-		SELECT DISTINCT o.outpoint, o.script, o.satoshis, o.data, o.spend, o.score
+		SELECT DISTINCT o.outpoint, o.data, o.spend, o.score
 		FROM outputs o
 	`)
 
@@ -1527,7 +1520,7 @@ func (s *PostgresTopicDataStorage) FindOutputData(ctx context.Context, question 
 
 		if question.JoinType != nil && *question.JoinType == JoinTypeIntersect {
 			// For intersection, we need all events to be present
-			query.WriteString(fmt.Sprintf(" AND oe.event IN (%s) GROUP BY o.outpoint, o.script, o.satoshis, o.data, o.spend, o.score HAVING COUNT(DISTINCT oe.event) = %d",
+			query.WriteString(fmt.Sprintf(" AND oe.event IN (%s) GROUP BY o.outpoint, o.data, o.spend, o.score HAVING COUNT(DISTINCT oe.event) = %d",
 				strings.Join(placeholders, ","), len(question.Events)))
 		} else {
 			// Default to union
@@ -1581,13 +1574,11 @@ func (s *PostgresTopicDataStorage) FindOutputData(ctx context.Context, question 
 	var results []*OutputData
 	for rows.Next() {
 		var outpointStr string
-		var script []byte
-		var satoshis uint64
 		var dataJSON *string
 		var spendingTxidStr *string
 		var score float64
 
-		if err := rows.Scan(&outpointStr, &script, &satoshis, &dataJSON, &spendingTxidStr, &score); err != nil {
+		if err := rows.Scan(&outpointStr, &dataJSON, &spendingTxidStr, &score); err != nil {
 			return nil, err
 		}
 
@@ -1606,12 +1597,10 @@ func (s *PostgresTopicDataStorage) FindOutputData(ctx context.Context, question 
 		}
 
 		result := &OutputData{
-			TxID:     &outpoint.Txid,
-			Vout:     outpoint.Index,
-			Script:   script,
-			Satoshis: satoshis,
-			Spend:    spendTxid,
-			Score:    score,
+			TxID:  &outpoint.Txid,
+			Vout:  outpoint.Index,
+			Spend: spendTxid,
+			Score: score,
 		}
 
 		// Parse data if present
@@ -1709,14 +1698,14 @@ func (s *PostgresTopicDataStorage) FindOutpointsByMerkleState(ctx context.Contex
 // This includes promoting to Immutable at sufficient depth or Invalidating if merkle root changed
 // Assumes merkle roots cache is already current via SyncMerkleRoots
 func (s *PostgresTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Context) error {
-	if s.headersClient == nil {
-		return fmt.Errorf("headers client not configured")
+	if s.chainTracker == nil {
+		return fmt.Errorf("chain tracker not configured")
 	}
 
 	// Get current chain tip for immutability calculations
-	chaintip, err := s.headersClient.GetChaintip(ctx)
+	currentHeight, err := s.chainTracker.CurrentHeight(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to get chaintip: %w", err)
+		return fmt.Errorf("failed to get current height: %w", err)
 	}
 
 	// Find all unique block heights with Validated outputs
@@ -1739,29 +1728,29 @@ func (s *PostgresTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Con
 			return err
 		}
 
-		// Get the correct merkle root from our cache
-		correctRoot, err := s.headersClient.GetMerkleRootForHeight(ctx, height)
-		if err != nil {
-			// If we can't get the merkle root, skip this height
-			continue
-		}
-
 		// Check if we need to reconcile:
 		// 1. Height has reached immutable depth, OR
 		// 2. Merkle root has changed (indicating reorg)
-		needsReconcile := chaintip.Height-height >= IMMUTABILITY_DEPTH
+		needsReconcile := currentHeight-height >= IMMUTABILITY_DEPTH
 
-		// Check if merkle root has changed
+		// Check if merkle root has changed (if we have a stored root)
+		var correctRoot *chainhash.Hash
 		if !needsReconcile && storedRootStr != nil && *storedRootStr != "" {
 			storedRoot, err := chainhash.NewHashFromHex(*storedRootStr)
 			if err != nil {
 				needsReconcile = true // If we can't parse it, reconcile it
-			} else if !storedRoot.IsEqual(correctRoot) {
-				needsReconcile = true
+			} else {
+				// Validate if this root is correct for this height
+				isValid, err := s.chainTracker.IsValidRootForHeight(ctx, storedRoot, height)
+				if err != nil || !isValid {
+					needsReconcile = true
+				}
 			}
 		}
 
 		// Reconcile if needed
+		// Note: correctRoot is nil here since we're using IsValidRootForHeight
+		// The ReconcileMerkleRoot will need to handle validation differently
 		if needsReconcile {
 			if err := s.ReconcileMerkleRoot(ctx, height, correctRoot); err != nil {
 				return fmt.Errorf("failed to reconcile height %d: %w", height, err)
@@ -1781,10 +1770,10 @@ func (s *PostgresTopicDataStorage) ReconcileMerkleRoot(ctx context.Context, bloc
 
 	// Determine if this height should be immutable
 	isImmutable := false
-	if s.headersClient != nil {
-		chaintip, err := s.headersClient.GetChaintip(ctx)
-		if err == nil && chaintip != nil {
-			depth := chaintip.Height - blockHeight
+	if s.chainTracker != nil {
+		currentHeight, err := s.chainTracker.CurrentHeight(ctx)
+		if err == nil {
+			depth := currentHeight - blockHeight
 			isImmutable = depth >= IMMUTABILITY_DEPTH
 		}
 	}

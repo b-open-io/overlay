@@ -9,20 +9,18 @@ import (
 	"time"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
-	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 	_ "github.com/go-sql-driver/mysql"
 )
 
 type MySQLBeefStorage struct {
-	db       *sql.DB
-	fallback BeefStorage
+	db *sql.DB
 }
 
 // NewMySQLBeefStorage creates a new MySQL-backed BEEF storage.
 // The connString can be either:
 //   - URL format: mysql://user:password@host:port/database
 //   - DSN format: user:password@tcp(host:port)/database
-func NewMySQLBeefStorage(connString string, fallback BeefStorage) (*MySQLBeefStorage, error) {
+func NewMySQLBeefStorage(connString string) (*MySQLBeefStorage, error) {
 	// Parse connection string and convert to DSN if needed
 	dsn, err := parseMySQLConnectionString(connString)
 	if err != nil {
@@ -61,8 +59,7 @@ func NewMySQLBeefStorage(connString string, fallback BeefStorage) (*MySQLBeefSto
 	db.SetConnMaxIdleTime(30 * time.Minute)
 
 	return &MySQLBeefStorage{
-		db:       db,
-		fallback: fallback,
+		db: db,
 	}, nil
 }
 
@@ -115,33 +112,23 @@ func (m *MySQLBeefStorage) Close() error {
 	return m.db.Close()
 }
 
-func (m *MySQLBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+func (m *MySQLBeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	txidStr := txid.String()
 
-	// Try to load from MySQL first
 	var beefBytes []byte
 	err := m.db.QueryRowContext(ctx, "SELECT beef FROM beef_storage WHERE txid = ?", txidStr).Scan(&beefBytes)
 
-	if err == nil {
-		return beefBytes, nil
-	} else if err != sql.ErrNoRows {
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
 		return nil, fmt.Errorf("database error: %w", err)
 	}
 
-	// Not found in MySQL, try fallback
-	if m.fallback != nil {
-		beefBytes, err = m.fallback.LoadBeef(ctx, txid)
-		if err == nil {
-			// Save to MySQL for future use
-			m.SaveBeef(ctx, txid, beefBytes)
-		}
-		return beefBytes, err
-	}
-
-	return nil, ErrNotFound
+	return beefBytes, nil
 }
 
-func (m *MySQLBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
+func (m *MySQLBeefStorage) Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
 	txidStr := txid.String()
 
 	// Use REPLACE to handle duplicates (MySQL equivalent of INSERT OR REPLACE)
@@ -152,15 +139,7 @@ func (m *MySQLBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, b
 	return err
 }
 
-// UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
-func (m *MySQLBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
-	if m.fallback != nil {
-		beefBytes, err := m.fallback.UpdateMerklePath(ctx, txid, ct)
-		if err == nil && len(beefBytes) > 0 {
-			// Update our own storage with the new beef
-			m.SaveBeef(ctx, txid, beefBytes)
-		}
-		return beefBytes, err
-	}
-	return nil, ErrNotFound
+// UpdateMerklePath is not supported by MySQL storage
+func (m *MySQLBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	return nil, nil
 }
