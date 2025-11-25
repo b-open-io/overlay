@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -17,224 +18,157 @@ import (
 	"github.com/bsv-blockchain/go-sdk/overlay"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	_ "github.com/go-sql-driver/mysql"
 )
 
-// PostgresSharedPool manages a single connection pool shared across all topics
-type PostgresSharedPool struct {
-	pool        *pgxpool.Pool
+// MySQLSharedPool manages a single connection pool shared across all topics
+type MySQLSharedPool struct {
+	db          *sql.DB
 	initialized bool
 	refCount    int
 	mutex       sync.RWMutex
 }
 
 // Global shared pool instance
-var sharedPool = &PostgresSharedPool{}
+var mysqlSharedPool = &MySQLSharedPool{}
 
-// PostgresTopicDataStorage implements TopicDataStorage using PostgreSQL with shared connection pool
-type PostgresTopicDataStorage struct {
+// MySQLTopicDataStorage implements TopicDataStorage using MySQL with shared connection pool
+type MySQLTopicDataStorage struct {
 	BaseEventDataStorage
-	pool  *pgxpool.Pool
+	db    *sql.DB
 	topic string
 }
 
-// NewPostgresTopicDataStorage creates a new PostgreSQL topic storage using shared connection pool
-func NewPostgresTopicDataStorage(topic string, connectionString string, beefStore *beef.Storage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, chainTracker chaintracker.ChainTracker) (TopicDataStorage, error) {
+// NewMySQLTopicDataStorage creates a new MySQL topic storage using shared connection pool
+func NewMySQLTopicDataStorage(topic string, connectionString string, beefStore *beef.Storage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub, chainTracker chaintracker.ChainTracker) (TopicDataStorage, error) {
 	// Get or create shared connection pool
-	pool, err := getSharedPool(connectionString)
+	db, err := getMySQLSharedPool(connectionString)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared pool: %w", err)
 	}
 
-	storage := &PostgresTopicDataStorage{
+	storage := &MySQLTopicDataStorage{
 		BaseEventDataStorage: NewBaseEventDataStorage(beefStore, queueStorage, pubsub, chainTracker),
-		pool:                 pool,
+		db:                   db,
 		topic:                topic,
 	}
 
-	// Ensure parent tables exist (idempotent)
+	// Ensure tables exist (idempotent)
 	if err := storage.createTables(context.Background()); err != nil {
 		return nil, fmt.Errorf("failed to create tables: %w", err)
-	}
-
-	// Ensure partitions exist for this topic (idempotent)
-	if err := storage.ensureTopicPartitions(context.Background()); err != nil {
-		return nil, fmt.Errorf("failed to create topic partitions: %w", err)
 	}
 
 	return storage, nil
 }
 
-// getSharedPool returns the shared connection pool, creating it if necessary
-func getSharedPool(connectionString string) (*pgxpool.Pool, error) {
-	sharedPool.mutex.Lock()
-	defer sharedPool.mutex.Unlock()
+// getMySQLSharedPool returns the shared connection pool, creating it if necessary
+func getMySQLSharedPool(connectionString string) (*sql.DB, error) {
+	mysqlSharedPool.mutex.Lock()
+	defer mysqlSharedPool.mutex.Unlock()
 
-	if sharedPool.initialized {
-		sharedPool.refCount++
-		return sharedPool.pool, nil
+	if mysqlSharedPool.initialized {
+		mysqlSharedPool.refCount++
+		return mysqlSharedPool.db, nil
 	}
 
-	// Parse connection string and configure pool
-	config, err := pgxpool.ParseConfig(connectionString)
+	// Open database connection
+	db, err := sql.Open("mysql", connectionString)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse connection string: %w", err)
+		return nil, fmt.Errorf("failed to open MySQL connection: %w", err)
 	}
 
-	// Configure connection pool settings - reduced for shared memory constraints
-	config.MaxConns = 100
-	config.MinConns = 2
-	config.MaxConnIdleTime = 30 * time.Minute
-	config.MaxConnLifetime = 1 * time.Hour
-
-	// Create connection pool
-	pool, err := pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create connection pool: %w", err)
-	}
+	// Configure connection pool settings
+	db.SetMaxOpenConns(100)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(1 * time.Hour)
+	db.SetConnMaxIdleTime(30 * time.Minute)
 
 	// Test the connection
-	if err := pool.Ping(context.Background()); err != nil {
-		pool.Close()
+	if err := db.Ping(); err != nil {
+		db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	sharedPool.pool = pool
-	sharedPool.initialized = true
-	sharedPool.refCount = 1
+	mysqlSharedPool.db = db
+	mysqlSharedPool.initialized = true
+	mysqlSharedPool.refCount = 1
 
-	return pool, nil
+	return db, nil
 }
 
 // GetTopic returns the topic this storage handles
-func (s *PostgresTopicDataStorage) GetTopic() string {
+func (s *MySQLTopicDataStorage) GetTopic() string {
 	return s.topic
 }
 
-// createTables creates all required partitioned tables with proper indexes (idempotent)
-func (s *PostgresTopicDataStorage) createTables(ctx context.Context) error {
-	// Create parent tables with partitioning
-	parentTables := []string{
-		// Outputs table - partitioned by topic
+// createTables creates all required tables with proper indexes (idempotent)
+func (s *MySQLTopicDataStorage) createTables(ctx context.Context) error {
+	tables := []string{
+		// Outputs table
 		`CREATE TABLE IF NOT EXISTS outputs (
-			outpoint TEXT NOT NULL,
-			txid TEXT NOT NULL,
-			script BYTEA NOT NULL,
-			satoshis BIGINT NOT NULL,
-			spend TEXT,
-			block_height INTEGER,
-			block_idx INTEGER,
-			score DOUBLE PRECISION,
-			metadata JSONB,
-			data JSONB,
-			topic TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (topic, outpoint)
-		) PARTITION BY LIST (topic)`,
+			outpoint VARCHAR(255) NOT NULL,
+			txid VARCHAR(64) NOT NULL,
+			script LONGBLOB NOT NULL,
+			satoshis BIGINT UNSIGNED NOT NULL,
+			spend VARCHAR(64),
+			block_height INT UNSIGNED,
+			block_idx INT UNSIGNED,
+			score DOUBLE NOT NULL,
+			ancillary_beef LONGBLOB,
+			data JSON,
+			topic VARCHAR(255) NOT NULL,
+			merkle_root VARCHAR(64),
+			merkle_validation_state SMALLINT DEFAULT 0,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (topic, outpoint),
+			INDEX idx_outputs_outpoint (outpoint),
+			INDEX idx_outputs_txid (txid),
+			INDEX idx_outputs_score (score),
+			INDEX idx_outputs_spend_score (spend, score),
+			INDEX idx_outputs_block_height (block_height),
+			INDEX idx_outputs_merkle_validation_state (merkle_validation_state),
+			INDEX idx_outputs_topic_score (topic, score)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`,
 
-		// Events table - partitioned by topic
+		// Events table
 		`CREATE TABLE IF NOT EXISTS events (
-			event TEXT NOT NULL,
-			outpoint TEXT NOT NULL,
-			score DOUBLE PRECISION NOT NULL,
-			spend TEXT,
-			topic TEXT NOT NULL,
-			PRIMARY KEY (topic, event, outpoint)
-		) PARTITION BY LIST (topic)`,
+			event VARCHAR(255) NOT NULL,
+			outpoint VARCHAR(255) NOT NULL,
+			score DOUBLE NOT NULL,
+			spend VARCHAR(64),
+			topic VARCHAR(255) NOT NULL,
+			PRIMARY KEY (topic, event, outpoint),
+			INDEX idx_events_event_score_spend (event, score, spend),
+			INDEX idx_events_outpoint (outpoint),
+			INDEX idx_events_topic_score (topic, score)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`,
 
-		// Transactions table - partitioned by topic
+		// Transactions table
 		`CREATE TABLE IF NOT EXISTS transactions (
-			txid TEXT NOT NULL,
-			score DOUBLE PRECISION,
-			topic TEXT NOT NULL,
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (topic, txid)
-		) PARTITION BY LIST (topic)`,
+			txid VARCHAR(64) NOT NULL,
+			score DOUBLE,
+			topic VARCHAR(255) NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY (topic, txid),
+			INDEX idx_transactions_txid (txid),
+			INDEX idx_transactions_score (score)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`,
+
+		// Output relationships table
+		`CREATE TABLE IF NOT EXISTS output_relationships (
+			consuming_outpoint VARCHAR(255) NOT NULL,
+			consumed_outpoint VARCHAR(255) NOT NULL,
+			topic VARCHAR(255) NOT NULL,
+			PRIMARY KEY (topic, consuming_outpoint, consumed_outpoint),
+			INDEX idx_relationships_consuming (consuming_outpoint),
+			INDEX idx_relationships_consumed (consumed_outpoint)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin`,
 	}
 
-	// Create parent tables
-	for _, query := range parentTables {
-		if _, err := s.pool.Exec(ctx, query); err != nil {
-			return fmt.Errorf("failed to create parent table: %w", err)
-		}
-	}
-
-	// Add new columns if they don't exist (for existing databases)
-	// PostgreSQL supports IF NOT EXISTS for ALTER TABLE ADD COLUMN
-	migrations := []string{
-		`ALTER TABLE outputs ADD COLUMN IF NOT EXISTS merkle_root TEXT`,
-		`ALTER TABLE outputs ADD COLUMN IF NOT EXISTS merkle_validation_state SMALLINT DEFAULT 0`,
-	}
-
-	for _, migration := range migrations {
-		if _, err := s.pool.Exec(ctx, migration); err != nil {
-			log.Printf("Migration warning (may be normal): %v", err)
-		}
-	}
-
-	return nil
-}
-
-// ensureTopicPartitions creates partitions for the given topic if they don't exist
-func (s *PostgresTopicDataStorage) ensureTopicPartitions(ctx context.Context) error {
-	// Sanitize topic name for use as table suffix (replace non-alphanumeric with underscore)
-	sanitizedTopic := strings.ReplaceAll(s.topic, "-", "_")
-	sanitizedTopic = strings.ReplaceAll(sanitizedTopic, ".", "_")
-
-	partitions := []struct {
-		parentTable string
-		partName    string
-		indexes     []string
-	}{
-		{
-			parentTable: "outputs",
-			partName:    fmt.Sprintf("outputs_%s", sanitizedTopic),
-			indexes: []string{
-				`CREATE INDEX IF NOT EXISTS idx_%[1]s_outpoint ON %[1]s(outpoint)`,
-				`CREATE INDEX IF NOT EXISTS idx_%[1]s_txid ON %[1]s(txid)`,
-				`CREATE INDEX IF NOT EXISTS idx_%[1]s_score ON %[1]s(score)`,
-				`CREATE INDEX IF NOT EXISTS idx_%[1]s_spend_score ON %[1]s(spend, score)`,
-				`CREATE INDEX IF NOT EXISTS idx_%[1]s_block_height ON %[1]s(block_height)`,
-				`CREATE INDEX IF NOT EXISTS idx_%[1]s_merkle_validation_state ON %[1]s(merkle_validation_state)`,
-			},
-		},
-		{
-			parentTable: "events",
-			partName:    fmt.Sprintf("events_%s", sanitizedTopic),
-			indexes: []string{
-				`CREATE INDEX IF NOT EXISTS idx_%[1]s_event_score_spend ON %[1]s(event, score, spend)`,
-				`CREATE INDEX IF NOT EXISTS idx_%[1]s_outpoint ON %[1]s(outpoint)`,
-			},
-		},
-		{
-			parentTable: "transactions",
-			partName:    fmt.Sprintf("transactions_%s", sanitizedTopic),
-			indexes: []string{
-				`CREATE INDEX IF NOT EXISTS idx_%[1]s_txid ON %[1]s(txid)`,
-				`CREATE INDEX IF NOT EXISTS idx_%[1]s_score ON %[1]s(score)`,
-			},
-		},
-	}
-
-	for _, partition := range partitions {
-		// Create partition
-		createPartitionSQL := fmt.Sprintf(`
-			CREATE TABLE IF NOT EXISTS %s 
-			PARTITION OF %s 
-			FOR VALUES IN ('%s')`,
-			partition.partName, partition.parentTable, s.topic)
-
-		if _, err := s.pool.Exec(ctx, createPartitionSQL); err != nil {
-			return fmt.Errorf("failed to create partition %s: %w", partition.partName, err)
-		}
-
-		// Create indexes on the partition
-		for _, indexTemplate := range partition.indexes {
-			indexSQL := fmt.Sprintf(indexTemplate, partition.partName)
-			if _, err := s.pool.Exec(ctx, indexSQL); err != nil {
-				log.Printf("Index creation warning on partition %s (may be normal): %v", partition.partName, err)
-			}
+	// Create tables
+	for _, query := range tables {
+		if _, err := s.db.ExecContext(ctx, query); err != nil {
+			return fmt.Errorf("failed to create table: %w", err)
 		}
 	}
 
@@ -242,7 +176,7 @@ func (s *PostgresTopicDataStorage) ensureTopicPartitions(ctx context.Context) er
 }
 
 // InsertOutput inserts a new output into the database
-func (s *PostgresTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) error {
+func (s *MySQLTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) error {
 	// Calculate score
 	utxo.Score = float64(time.Now().UnixNano())
 
@@ -250,6 +184,19 @@ func (s *PostgresTopicDataStorage) InsertOutput(ctx context.Context, utxo *engin
 	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
 		return err
 	}
+
+	// Parse BEEF to extract script and satoshis
+	_, tx, _, err := transaction.ParseBeef(utxo.Beef)
+	if err != nil {
+		return fmt.Errorf("failed to parse BEEF: %w", err)
+	}
+	if tx == nil {
+		return fmt.Errorf("no transaction in BEEF")
+	}
+	if int(utxo.Outpoint.Index) >= len(tx.Outputs) {
+		return fmt.Errorf("output index %d out of range", utxo.Outpoint.Index)
+	}
+	txOutput := tx.Outputs[utxo.Outpoint.Index]
 
 	// Extract merkle information from BEEF
 	blockHeight, blockIndex, merkleRoot, validationState, err := s.ExtractMerkleInfoFromBEEF(ctx, &utxo.Outpoint.Txid, utxo.Beef)
@@ -262,62 +209,34 @@ func (s *PostgresTopicDataStorage) InsertOutput(ctx context.Context, utxo *engin
 	utxo.BlockIdx = blockIndex
 
 	// Prepare merkle root string
-	merkleRootStr := ""
+	merkleRootStr := sql.NullString{}
 	if merkleRoot != nil {
-		merkleRootStr = merkleRoot.String()
+		merkleRootStr.Valid = true
+		merkleRootStr.String = merkleRoot.String()
 	}
 
-	// Build metadata object
-	metadata := OutputMetadata{}
-
-	// Convert AncillaryTxids to string array
-	if len(utxo.AncillaryTxids) > 0 {
-		metadata.AncillaryTxids = make([]string, len(utxo.AncillaryTxids))
-		for i, txid := range utxo.AncillaryTxids {
-			metadata.AncillaryTxids[i] = txid.String()
-		}
-	}
-
-	// Convert OutputsConsumed to string array
-	if len(utxo.OutputsConsumed) > 0 {
-		metadata.OutputsConsumed = make([]string, len(utxo.OutputsConsumed))
-		for i, outpoint := range utxo.OutputsConsumed {
-			metadata.OutputsConsumed[i] = outpoint.String()
-		}
-	}
-
-	// Convert ConsumedBy to string array
-	if len(utxo.ConsumedBy) > 0 {
-		metadata.ConsumedBy = make([]string, len(utxo.ConsumedBy))
-		for i, outpoint := range utxo.ConsumedBy {
-			metadata.ConsumedBy[i] = outpoint.String()
-		}
-	}
-
-	// Marshal metadata to JSON
-	metadataJSON, err := json.Marshal(metadata)
-	if err != nil {
-		return fmt.Errorf("failed to marshal metadata: %w", err)
-	}
-
-	// Insert output with merkle info and metadata in a single operation
-	_, err = s.pool.Exec(ctx, `
-		INSERT INTO outputs (outpoint, txid, block_height, block_idx, score, metadata,
+	// Insert output with merkle info
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO outputs (outpoint, txid, script, satoshis, block_height, block_idx, score, ancillary_beef,
 			merkle_root, merkle_validation_state, topic)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (topic, outpoint) DO UPDATE SET
-			block_height = EXCLUDED.block_height,
-			block_idx = EXCLUDED.block_idx,
-			score = EXCLUDED.score,
-			metadata = EXCLUDED.metadata,
-			merkle_root = EXCLUDED.merkle_root,
-			merkle_validation_state = EXCLUDED.merkle_validation_state`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			script = VALUES(script),
+			satoshis = VALUES(satoshis),
+			block_height = VALUES(block_height),
+			block_idx = VALUES(block_idx),
+			score = VALUES(score),
+			ancillary_beef = VALUES(ancillary_beef),
+			merkle_root = VALUES(merkle_root),
+			merkle_validation_state = VALUES(merkle_validation_state)`,
 		utxo.Outpoint.String(),
 		utxo.Outpoint.Txid.String(),
+		txOutput.LockingScript.Bytes(),
+		txOutput.Satoshis,
 		utxo.BlockHeight,
 		utxo.BlockIdx,
 		utxo.Score,
-		string(metadataJSON),
+		nil, // ancillary_beef no longer on Output struct
 		merkleRootStr,
 		validationState,
 		s.topic,
@@ -326,18 +245,54 @@ func (s *PostgresTopicDataStorage) InsertOutput(ctx context.Context, utxo *engin
 		return err
 	}
 
-	// // Add topic as an event using SaveEvents (handles pubsub publishing)
-	// if err := s.SaveEvents(ctx, &utxo.Outpoint, []string{s.topic}, utxo.Score, nil); err != nil {
-	// 	return err
-	// }
+	// Batch insert output relationships
+	var relationships [][]interface{}
+
+	// Collect all relationships
+	for _, consumed := range utxo.OutputsConsumed {
+		relationships = append(relationships, []interface{}{
+			utxo.Outpoint.String(),
+			consumed.String(),
+			s.topic,
+		})
+	}
+
+	for _, consumedBy := range utxo.ConsumedBy {
+		relationships = append(relationships, []interface{}{
+			consumedBy.String(),
+			utxo.Outpoint.String(),
+			s.topic,
+		})
+	}
+
+	// Batch insert all relationships
+	if len(relationships) > 0 {
+		valueStrings := make([]string, len(relationships))
+		valueArgs := make([]interface{}, 0, len(relationships)*3)
+
+		for i, rel := range relationships {
+			valueStrings[i] = "(?, ?, ?)"
+			valueArgs = append(valueArgs, rel...)
+		}
+
+		query := fmt.Sprintf(`
+			INSERT IGNORE INTO output_relationships (consuming_outpoint, consumed_outpoint, topic)
+			VALUES %s`,
+			strings.Join(valueStrings, ","))
+
+		_, err = s.db.ExecContext(ctx, query, valueArgs...)
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
 
 // FindOutput finds a single output by outpoint
-func (s *PostgresTopicDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, spent *bool, includeBEEF bool) (*engine.Output, error) {
-	query := `SELECT outpoint, txid, spend, block_height, block_idx, score, metadata
-		FROM outputs WHERE topic = $1 AND outpoint = $2`
+func (s *MySQLTopicDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, spent *bool, includeBEEF bool) (*engine.Output, error) {
+	query := `SELECT outpoint, txid, script, satoshis, spend, block_height, block_idx, score, ancillary_beef
+		FROM outputs WHERE topic = ? AND outpoint = ?`
 	args := []interface{}{s.topic, outpoint.String()}
 
 	if spent != nil {
@@ -350,19 +305,23 @@ func (s *PostgresTopicDataStorage) FindOutput(ctx context.Context, outpoint *tra
 
 	var output engine.Output
 	var outpointStr, txidStr string
-	var metadataJSON []byte
-	var spendTxid *string
+	var scriptBytes []byte
+	var satoshis uint64
+	var ancillaryBeef []byte
+	var spendTxid sql.NullString
 
-	err := s.pool.QueryRow(ctx, query, args...).Scan(
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(
 		&outpointStr,
 		&txidStr,
+		&scriptBytes,
+		&satoshis,
 		&spendTxid,
 		&output.BlockHeight,
 		&output.BlockIdx,
 		&output.Score,
-		&metadataJSON,
+		&ancillaryBeef,
 	)
-	if err == pgx.ErrNoRows {
+	if err == sql.ErrNoRows {
 		return nil, nil
 	} else if err != nil {
 		return nil, err
@@ -378,83 +337,50 @@ func (s *PostgresTopicDataStorage) FindOutput(ctx context.Context, outpoint *tra
 	// Set topic from storage
 	output.Topic = s.topic
 
-	// Set spent status based on whether spend field has a value
-	output.Spent = spendTxid != nil
+	// Set spent status
+	output.Spent = spendTxid.Valid
 
-	// Parse metadata from JSON
-	if len(metadataJSON) > 0 {
-		var metadata OutputMetadata
-		if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
-		}
-
-		// Parse ancillary txids
-		if len(metadata.AncillaryTxids) > 0 {
-			output.AncillaryTxids = make([]*chainhash.Hash, 0, len(metadata.AncillaryTxids))
-			for _, txidStr := range metadata.AncillaryTxids {
-				hash, err := chainhash.NewHashFromHex(txidStr)
-				if err != nil {
-					return nil, fmt.Errorf("invalid ancillary txid %s: %w", txidStr, err)
-				}
-				output.AncillaryTxids = append(output.AncillaryTxids, hash)
-			}
-		}
-
-		// Parse outputs consumed
-		if len(metadata.OutputsConsumed) > 0 {
-			output.OutputsConsumed = make([]*transaction.Outpoint, 0, len(metadata.OutputsConsumed))
-			for _, opStr := range metadata.OutputsConsumed {
-				op, err := transaction.OutpointFromString(opStr)
-				if err != nil {
-					return nil, fmt.Errorf("invalid outputs consumed outpoint %s: %w", opStr, err)
-				}
-				output.OutputsConsumed = append(output.OutputsConsumed, op)
-			}
-		}
-
-		// Parse consumed by
-		if len(metadata.ConsumedBy) > 0 {
-			output.ConsumedBy = make([]*transaction.Outpoint, 0, len(metadata.ConsumedBy))
-			for _, opStr := range metadata.ConsumedBy {
-				op, err := transaction.OutpointFromString(opStr)
-				if err != nil {
-					return nil, fmt.Errorf("invalid consumed by outpoint %s: %w", opStr, err)
-				}
-				output.ConsumedBy = append(output.ConsumedBy, op)
-			}
-		}
-	}
+	// Note: scriptBytes, satoshis, and ancillaryBeef are read from DB but not stored
+	// on Output struct (those fields no longer exist). Data is in BEEF.
+	_ = scriptBytes
+	_ = satoshis
+	_ = ancillaryBeef
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, output.AncillaryTxids)
+		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, nil)
 		if err != nil {
 			return nil, err
 		}
 		output.Beef = beef
 	}
 
+	// Load consumed outputs
+	if err = s.loadOutputRelations(ctx, &output); err != nil {
+		return nil, err
+	}
+
 	return &output, nil
 }
 
 // FindOutputs finds multiple outputs by outpoints
-func (s *PostgresTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
+func (s *MySQLTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, spent *bool, includeBEEF bool) ([]*engine.Output, error) {
 	if len(outpoints) == 0 {
 		return nil, nil
 	}
 
 	// Build query with placeholders
 	placeholders := make([]string, len(outpoints))
-	args := make([]interface{}, 0, len(outpoints)+2)
+	args := make([]interface{}, 0, len(outpoints)+1)
 	args = append(args, s.topic)
 
 	for i, op := range outpoints {
-		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		placeholders[i] = "?"
 		args = append(args, op.String())
 	}
 
-	query := fmt.Sprintf(`SELECT outpoint, txid, spend, block_height, block_idx, score, metadata
-		FROM outputs WHERE topic = $1 AND outpoint IN (%s)`, strings.Join(placeholders, ","))
+	query := fmt.Sprintf(`SELECT outpoint, txid, script, satoshis, spend, block_height, block_idx, score, ancillary_beef
+		FROM outputs WHERE topic = ? AND outpoint IN (%s)`, strings.Join(placeholders, ","))
 
 	if spent != nil {
 		if *spent {
@@ -464,7 +390,7 @@ func (s *PostgresTopicDataStorage) FindOutputs(ctx context.Context, outpoints []
 		}
 	}
 
-	rows, err := s.pool.Query(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -494,20 +420,24 @@ func (s *PostgresTopicDataStorage) FindOutputs(ctx context.Context, outpoints []
 }
 
 // Helper method to scan output from database row
-func (s *PostgresTopicDataStorage) scanOutput(rows pgx.Rows, includeBEEF bool) (*engine.Output, error) {
+func (s *MySQLTopicDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*engine.Output, error) {
 	var output engine.Output
 	var outpointStr, txidStr string
-	var metadataJSON []byte
-	var spendTxid *string
+	var scriptBytes []byte
+	var satoshis uint64
+	var ancillaryBeef []byte
+	var spendTxid sql.NullString
 
 	err := rows.Scan(
 		&outpointStr,
 		&txidStr,
+		&scriptBytes,
+		&satoshis,
 		&spendTxid,
 		&output.BlockHeight,
 		&output.BlockIdx,
 		&output.Score,
-		&metadataJSON,
+		&ancillaryBeef,
 	)
 	if err != nil {
 		return nil, err
@@ -523,59 +453,18 @@ func (s *PostgresTopicDataStorage) scanOutput(rows pgx.Rows, includeBEEF bool) (
 	// Set topic from storage
 	output.Topic = s.topic
 
-	// Set spent status based on whether spend field has a value
-	output.Spent = spendTxid != nil
+	// Set spent status
+	output.Spent = spendTxid.Valid
 
-	// Parse metadata from JSON
-	if len(metadataJSON) > 0 {
-		var metadata OutputMetadata
-		if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
-			log.Printf("Failed to unmarshal metadata: %v", err)
-		} else {
-			// Parse ancillary txids
-			if len(metadata.AncillaryTxids) > 0 {
-				output.AncillaryTxids = make([]*chainhash.Hash, 0, len(metadata.AncillaryTxids))
-				for _, txidStr := range metadata.AncillaryTxids {
-					hash, err := chainhash.NewHashFromHex(txidStr)
-					if err != nil {
-						log.Printf("Invalid ancillary txid %s: %v", txidStr, err)
-						continue
-					}
-					output.AncillaryTxids = append(output.AncillaryTxids, hash)
-				}
-			}
-
-			// Parse outputs consumed
-			if len(metadata.OutputsConsumed) > 0 {
-				output.OutputsConsumed = make([]*transaction.Outpoint, 0, len(metadata.OutputsConsumed))
-				for _, opStr := range metadata.OutputsConsumed {
-					op, err := transaction.OutpointFromString(opStr)
-					if err != nil {
-						log.Printf("Invalid outputs consumed outpoint %s: %v", opStr, err)
-						continue
-					}
-					output.OutputsConsumed = append(output.OutputsConsumed, op)
-				}
-			}
-
-			// Parse consumed by
-			if len(metadata.ConsumedBy) > 0 {
-				output.ConsumedBy = make([]*transaction.Outpoint, 0, len(metadata.ConsumedBy))
-				for _, opStr := range metadata.ConsumedBy {
-					op, err := transaction.OutpointFromString(opStr)
-					if err != nil {
-						log.Printf("Invalid consumed by outpoint %s: %v", opStr, err)
-						continue
-					}
-					output.ConsumedBy = append(output.ConsumedBy, op)
-				}
-			}
-		}
-	}
+	// Note: scriptBytes, satoshis, and ancillaryBeef are read from DB but not stored
+	// on Output struct (those fields no longer exist). Data is in BEEF.
+	_ = scriptBytes
+	_ = satoshis
+	_ = ancillaryBeef
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid, output.AncillaryTxids)
+		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid, nil)
 		if err != nil {
 			log.Printf("Failed to load BEEF for %s: %v", output.Outpoint.Txid, err)
 		} else {
@@ -583,33 +472,84 @@ func (s *PostgresTopicDataStorage) scanOutput(rows pgx.Rows, includeBEEF bool) (
 		}
 	}
 
+	// Load relations
+	if err = s.loadOutputRelations(context.Background(), &output); err != nil {
+		return nil, err
+	}
+
 	return &output, nil
 }
 
+// loadOutputRelations loads the input/output relationships for an output
+func (s *MySQLTopicDataStorage) loadOutputRelations(ctx context.Context, output *engine.Output) error {
+	// Load outputs consumed by this output
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT consumed_outpoint FROM output_relationships WHERE topic = ? AND consuming_outpoint = ?",
+		s.topic, output.Outpoint.String())
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var opStr string
+		if err := rows.Scan(&opStr); err != nil {
+			return err
+		}
+		op, err := transaction.OutpointFromString(opStr)
+		if err != nil {
+			return err
+		}
+		output.OutputsConsumed = append(output.OutputsConsumed, op)
+	}
+
+	// Load outputs that consume this output
+	rows2, err := s.db.QueryContext(ctx,
+		"SELECT consuming_outpoint FROM output_relationships WHERE topic = ? AND consumed_outpoint = ?",
+		s.topic, output.Outpoint.String())
+	if err != nil {
+		return err
+	}
+	defer rows2.Close()
+
+	for rows2.Next() {
+		var opStr string
+		if err := rows2.Scan(&opStr); err != nil {
+			return err
+		}
+		op, err := transaction.OutpointFromString(opStr)
+		if err != nil {
+			return err
+		}
+		output.ConsumedBy = append(output.ConsumedBy, op)
+	}
+
+	return nil
+}
 
 // Close closes the storage and decrements shared pool reference count
-func (s *PostgresTopicDataStorage) Close() error {
-	sharedPool.mutex.Lock()
-	defer sharedPool.mutex.Unlock()
+func (s *MySQLTopicDataStorage) Close() error {
+	mysqlSharedPool.mutex.Lock()
+	defer mysqlSharedPool.mutex.Unlock()
 
-	if sharedPool.initialized {
-		sharedPool.refCount--
-		if sharedPool.refCount == 0 {
+	if mysqlSharedPool.initialized {
+		mysqlSharedPool.refCount--
+		if mysqlSharedPool.refCount == 0 {
 			// No more references, close the shared pool
-			sharedPool.pool.Close()
-			sharedPool.pool = nil
-			sharedPool.initialized = false
+			mysqlSharedPool.db.Close()
+			mysqlSharedPool.db = nil
+			mysqlSharedPool.initialized = false
 		}
 	}
 	return nil
 }
 
 // FindOutputsForTransaction finds all outputs for a given transaction
-func (s *PostgresTopicDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
-	query := `SELECT outpoint, txid, spend, block_height, block_idx, score, metadata
-		FROM outputs WHERE topic = $1 AND txid = $2`
+func (s *MySQLTopicDataStorage) FindOutputsForTransaction(ctx context.Context, txid *chainhash.Hash, includeBEEF bool) ([]*engine.Output, error) {
+	query := `SELECT outpoint, txid, script, satoshis, spend, block_height, block_idx, score, ancillary_beef
+		FROM outputs WHERE topic = ? AND txid = ?`
 
-	rows, err := s.pool.Query(ctx, query, s.topic, txid.String())
+	rows, err := s.db.QueryContext(ctx, query, s.topic, txid.String())
 	if err != nil {
 		return nil, err
 	}
@@ -628,19 +568,19 @@ func (s *PostgresTopicDataStorage) FindOutputsForTransaction(ctx context.Context
 }
 
 // FindUTXOsForTopic finds unspent outputs for the topic since a given score
-func (s *PostgresTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
-	query := `SELECT outpoint, txid, spend, block_height, block_idx, score, metadata
+func (s *MySQLTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error) {
+	query := `SELECT outpoint, txid, script, satoshis, spend, block_height, block_idx, score, ancillary_beef
 		FROM outputs
-		WHERE topic = $1 AND score >= $2 -- AND spend IS NULL
+		WHERE topic = ? AND score >= ?
 		ORDER BY score`
 
 	args := []interface{}{s.topic, since}
 	if limit > 0 {
-		query += " LIMIT $3"
+		query += " LIMIT ?"
 		args = append(args, limit)
 	}
 
-	rows, err := s.pool.Query(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -659,38 +599,38 @@ func (s *PostgresTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since 
 }
 
 // DeleteOutput deletes an output from the database
-func (s *PostgresTopicDataStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint) error {
-	_, err := s.pool.Exec(ctx,
-		"DELETE FROM outputs WHERE topic = $1 AND outpoint = $2",
+func (s *MySQLTopicDataStorage) DeleteOutput(ctx context.Context, outpoint *transaction.Outpoint) error {
+	_, err := s.db.ExecContext(ctx,
+		"DELETE FROM outputs WHERE topic = ? AND outpoint = ?",
 		s.topic, outpoint.String())
 	return err
 }
 
 // MarkUTXOAsSpent marks a UTXO as spent
-func (s *PostgresTopicDataStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *transaction.Outpoint, beef []byte) error {
+func (s *MySQLTopicDataStorage) MarkUTXOAsSpent(ctx context.Context, outpoint *transaction.Outpoint, beef []byte) error {
 	// Parse the beef to get the spending txid
 	_, _, spendTxid, err := transaction.ParseBeef(beef)
 	if err != nil {
 		return err
 	}
 
-	_, err = s.pool.Exec(ctx,
-		"UPDATE outputs SET spend = $1 WHERE topic = $2 AND outpoint = $3",
+	_, err = s.db.ExecContext(ctx,
+		"UPDATE outputs SET spend = ? WHERE topic = ? AND outpoint = ?",
 		spendTxid.String(), s.topic, outpoint.String())
 	return err
 }
 
 // MarkUTXOsAsSpent marks multiple UTXOs as spent
-func (s *PostgresTopicDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transaction.Outpoint, spendTxid *chainhash.Hash) error {
+func (s *MySQLTopicDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoints []*transaction.Outpoint, spendTxid *chainhash.Hash) error {
 	if len(outpoints) == 0 {
 		return nil
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback()
 
 	spendTxidStr := spendTxid.String()
 
@@ -698,33 +638,33 @@ func (s *PostgresTopicDataStorage) MarkUTXOsAsSpent(ctx context.Context, outpoin
 		opStr := op.String()
 
 		// Update outputs table
-		_, err = tx.Exec(ctx,
-			"UPDATE outputs SET spend = $1 WHERE topic = $2 AND outpoint = $3",
+		_, err = tx.ExecContext(ctx,
+			"UPDATE outputs SET spend = ? WHERE topic = ? AND outpoint = ?",
 			spendTxidStr, s.topic, opStr)
 		if err != nil {
 			return err
 		}
 
 		// Update events table for all events associated with this outpoint
-		_, err = tx.Exec(ctx,
-			"UPDATE events SET spend = $1 WHERE topic = $2 AND outpoint = $3",
+		_, err = tx.ExecContext(ctx,
+			"UPDATE events SET spend = ? WHERE topic = ? AND outpoint = ?",
 			spendTxidStr, s.topic, opStr)
 		if err != nil {
 			return err
 		}
 	}
 
-	return nil
+	return tx.Commit()
 }
 
 // UpdateConsumedBy updates consumed-by relationships (no-op as managed atomically)
-func (s *PostgresTopicDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, consumedBy []*transaction.Outpoint) error {
+func (s *MySQLTopicDataStorage) UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, consumedBy []*transaction.Outpoint) error {
 	// No-op: Output relationships are managed by InsertOutput method atomically.
 	return nil
 }
 
 // UpdateTransactionBEEF updates BEEF data for a transaction
-func (s *PostgresTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
+func (s *MySQLTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error {
 	// Save BEEF to storage
 	if err := s.beefStore.SaveBeef(ctx, txid, beef); err != nil {
 		return err
@@ -742,13 +682,13 @@ func (s *PostgresTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, tx
 	}
 
 	// Update all outputs for this transaction with the merkle root, validation state, block height AND index
-	_, err = s.pool.Exec(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 		UPDATE outputs
-		SET merkle_root = $1,
-		    merkle_validation_state = $2,
-		    block_height = $3,
-		    block_idx = $4
-		WHERE topic = $5 AND txid = $6`,
+		SET merkle_root = ?,
+		    merkle_validation_state = ?,
+		    block_height = ?,
+		    block_idx = ?
+		WHERE topic = ? AND txid = ?`,
 		merkleRoot.String(),
 		validationState,
 		blockHeight,
@@ -764,17 +704,17 @@ func (s *PostgresTopicDataStorage) UpdateTransactionBEEF(ctx context.Context, tx
 }
 
 // UpdateOutputBlockHeight updates block height information for an output
-func (s *PostgresTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64) error {
-	tx, err := s.pool.Begin(ctx)
+func (s *MySQLTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback()
 
-	_, err = tx.Exec(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		UPDATE outputs
-		SET block_height = $1, block_idx = $2, score = $3
-		WHERE topic = $4 AND outpoint = $5`,
+		SET block_height = ?, block_idx = ?, score = ?
+		WHERE topic = ? AND outpoint = ?`,
 		blockHeight,
 		blockIndex,
 		float64(time.Now().UnixNano()),
@@ -785,19 +725,19 @@ func (s *PostgresTopicDataStorage) UpdateOutputBlockHeight(ctx context.Context, 
 		return err
 	}
 
-	return tx.Commit(ctx)
+	return tx.Commit()
 }
 
 // InsertAppliedTransaction inserts an applied transaction record
-func (s *PostgresTopicDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
+func (s *MySQLTopicDataStorage) InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error {
 	score := float64(time.Now().UnixNano())
 
-	_, err := s.pool.Exec(ctx, `
+	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO transactions (topic, txid, score, created_at)
-		VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-		ON CONFLICT (topic, txid) DO UPDATE SET
-			score = EXCLUDED.score,
-			created_at = EXCLUDED.created_at`,
+		VALUES (?, ?, ?, NOW())
+		ON DUPLICATE KEY UPDATE
+			score = VALUES(score),
+			created_at = VALUES(created_at)`,
 		s.topic, tx.Txid.String(), score)
 
 	if err != nil {
@@ -815,23 +755,23 @@ func (s *PostgresTopicDataStorage) InsertAppliedTransaction(ctx context.Context,
 }
 
 // DoesAppliedTransactionExist checks if an applied transaction exists
-func (s *PostgresTopicDataStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
-	var exists bool
-	err := s.pool.QueryRow(ctx,
-		"SELECT EXISTS(SELECT 1 FROM transactions WHERE topic = $1 AND txid = $2)",
+func (s *MySQLTopicDataStorage) DoesAppliedTransactionExist(ctx context.Context, tx *overlay.AppliedTransaction) (bool, error) {
+	var exists int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM transactions WHERE topic = ? AND txid = ?)",
 		s.topic, tx.Txid.String()).Scan(&exists)
-	return exists, err
+	return exists == 1, err
 }
 
 // GetTransactionsByHeight returns all transactions for a topic at a specific block height
-func (s *PostgresTopicDataStorage) GetTransactionsByHeight(ctx context.Context, height uint32) ([]*TransactionData, error) {
+func (s *MySQLTopicDataStorage) GetTransactionsByHeight(ctx context.Context, height uint32) ([]*TransactionData, error) {
 	// Query outputs for the topic and block height
-	query := `SELECT outpoint, txid, script, satoshis, spend, data 
-	         FROM outputs 
-	         WHERE topic = $1 AND block_height = $2
+	query := `SELECT outpoint, txid, script, satoshis, spend, data
+	         FROM outputs
+	         WHERE topic = ? AND block_height = ?
 	         ORDER BY txid, outpoint`
 
-	rows, err := s.pool.Query(ctx, query, s.topic, height)
+	rows, err := s.db.QueryContext(ctx, query, s.topic, height)
 	if err != nil {
 		return nil, err
 	}
@@ -844,8 +784,8 @@ func (s *PostgresTopicDataStorage) GetTransactionsByHeight(ctx context.Context, 
 		var outpointStr, txidStr string
 		var scriptBytes []byte
 		var satoshis uint64
-		var spendTxid *string
-		var dataJSON *string
+		var spendTxid sql.NullString
+		var dataJSON sql.NullString
 
 		err := rows.Scan(&outpointStr, &txidStr, &scriptBytes, &satoshis, &spendTxid, &dataJSON)
 		if err != nil {
@@ -860,8 +800,8 @@ func (s *PostgresTopicDataStorage) GetTransactionsByHeight(ctx context.Context, 
 
 		// Parse data if present
 		var data interface{}
-		if dataJSON != nil && *dataJSON != "" {
-			if err := json.Unmarshal([]byte(*dataJSON), &data); err == nil {
+		if dataJSON.Valid && dataJSON.String != "" {
+			if err := json.Unmarshal([]byte(dataJSON.String), &data); err == nil {
 				// Successfully parsed JSON data
 			}
 		}
@@ -871,6 +811,11 @@ func (s *PostgresTopicDataStorage) GetTransactionsByHeight(ctx context.Context, 
 			Vout: outpoint.Index,
 			Data: data,
 		}
+
+		// Note: scriptBytes and satoshis are read from DB but not stored on OutputData
+		// (those fields no longer exist)
+		_ = scriptBytes
+		_ = satoshis
 
 		// Parse txid
 		txid, err := chainhash.NewHashFromHex(txidStr)
@@ -900,14 +845,14 @@ func (s *PostgresTopicDataStorage) GetTransactionsByHeight(ctx context.Context, 
 	args := make([]interface{}, 0, len(txids)+1)
 	args = append(args, s.topic)
 	for i, txid := range txids {
-		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		placeholders[i] = "?"
 		args = append(args, txid)
 	}
 
-	inputQuery := fmt.Sprintf(`SELECT outpoint, txid, script, satoshis, spend, data 
-	                          FROM outputs WHERE topic = $1 AND spend IN (%s)`, strings.Join(placeholders, ","))
+	inputQuery := fmt.Sprintf(`SELECT outpoint, txid, script, satoshis, spend, data
+	                          FROM outputs WHERE topic = ? AND spend IN (%s)`, strings.Join(placeholders, ","))
 
-	inputRows, err := s.pool.Query(ctx, inputQuery, args...)
+	inputRows, err := s.db.QueryContext(ctx, inputQuery, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -919,8 +864,8 @@ func (s *PostgresTopicDataStorage) GetTransactionsByHeight(ctx context.Context, 
 		var outpointStr, txidStr string
 		var scriptBytes []byte
 		var satoshis uint64
-		var spendTxidStr *string
-		var dataJSON *string
+		var spendTxidStr sql.NullString
+		var dataJSON sql.NullString
 
 		err := inputRows.Scan(&outpointStr, &txidStr, &scriptBytes, &satoshis, &spendTxidStr, &dataJSON)
 		if err != nil {
@@ -941,8 +886,8 @@ func (s *PostgresTopicDataStorage) GetTransactionsByHeight(ctx context.Context, 
 
 		// Parse data if present
 		var data interface{}
-		if dataJSON != nil && *dataJSON != "" {
-			if err := json.Unmarshal([]byte(*dataJSON), &data); err == nil {
+		if dataJSON.Valid && dataJSON.String != "" {
+			if err := json.Unmarshal([]byte(dataJSON.String), &data); err == nil {
 				// Successfully parsed JSON data
 			}
 		}
@@ -954,9 +899,13 @@ func (s *PostgresTopicDataStorage) GetTransactionsByHeight(ctx context.Context, 
 			Data: data,
 		}
 
+		// Note: scriptBytes and satoshis are read from DB but not stored on OutputData
+		_ = scriptBytes
+		_ = satoshis
+
 		// Add to the spending transaction's inputs
-		if spendTxidStr != nil {
-			if spendTxid, err := chainhash.NewHashFromHex(*spendTxidStr); err == nil {
+		if spendTxidStr.Valid {
+			if spendTxid, err := chainhash.NewHashFromHex(spendTxidStr.String); err == nil {
 				txInputMap[*spendTxid] = append(txInputMap[*spendTxid], inputData)
 			}
 		}
@@ -981,14 +930,14 @@ func (s *PostgresTopicDataStorage) GetTransactionsByHeight(ctx context.Context, 
 }
 
 // GetTransactionByTxid returns a single transaction by txid
-func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid *chainhash.Hash, includeBeef ...bool) (*TransactionData, error) {
+func (s *MySQLTopicDataStorage) GetTransactionByTxid(ctx context.Context, txid *chainhash.Hash, includeBeef ...bool) (*TransactionData, error) {
 	// Query outputs for the specific transaction and topic
 	query := `SELECT outpoint, txid, script, satoshis, spend, data, block_height, block_idx
-	         FROM outputs 
-	         WHERE topic = $1 AND txid = $2
+	         FROM outputs
+	         WHERE topic = ? AND txid = ?
 	         ORDER BY outpoint`
 
-	rows, err := s.pool.Query(ctx, query, s.topic, txid.String())
+	rows, err := s.db.QueryContext(ctx, query, s.topic, txid.String())
 	if err != nil {
 		return nil, err
 	}
@@ -1003,8 +952,8 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 		var outpointStr, txidStr string
 		var scriptBytes []byte
 		var satoshis uint64
-		var spendStr *string
-		var dataJSON *string
+		var spendStr sql.NullString
+		var dataJSON sql.NullString
 
 		err := rows.Scan(&outpointStr, &txidStr, &scriptBytes, &satoshis, &spendStr, &dataJSON, &blockHeight, &blockIndex)
 		if err != nil {
@@ -1019,16 +968,16 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 
 		// Parse spend if exists
 		var spend *chainhash.Hash
-		if spendStr != nil && *spendStr != "" {
-			if spendHash, err := chainhash.NewHashFromHex(*spendStr); err == nil {
+		if spendStr.Valid && spendStr.String != "" {
+			if spendHash, err := chainhash.NewHashFromHex(spendStr.String); err == nil {
 				spend = spendHash
 			}
 		}
 
 		// Parse data if exists
 		var data interface{}
-		if dataJSON != nil && *dataJSON != "" {
-			json.Unmarshal([]byte(*dataJSON), &data)
+		if dataJSON.Valid && dataJSON.String != "" {
+			json.Unmarshal([]byte(dataJSON.String), &data)
 		}
 
 		output := &OutputData{
@@ -1036,6 +985,10 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 			Data:  data,
 			Spend: spend,
 		}
+
+		// Note: scriptBytes and satoshis are read from DB but not stored on OutputData
+		_ = scriptBytes
+		_ = satoshis
 
 		outputs = append(outputs, output)
 	}
@@ -1047,11 +1000,11 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 
 	// Query inputs for this transaction
 	var inputs []*OutputData
-	inputQuery := `SELECT outpoint, txid, data
+	inputQuery := `SELECT outpoint, txid, script, satoshis, data
 	              FROM outputs
-	              WHERE topic = $1 AND spend = $2`
+	              WHERE topic = ? AND spend = ?`
 
-	inputRows, err := s.pool.Query(ctx, inputQuery, s.topic, txid.String())
+	inputRows, err := s.db.QueryContext(ctx, inputQuery, s.topic, txid.String())
 	if err != nil {
 		return nil, err
 	}
@@ -1059,9 +1012,11 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 
 	for inputRows.Next() {
 		var outpointStr, txidStr string
-		var dataJSON *string
+		var script []byte
+		var satoshis uint64
+		var dataJSON sql.NullString
 
-		err := inputRows.Scan(&outpointStr, &txidStr, &dataJSON)
+		err := inputRows.Scan(&outpointStr, &txidStr, &script, &satoshis, &dataJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -1074,8 +1029,8 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 
 		// Parse data if exists
 		var data interface{}
-		if dataJSON != nil && *dataJSON != "" {
-			if err := json.Unmarshal([]byte(*dataJSON), &data); err != nil {
+		if dataJSON.Valid && dataJSON.String != "" {
+			if err := json.Unmarshal([]byte(dataJSON.String), &data); err != nil {
 				return nil, err
 			}
 		}
@@ -1087,6 +1042,10 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 			Vout: outpoint.Index,
 			Data: data,
 		}
+
+		// Note: script and satoshis are read from DB but not stored on OutputData
+		_ = script
+		_ = satoshis
 
 		inputs = append(inputs, input)
 	}
@@ -1114,51 +1073,35 @@ func (s *PostgresTopicDataStorage) GetTransactionByTxid(ctx context.Context, txi
 }
 
 // LoadBeefByTxid loads merged BEEF for a transaction within a topic context
-func (s *PostgresTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
-	// Find any output for this txid and load its metadata
-	var metadataJSON []byte
-	err := s.pool.QueryRow(ctx,
-		"SELECT metadata FROM outputs WHERE topic = $1 AND txid = $2 LIMIT 1",
+func (s *MySQLTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	// Find any output for this txid in the specified topic
+	var ancillaryBeef []byte
+	err := s.db.QueryRowContext(ctx,
+		"SELECT ancillary_beef FROM outputs WHERE topic = ? AND txid = ? LIMIT 1",
 		s.topic, txid.String(),
-	).Scan(&metadataJSON)
+	).Scan(&ancillaryBeef)
 
-	if err == pgx.ErrNoRows {
-		return nil, fmt.Errorf("transaction %s not found in topic %s", txid.String(), s.topic)
-	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to check transaction %s in topic %s: %w", txid.String(), s.topic, err)
+		return nil, fmt.Errorf("transaction %s not found in topic %s: %w", txid.String(), s.topic, err)
 	}
 
-	// Parse metadata from JSON
-	var ancillaryTxids []*chainhash.Hash
-	if len(metadataJSON) > 0 {
-		var metadata OutputMetadata
-		if err := json.Unmarshal(metadataJSON, &metadata); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
-		}
-
-		// Parse ancillary txids
-		if len(metadata.AncillaryTxids) > 0 {
-			for _, txidStr := range metadata.AncillaryTxids {
-				hash, err := chainhash.NewHashFromHex(txidStr)
-				if err != nil {
-					return nil, fmt.Errorf("invalid ancillary txid %s: %w", txidStr, err)
-				}
-				ancillaryTxids = append(ancillaryTxids, hash)
-			}
-		}
-	}
-
-	// Get BEEF from beef storage with ancillary txids (LoadBeef will merge them)
-	beefBytes, err := s.beefStore.LoadBeef(ctx, txid, ancillaryTxids)
+	// Get BEEF from beef storage
+	beefBytes, err := s.beefStore.LoadBeef(ctx, txid, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load BEEF: %w", err)
 	}
 
-	// Parse the BEEF
+	// Parse the main BEEF
 	beef, _, _, err := transaction.ParseBeef(beefBytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse BEEF: %w", err)
+		return nil, fmt.Errorf("failed to parse main BEEF: %w", err)
+	}
+
+	// Merge AncillaryBeef if present
+	if len(ancillaryBeef) > 0 {
+		if err := beef.MergeBeefBytes(ancillaryBeef); err != nil {
+			return nil, fmt.Errorf("failed to merge AncillaryBeef: %w", err)
+		}
 	}
 
 	// Get atomic BEEF bytes for the specific transaction
@@ -1171,25 +1114,25 @@ func (s *PostgresTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *cha
 }
 
 // SaveEvents associates multiple events with a single output, storing arbitrary data
-func (s *PostgresTopicDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, score float64, data interface{}) error {
+func (s *MySQLTopicDataStorage) SaveEvents(ctx context.Context, outpoint *transaction.Outpoint, events []string, score float64, data interface{}) error {
 	if len(events) == 0 && data == nil {
 		return nil
 	}
 	outpointStr := outpoint.String()
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback()
 
 	// Insert events into events table
 	for _, event := range events {
-		_, err = tx.Exec(ctx, `
+		_, err = tx.ExecContext(ctx, `
 			INSERT INTO events (event, outpoint, score, topic)
-			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (topic, event, outpoint) DO UPDATE SET
-				score = EXCLUDED.score`,
+			VALUES (?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE
+				score = VALUES(score)`,
 			event, outpointStr, score, s.topic)
 		if err != nil {
 			return err
@@ -1203,21 +1146,18 @@ func (s *PostgresTopicDataStorage) SaveEvents(ctx context.Context, outpoint *tra
 			return err
 		}
 
-		_, err = tx.Exec(ctx, `
-			UPDATE outputs 
-			SET data = CASE 
-				WHEN data IS NULL THEN $1::jsonb
-				ELSE data || $1::jsonb
-			END
-			WHERE topic = $2 AND outpoint = $3`,
-			string(dataJSON), s.topic, outpointStr)
+		_, err = tx.ExecContext(ctx, `
+			UPDATE outputs
+			SET data = IF(data IS NULL, ?, JSON_MERGE_PATCH(data, ?))
+			WHERE topic = ? AND outpoint = ?`,
+			string(dataJSON), string(dataJSON), s.topic, outpointStr)
 		if err != nil {
 			return err
 		}
 	}
 
 	// Commit the transaction
-	if err := tx.Commit(ctx); err != nil {
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 
@@ -1235,9 +1175,9 @@ func (s *PostgresTopicDataStorage) SaveEvents(ctx context.Context, outpoint *tra
 }
 
 // FindEvents returns all events associated with a given outpoint
-func (s *PostgresTopicDataStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
-	rows, err := s.pool.Query(ctx,
-		"SELECT event FROM events WHERE topic = $1 AND outpoint = $2",
+func (s *MySQLTopicDataStorage) FindEvents(ctx context.Context, outpoint *transaction.Outpoint) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT event FROM events WHERE topic = ? AND outpoint = ?",
 		s.topic, outpoint.String())
 	if err != nil {
 		return nil, err
@@ -1257,7 +1197,7 @@ func (s *PostgresTopicDataStorage) FindEvents(ctx context.Context, outpoint *tra
 }
 
 // LookupOutpoints returns outpoints matching the given query criteria
-func (s *PostgresTopicDataStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
+func (s *MySQLTopicDataStorage) LookupOutpoints(ctx context.Context, question *EventQuestion, includeData ...bool) ([]*OutpointResult, error) {
 	withData := len(includeData) > 0 && includeData[0]
 
 	// Build the query
@@ -1275,7 +1215,7 @@ func (s *PostgresTopicDataStorage) LookupOutpoints(ctx context.Context, question
 		if withData {
 			query.WriteString(" LEFT JOIN outputs o ON e.topic = o.topic AND e.outpoint = o.outpoint")
 		}
-		query.WriteString(" WHERE e.topic = $1 AND e.event = $2")
+		query.WriteString(" WHERE e.topic = ? AND e.event = ?")
 		args = append(args, s.topic, question.Event)
 	} else if len(question.Events) > 0 {
 		if question.JoinType == nil || *question.JoinType == JoinTypeUnion {
@@ -1288,11 +1228,11 @@ func (s *PostgresTopicDataStorage) LookupOutpoints(ctx context.Context, question
 			if withData {
 				query.WriteString(" LEFT JOIN outputs o ON e.topic = o.topic AND e.outpoint = o.outpoint")
 			}
-			query.WriteString(" WHERE e.topic = $1 AND e.event IN (")
+			query.WriteString(" WHERE e.topic = ? AND e.event IN (")
 			args = append(args, s.topic)
 			placeholders := make([]string, len(question.Events))
 			for i, event := range question.Events {
-				placeholders[i] = fmt.Sprintf("$%d", i+2)
+				placeholders[i] = "?"
 				args = append(args, event)
 			}
 			query.WriteString(strings.Join(placeholders, ","))
@@ -1310,10 +1250,10 @@ func (s *PostgresTopicDataStorage) LookupOutpoints(ctx context.Context, question
 			if withData {
 				query.WriteString(" LEFT JOIN outputs o ON e1.topic = o.topic AND e1.outpoint = o.outpoint")
 			}
-			query.WriteString(" WHERE e1.topic = $1 AND e1.event = $2")
+			query.WriteString(" WHERE e1.topic = ? AND e1.event = ?")
 			args = append(args, s.topic, question.Events[0])
 			for i := 1; i < len(question.Events); i++ {
-				query.WriteString(fmt.Sprintf(" AND e%d.event = $%d", i+1, i+2))
+				query.WriteString(fmt.Sprintf(" AND e%d.event = ?", i+1))
 				args = append(args, question.Events[i])
 			}
 		} else if *question.JoinType == JoinTypeDifference {
@@ -1326,11 +1266,11 @@ func (s *PostgresTopicDataStorage) LookupOutpoints(ctx context.Context, question
 			if withData {
 				query.WriteString(" LEFT JOIN outputs o ON e.topic = o.topic AND e.outpoint = o.outpoint")
 			}
-			query.WriteString(" WHERE e.topic = $1 AND e.event = $2 AND NOT EXISTS (SELECT 1 FROM events e2 WHERE e2.topic = e.topic AND e2.outpoint = e.outpoint AND e2.event IN (")
+			query.WriteString(" WHERE e.topic = ? AND e.event = ? AND NOT EXISTS (SELECT 1 FROM events e2 WHERE e2.topic = e.topic AND e2.outpoint = e.outpoint AND e2.event IN (")
 			args = append(args, s.topic, question.Events[0])
 			placeholders := make([]string, len(question.Events)-1)
 			for i := 1; i < len(question.Events); i++ {
-				placeholders[i-1] = fmt.Sprintf("$%d", i+2)
+				placeholders[i-1] = "?"
 				args = append(args, question.Events[i])
 			}
 			query.WriteString(strings.Join(placeholders, ","))
@@ -1342,7 +1282,7 @@ func (s *PostgresTopicDataStorage) LookupOutpoints(ctx context.Context, question
 		if withData {
 			query.WriteString(", data")
 		}
-		query.WriteString(" FROM outputs WHERE topic = $1")
+		query.WriteString(" FROM outputs WHERE topic = ?")
 		args = append(args, s.topic)
 	}
 
@@ -1350,16 +1290,16 @@ func (s *PostgresTopicDataStorage) LookupOutpoints(ctx context.Context, question
 	if question.Event != "" || len(question.Events) > 0 {
 		// Querying events table
 		if question.Reverse {
-			query.WriteString(" AND e.score < $" + fmt.Sprintf("%d", len(args)+1))
+			query.WriteString(" AND e.score < ?")
 		} else {
-			query.WriteString(" AND e.score > $" + fmt.Sprintf("%d", len(args)+1))
+			query.WriteString(" AND e.score > ?")
 		}
 	} else {
 		// Querying outputs table
 		if question.Reverse {
-			query.WriteString(" AND score < $" + fmt.Sprintf("%d", len(args)+1))
+			query.WriteString(" AND score < ?")
 		} else {
-			query.WriteString(" AND score > $" + fmt.Sprintf("%d", len(args)+1))
+			query.WriteString(" AND score > ?")
 		}
 	}
 	args = append(args, question.From)
@@ -1369,16 +1309,16 @@ func (s *PostgresTopicDataStorage) LookupOutpoints(ctx context.Context, question
 		if question.Event != "" || len(question.Events) > 0 {
 			// Querying events table
 			if question.Reverse {
-				query.WriteString(" AND e.score > $" + fmt.Sprintf("%d", len(args)+1))
+				query.WriteString(" AND e.score > ?")
 			} else {
-				query.WriteString(" AND e.score < $" + fmt.Sprintf("%d", len(args)+1))
+				query.WriteString(" AND e.score < ?")
 			}
 		} else {
 			// Querying outputs table
 			if question.Reverse {
-				query.WriteString(" AND score > $" + fmt.Sprintf("%d", len(args)+1))
+				query.WriteString(" AND score > ?")
 			} else {
-				query.WriteString(" AND score < $" + fmt.Sprintf("%d", len(args)+1))
+				query.WriteString(" AND score < ?")
 			}
 		}
 		args = append(args, question.Until)
@@ -1412,12 +1352,12 @@ func (s *PostgresTopicDataStorage) LookupOutpoints(ctx context.Context, question
 
 	// Limit
 	if question.Limit > 0 {
-		query.WriteString(" LIMIT $" + fmt.Sprintf("%d", len(args)+1))
+		query.WriteString(" LIMIT ?")
 		args = append(args, question.Limit)
 	}
 
 	// Execute query
-	rows, err := s.pool.Query(ctx, query.String(), args...)
+	rows, err := s.db.QueryContext(ctx, query.String(), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1427,7 +1367,7 @@ func (s *PostgresTopicDataStorage) LookupOutpoints(ctx context.Context, question
 	for rows.Next() {
 		var outpointStr string
 		var score float64
-		var dataJSON *string
+		var dataJSON sql.NullString
 
 		if withData {
 			err = rows.Scan(&outpointStr, &score, &dataJSON)
@@ -1449,9 +1389,9 @@ func (s *PostgresTopicDataStorage) LookupOutpoints(ctx context.Context, question
 		}
 
 		// Include data if requested and available
-		if withData && dataJSON != nil && *dataJSON != "" {
+		if withData && dataJSON.Valid && dataJSON.String != "" {
 			var data interface{}
-			if err := json.Unmarshal([]byte(*dataJSON), &data); err == nil {
+			if err := json.Unmarshal([]byte(dataJSON.String), &data); err == nil {
 				result.Data = data
 			}
 		}
@@ -1463,25 +1403,25 @@ func (s *PostgresTopicDataStorage) LookupOutpoints(ctx context.Context, question
 }
 
 // GetOutputData retrieves the data associated with a specific output
-func (s *PostgresTopicDataStorage) GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error) {
-	var dataJSON *string
-	err := s.pool.QueryRow(ctx,
-		"SELECT data FROM outputs WHERE topic = $1 AND outpoint = $2 LIMIT 1",
+func (s *MySQLTopicDataStorage) GetOutputData(ctx context.Context, outpoint *transaction.Outpoint) (interface{}, error) {
+	var dataJSON sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		"SELECT data FROM outputs WHERE topic = ? AND outpoint = ? LIMIT 1",
 		s.topic, outpoint.String()).Scan(&dataJSON)
 
-	if err == pgx.ErrNoRows {
+	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("outpoint not found")
 	}
 	if err != nil {
 		return nil, err
 	}
 
-	if dataJSON == nil || *dataJSON == "" {
+	if !dataJSON.Valid || dataJSON.String == "" {
 		return nil, nil
 	}
 
 	var data interface{}
-	if err := json.Unmarshal([]byte(*dataJSON), &data); err != nil {
+	if err := json.Unmarshal([]byte(dataJSON.String), &data); err != nil {
 		return nil, err
 	}
 
@@ -1489,13 +1429,13 @@ func (s *PostgresTopicDataStorage) GetOutputData(ctx context.Context, outpoint *
 }
 
 // FindOutputData returns outputs matching the given query criteria as OutputData objects
-func (s *PostgresTopicDataStorage) FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error) {
+func (s *MySQLTopicDataStorage) FindOutputData(ctx context.Context, question *EventQuestion) ([]*OutputData, error) {
 	var query strings.Builder
 	var args []interface{}
 
 	// Base query selecting OutputData fields
 	query.WriteString(`
-		SELECT DISTINCT o.outpoint, o.data, o.spend, o.score
+		SELECT DISTINCT o.outpoint, o.script, o.satoshis, o.data, o.spend, o.score
 		FROM outputs o
 	`)
 
@@ -1504,23 +1444,23 @@ func (s *PostgresTopicDataStorage) FindOutputData(ctx context.Context, question 
 		query.WriteString(" JOIN events oe ON o.topic = oe.topic AND o.outpoint = oe.outpoint")
 	}
 
-	query.WriteString(" WHERE o.topic = $1")
+	query.WriteString(" WHERE o.topic = ?")
 	args = append(args, s.topic)
 
 	// Add event filters
 	if question.Event != "" {
-		query.WriteString(" AND oe.event = $2")
+		query.WriteString(" AND oe.event = ?")
 		args = append(args, question.Event)
 	} else if len(question.Events) > 0 {
 		placeholders := make([]string, len(question.Events))
 		for i, event := range question.Events {
-			placeholders[i] = fmt.Sprintf("$%d", len(args)+1)
+			placeholders[i] = "?"
 			args = append(args, event)
 		}
 
 		if question.JoinType != nil && *question.JoinType == JoinTypeIntersect {
 			// For intersection, we need all events to be present
-			query.WriteString(fmt.Sprintf(" AND oe.event IN (%s) GROUP BY o.outpoint, o.data, o.spend, o.score HAVING COUNT(DISTINCT oe.event) = %d",
+			query.WriteString(fmt.Sprintf(" AND oe.event IN (%s) GROUP BY o.outpoint, o.script, o.satoshis, o.data, o.spend, o.score HAVING COUNT(DISTINCT oe.event) = %d",
 				strings.Join(placeholders, ","), len(question.Events)))
 		} else {
 			// Default to union
@@ -1536,18 +1476,18 @@ func (s *PostgresTopicDataStorage) FindOutputData(ctx context.Context, question 
 	// Add score range filtering
 	if question.From > 0 {
 		if question.Reverse {
-			query.WriteString(" AND o.score <= $" + fmt.Sprintf("%d", len(args)+1))
+			query.WriteString(" AND o.score <= ?")
 		} else {
-			query.WriteString(" AND o.score >= $" + fmt.Sprintf("%d", len(args)+1))
+			query.WriteString(" AND o.score >= ?")
 		}
 		args = append(args, question.From)
 	}
 
 	if question.Until > 0 {
 		if question.Reverse {
-			query.WriteString(" AND o.score >= $" + fmt.Sprintf("%d", len(args)+1))
+			query.WriteString(" AND o.score >= ?")
 		} else {
-			query.WriteString(" AND o.score <= $" + fmt.Sprintf("%d", len(args)+1))
+			query.WriteString(" AND o.score <= ?")
 		}
 		args = append(args, question.Until)
 	}
@@ -1561,11 +1501,11 @@ func (s *PostgresTopicDataStorage) FindOutputData(ctx context.Context, question 
 
 	// Add limit
 	if question.Limit > 0 {
-		query.WriteString(" LIMIT $" + fmt.Sprintf("%d", len(args)+1))
+		query.WriteString(" LIMIT ?")
 		args = append(args, question.Limit)
 	}
 
-	rows, err := s.pool.Query(ctx, query.String(), args...)
+	rows, err := s.db.QueryContext(ctx, query.String(), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1574,11 +1514,13 @@ func (s *PostgresTopicDataStorage) FindOutputData(ctx context.Context, question 
 	var results []*OutputData
 	for rows.Next() {
 		var outpointStr string
-		var dataJSON *string
-		var spendingTxidStr *string
+		var script []byte
+		var satoshis uint64
+		var dataJSON sql.NullString
+		var spendingTxidStr sql.NullString
 		var score float64
 
-		if err := rows.Scan(&outpointStr, &dataJSON, &spendingTxidStr, &score); err != nil {
+		if err := rows.Scan(&outpointStr, &script, &satoshis, &dataJSON, &spendingTxidStr, &score); err != nil {
 			return nil, err
 		}
 
@@ -1590,8 +1532,8 @@ func (s *PostgresTopicDataStorage) FindOutputData(ctx context.Context, question 
 
 		// Parse spending txid if present
 		var spendTxid *chainhash.Hash
-		if spendingTxidStr != nil && *spendingTxidStr != "" {
-			if parsedSpendTxid, err := chainhash.NewHashFromHex(*spendingTxidStr); err == nil {
+		if spendingTxidStr.Valid && spendingTxidStr.String != "" {
+			if parsedSpendTxid, err := chainhash.NewHashFromHex(spendingTxidStr.String); err == nil {
 				spendTxid = parsedSpendTxid
 			}
 		}
@@ -1603,10 +1545,14 @@ func (s *PostgresTopicDataStorage) FindOutputData(ctx context.Context, question 
 			Score: score,
 		}
 
+		// Note: script and satoshis are read from DB but not stored on OutputData
+		_ = script
+		_ = satoshis
+
 		// Parse data if present
-		if dataJSON != nil && *dataJSON != "" {
+		if dataJSON.Valid && dataJSON.String != "" {
 			var data interface{}
-			if err := json.Unmarshal([]byte(*dataJSON), &data); err == nil {
+			if err := json.Unmarshal([]byte(dataJSON.String), &data); err == nil {
 				result.Data = data
 			}
 		}
@@ -1618,12 +1564,12 @@ func (s *PostgresTopicDataStorage) FindOutputData(ctx context.Context, question 
 }
 
 // LookupEventScores returns lightweight event scores for simple queries
-func (s *PostgresTopicDataStorage) LookupEventScores(ctx context.Context, event string, fromScore float64) ([]queue.ScoredMember, error) {
+func (s *MySQLTopicDataStorage) LookupEventScores(ctx context.Context, event string, fromScore float64) ([]queue.ScoredMember, error) {
 	// Query the events table directly
-	rows, err := s.pool.Query(ctx, `
-		SELECT outpoint, score 
-		FROM events 
-		WHERE topic = $1 AND event = $2 AND score > $3 
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT outpoint, score
+		FROM events
+		WHERE topic = ? AND event = ? AND score > ?
 		ORDER BY score ASC`,
 		s.topic, event, fromScore)
 	if err != nil {
@@ -1648,27 +1594,27 @@ func (s *PostgresTopicDataStorage) LookupEventScores(ctx context.Context, event 
 }
 
 // CountOutputs returns the total count of outputs in a given topic
-func (s *PostgresTopicDataStorage) CountOutputs(ctx context.Context) (int64, error) {
+func (s *MySQLTopicDataStorage) CountOutputs(ctx context.Context) (int64, error) {
 	var count int64
-	err := s.pool.QueryRow(ctx, "SELECT COUNT(1) FROM outputs WHERE topic = $1", s.topic).Scan(&count)
+	err := s.db.QueryRowContext(ctx, "SELECT COUNT(1) FROM outputs WHERE topic = ?", s.topic).Scan(&count)
 	return count, err
 }
 
 // FindOutputsByMerkleState finds outputs by their merkle validation state
-func (s *PostgresTopicDataStorage) FindOutpointsByMerkleState(ctx context.Context, state engine.MerkleState, limit uint32) ([]*transaction.Outpoint, error) {
+func (s *MySQLTopicDataStorage) FindOutpointsByMerkleState(ctx context.Context, state engine.MerkleState, limit uint32) ([]*transaction.Outpoint, error) {
 	query := `
 		SELECT outpoint
 		FROM outputs
-		WHERE topic = $1 AND merkle_validation_state = $2
+		WHERE topic = ? AND merkle_validation_state = ?
 		ORDER BY score DESC`
 
 	args := []interface{}{s.topic, state}
 	if limit > 0 {
-		query += " LIMIT $3"
+		query += " LIMIT ?"
 		args = append(args, limit)
 	}
 
-	rows, err := s.pool.Query(ctx, query, args...)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1697,7 +1643,7 @@ func (s *PostgresTopicDataStorage) FindOutpointsByMerkleState(ctx context.Contex
 // ReconcileValidatedMerkleRoots finds all Validated outputs and reconciles those that need updating
 // This includes promoting to Immutable at sufficient depth or Invalidating if merkle root changed
 // Assumes merkle roots cache is already current via SyncMerkleRoots
-func (s *PostgresTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Context) error {
+func (s *MySQLTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Context) error {
 	if s.chainTracker == nil {
 		return fmt.Errorf("chain tracker not configured")
 	}
@@ -1709,10 +1655,10 @@ func (s *PostgresTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Con
 	}
 
 	// Find all unique block heights with Validated outputs
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT block_height, merkle_root
 		FROM outputs
-		WHERE topic = $1 AND merkle_validation_state = $2
+		WHERE topic = ? AND merkle_validation_state = ?
 		ORDER BY block_height`,
 		s.topic, engine.MerkleStateValidated)
 	if err != nil {
@@ -1722,7 +1668,7 @@ func (s *PostgresTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Con
 
 	for rows.Next() {
 		var height uint32
-		var storedRootStr *string
+		var storedRootStr sql.NullString
 
 		if err := rows.Scan(&height, &storedRootStr); err != nil {
 			return err
@@ -1735,8 +1681,8 @@ func (s *PostgresTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Con
 
 		// Check if merkle root has changed (if we have a stored root)
 		var correctRoot *chainhash.Hash
-		if !needsReconcile && storedRootStr != nil && *storedRootStr != "" {
-			storedRoot, err := chainhash.NewHashFromHex(*storedRootStr)
+		if !needsReconcile && storedRootStr.Valid && storedRootStr.String != "" {
+			storedRoot, err := chainhash.NewHashFromHex(storedRootStr.String)
 			if err != nil {
 				needsReconcile = true // If we can't parse it, reconcile it
 			} else {
@@ -1762,7 +1708,7 @@ func (s *PostgresTopicDataStorage) ReconcileValidatedMerkleRoots(ctx context.Con
 }
 
 // ReconcileMerkleRoot reconciles validation state for all outputs at a given block height
-func (s *PostgresTopicDataStorage) ReconcileMerkleRoot(ctx context.Context, blockHeight uint32, merkleRoot *chainhash.Hash) error {
+func (s *MySQLTopicDataStorage) ReconcileMerkleRoot(ctx context.Context, blockHeight uint32, merkleRoot *chainhash.Hash) error {
 	merkleRootStr := ""
 	if merkleRoot != nil {
 		merkleRootStr = merkleRoot.String()
@@ -1785,16 +1731,16 @@ func (s *PostgresTopicDataStorage) ReconcileMerkleRoot(ctx context.Context, bloc
 	}
 
 	// Update outputs based on merkle root comparison
-	_, err := s.pool.Exec(ctx, `
+	_, err := s.db.ExecContext(ctx, `
 		UPDATE outputs
 		SET merkle_validation_state = CASE
-			WHEN merkle_root = $1 THEN $2  -- Validated or Immutable
-			WHEN merkle_root IS NULL THEN merkle_validation_state  -- Keep current state
-			ELSE $3  -- Invalidated
+			WHEN merkle_root = ? THEN ?
+			WHEN merkle_root IS NULL THEN merkle_validation_state
+			ELSE ?
 		END
-		WHERE topic = $4
-		  AND block_height = $5
-		  AND merkle_validation_state < $6  -- Not already immutable`,
+		WHERE topic = ?
+		  AND block_height = ?
+		  AND merkle_validation_state < ?`,
 		merkleRootStr, validState, engine.MerkleStateInvalidated,
 		s.topic, blockHeight, engine.MerkleStateImmutable)
 

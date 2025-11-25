@@ -17,13 +17,11 @@ import (
 
 // OutputData represents an input or output with its data
 type OutputData struct {
-	TxID     *chainhash.Hash `json:"txid,omitempty"` // Transaction ID (for inputs: source txid, for outputs: current txid)
-	Vout     uint32          `json:"vout"`
-	Data     interface{}     `json:"data,omitempty"`
-	Script   []byte          `json:"script"`
-	Satoshis uint64          `json:"satoshis"`
-	Spend    *chainhash.Hash `json:"spend,omitempty"` // Spending transaction ID (only populated if spent)
-	Score    float64         `json:"score,omitempty"` // Sort score for ordering/pagination
+	TxID  *chainhash.Hash `json:"txid,omitempty"` // Transaction ID (for inputs: source txid, for outputs: current txid)
+	Vout  uint32          `json:"vout"`
+	Data  interface{}     `json:"data,omitempty"`
+	Spend *chainhash.Hash `json:"spend,omitempty"` // Spending transaction ID (only populated if spent)
+	Score float64         `json:"score,omitempty"` // Sort score for ordering/pagination
 }
 
 // TransactionData represents a transaction with its inputs and outputs
@@ -49,7 +47,7 @@ type TopicDataStorage interface {
 	MarkUTXOsAsSpent(ctx context.Context, outpoints []*transaction.Outpoint, spendTxid *chainhash.Hash) error
 	UpdateConsumedBy(ctx context.Context, outpoint *transaction.Outpoint, consumedBy []*transaction.Outpoint) error
 	UpdateTransactionBEEF(ctx context.Context, txid *chainhash.Hash, beef []byte) error
-	UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error
+	UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, blockHeight uint32, blockIndex uint64) error
 
 	// Applied transaction tracking (topic-scoped)
 	InsertAppliedTransaction(ctx context.Context, tx *overlay.AppliedTransaction) error
@@ -97,7 +95,7 @@ type EventDataStorage struct {
 	topicFactory TopicDataStorageFactory
 
 	// Shared services
-	beefStore    beef.BeefStorage
+	beefStore    *beef.Storage
 	pubsub       pubsub.PubSub
 	queueStorage queue.QueueStorage
 }
@@ -135,7 +133,7 @@ type OutpointResult struct {
 }
 
 // NewEventDataStorage creates a new EventDataStorage instance
-func NewEventDataStorage(factory TopicDataStorageFactory, beefStore beef.BeefStorage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) *EventDataStorage {
+func NewEventDataStorage(factory TopicDataStorageFactory, beefStore *beef.Storage, queueStorage queue.QueueStorage, pubsub pubsub.PubSub) *EventDataStorage {
 	return &EventDataStorage{
 		topicFactory: factory,
 		beefStore:    beefStore,
@@ -196,7 +194,7 @@ func (s *EventDataStorage) FindOutpointsByMerkleState(ctx context.Context, topic
 }
 
 // Shared service accessors
-func (s *EventDataStorage) GetBeefStorage() beef.BeefStorage {
+func (s *EventDataStorage) GetBeefStorage() *beef.Storage {
 	return s.beefStore
 }
 
@@ -364,12 +362,12 @@ func (s *EventDataStorage) UpdateTransactionBEEF(ctx context.Context, txid *chai
 	return nil
 }
 
-func (s *EventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64, ancelliaryBeef []byte) error {
+func (s *EventDataStorage) UpdateOutputBlockHeight(ctx context.Context, outpoint *transaction.Outpoint, topic string, blockHeight uint32, blockIndex uint64) error {
 	storage, err := s.getTopicStorage(topic)
 	if err != nil {
 		return err
 	}
-	return storage.UpdateOutputBlockHeight(ctx, outpoint, blockHeight, blockIndex, ancelliaryBeef)
+	return storage.UpdateOutputBlockHeight(ctx, outpoint, blockHeight, blockIndex)
 }
 
 // Applied transaction methods

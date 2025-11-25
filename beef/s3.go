@@ -12,19 +12,15 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
-	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 )
 
 type S3BeefStorage struct {
-	client   *s3.Client
-	bucket   string
-	fallback BeefStorage
+	client *s3.Client
+	bucket string
 }
 
 // NewS3BeefStorage creates a new S3-based BEEF storage
-// bucket: S3 bucket name
-// fallback: optional fallback storage
-func NewS3BeefStorage(bucket string, fallback BeefStorage) (*S3BeefStorage, error) {
+func NewS3BeefStorage(bucket string) (*S3BeefStorage, error) {
 	// Load the default AWS configuration
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
@@ -34,18 +30,16 @@ func NewS3BeefStorage(bucket string, fallback BeefStorage) (*S3BeefStorage, erro
 	client := s3.NewFromConfig(cfg)
 
 	return &S3BeefStorage{
-		client:   client,
-		bucket:   bucket,
-		fallback: fallback,
+		client: client,
+		bucket: bucket,
 	}, nil
 }
 
 // NewS3BeefStorageWithClient creates a new S3-based BEEF storage with a provided client
-func NewS3BeefStorageWithClient(client *s3.Client, bucket string, fallback BeefStorage) *S3BeefStorage {
+func NewS3BeefStorageWithClient(client *s3.Client, bucket string) *S3BeefStorage {
 	return &S3BeefStorage{
-		client:   client,
-		bucket:   bucket,
-		fallback: fallback,
+		client: client,
+		bucket: bucket,
 	}
 }
 
@@ -59,42 +53,34 @@ func (s *S3BeefStorage) getKey(txid *chainhash.Hash) string {
 	return subDir + "/" + fileName
 }
 
-func (s *S3BeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+func (s *S3BeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	key := s.getKey(txid)
 
-	// Try to load from S3 first
 	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
 	})
 
-	if err == nil {
-		defer result.Body.Close()
-		beefBytes, err := io.ReadAll(result.Body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read S3 object: %w", err)
+	if err != nil {
+		var nfe *types.NoSuchKey
+		if errors.As(err, &nfe) {
+			return nil, ErrNotFound
 		}
-		return beefBytes, nil
+		return nil, fmt.Errorf("S3 Get failed (bucket: %s, key: %s): %w", s.bucket, key, err)
 	}
 
-	// Check if it's a not found error
-	var nfe *types.NoSuchKey
-	if errors.As(err, &nfe) {
-		// If not found and we have a fallback, try it
-		if s.fallback != nil {
-			return s.fallback.LoadBeef(ctx, txid)
-		}
-		return nil, ErrNotFound
+	defer result.Body.Close()
+	beefBytes, err := io.ReadAll(result.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read S3 object: %w", err)
 	}
 
-	// For other errors, return them with context
-	return nil, fmt.Errorf("S3 LoadBeef failed (bucket: %s, key: %s): %w", s.bucket, key, err)
+	return beefBytes, nil
 }
 
-func (s *S3BeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
+func (s *S3BeefStorage) Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
 	key := s.getKey(txid)
 
-	// Upload to S3
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(key),
@@ -103,38 +89,19 @@ func (s *S3BeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beef
 	})
 
 	if err != nil {
-		return fmt.Errorf("S3 SaveBeef failed (bucket: %s, key: %s): %w", s.bucket, key, err)
+		return fmt.Errorf("S3 Put failed (bucket: %s, key: %s): %w", s.bucket, key, err)
 	}
 
 	return nil
 }
 
-// UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
-func (s *S3BeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
-	if s.fallback != nil {
-		// Get updated BEEF from fallback
-		beefBytes, err := s.fallback.UpdateMerklePath(ctx, txid, ct)
-		if err != nil {
-			return nil, err
-		}
-
-		// Save updated BEEF to S3
-		if err := s.SaveBeef(ctx, txid, beefBytes); err != nil {
-			// Log error but don't fail the operation
-			// The updated BEEF is still returned even if S3 save fails
-			fmt.Printf("Warning: failed to save updated BEEF to S3: %v\n", err)
-		}
-
-		return beefBytes, nil
-	}
-	return nil, ErrNotFound
+// UpdateMerklePath is not supported by S3 storage
+func (s *S3BeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	return nil, nil
 }
 
-// Close closes the fallback storage
+// Close is a no-op for S3 storage
 func (s *S3BeefStorage) Close() error {
-	if s.fallback != nil {
-		return s.fallback.Close()
-	}
 	return nil
 }
 

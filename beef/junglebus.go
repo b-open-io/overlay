@@ -9,7 +9,6 @@ import (
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/bsv-blockchain/go-sdk/transaction"
-	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 	"github.com/joho/godotenv"
 )
 
@@ -18,11 +17,10 @@ const MaxConcurrentRequests = 16
 
 type JunglebusBeefStorage struct {
 	junglebusURL string
-	fallback     BeefStorage
 	limiter      chan struct{}
 }
 
-func NewJunglebusBeefStorage(junglebusURL string, fallback BeefStorage) *JunglebusBeefStorage {
+func NewJunglebusBeefStorage(junglebusURL string) *JunglebusBeefStorage {
 	// If no URL provided, try to get from environment
 	if junglebusURL == "" {
 		godotenv.Load(".env")
@@ -36,12 +34,11 @@ func NewJunglebusBeefStorage(junglebusURL string, fallback BeefStorage) *Jungleb
 
 	return &JunglebusBeefStorage{
 		junglebusURL: junglebusURL,
-		fallback:     fallback,
 		limiter:      make(chan struct{}, MaxConcurrentRequests),
 	}
 }
 
-func (t *JunglebusBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+func (t *JunglebusBeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	// Acquire limiter before making HTTP request
 	select {
 	case t.limiter <- struct{}{}:
@@ -50,14 +47,7 @@ func (t *JunglebusBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Has
 		return nil, ctx.Err()
 	}
 
-	beefBytes, err := t.fetchBeef(txid)
-
-	// If not found, try fallback
-	if err == ErrNotFound && t.fallback != nil {
-		return t.fallback.LoadBeef(ctx, txid)
-	}
-
-	return beefBytes, err
+	return t.fetchBeef(txid)
 }
 
 func (t *JunglebusBeefStorage) fetchBeef(txid *chainhash.Hash) ([]byte, error) {
@@ -92,54 +82,19 @@ func (t *JunglebusBeefStorage) fetchBeef(txid *chainhash.Hash) ([]byte, error) {
 	return beefBytes, nil
 }
 
-func (t *JunglebusBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
-	// Junglebus is read-only, delegate to fallback if available
-	if t.fallback != nil {
-		return t.fallback.SaveBeef(ctx, txid, beefBytes)
-	}
+// Put is a no-op for JungleBus (read-only)
+func (t *JunglebusBeefStorage) Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
+	// JungleBus is read-only, cannot write
 	return nil
 }
 
-// UpdateMerklePath updates the merkle path for a transaction by fetching fresh BEEF from JungleBus
-func (j *JunglebusBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
-	// LoadBeef from JungleBus will return the latest BEEF with updated merkle path
-	beefBytes, err := j.fetchBeef(txid)
-	if err != nil {
-		// Only fall back if not found, not for other errors
-		if err == ErrNotFound && j.fallback != nil {
-			return j.fallback.UpdateMerklePath(ctx, txid, ct)
-		}
-		return nil, err
-	}
-
-	// Parse the BEEF to get the merkle path for validation
-	_, tx, _, err := transaction.ParseBeef(beefBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	if tx.MerklePath != nil {
-		valid, err := tx.MerklePath.Verify(ctx, txid, ct)
-		if err != nil {
-			// If validation fails due to chain tracker issues, fall back
-			if j.fallback != nil {
-				return j.fallback.UpdateMerklePath(ctx, txid, ct)
-			}
-			return nil, err
-		}
-		if !valid {
-			// Merkle proof is invalid, return error
-			return nil, ErrInvalidMerkleProof
-		}
-	}
-
-	return beefBytes, nil
+// UpdateMerklePath fetches a fresh BEEF with merkle proof from JungleBus
+func (t *JunglebusBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	// JungleBus always returns fresh BEEFs with merkle proofs, so just fetch again
+	return t.Get(ctx, txid)
 }
 
-// Close closes the fallback storage (no persistent connections to close)
+// Close is a no-op for JungleBus (no persistent connections)
 func (j *JunglebusBeefStorage) Close() error {
-	if j.fallback != nil {
-		return j.fallback.Close()
-	}
 	return nil
 }

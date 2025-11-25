@@ -124,23 +124,27 @@ func (r *RedisPubSub) ensureRedisSubscription(topic string) error {
 // listenLoop processes Redis pub/sub messages and converts them to Event objects
 func (r *RedisPubSub) listenLoop() {
 	for {
+		if r.pubsub == nil {
+			select {
+			case <-r.ctx.Done():
+				return
+			default:
+				continue
+			}
+		}
+
 		select {
 		case <-r.ctx.Done():
 			return
-		default:
-			if r.pubsub == nil {
-				continue
-			}
-			
-			msg := <-r.pubsub.Channel()
+		case msg := <-r.pubsub.Channel():
 			if msg == nil {
 				continue
 			}
-			
+
 			// Parse score from message payload: {score}:{data} or just {data}
 			var member string
 			var score float64 = 0 // Default to 0 (no score)
-			
+
 			if colonIndex := strings.Index(msg.Payload, ":"); colonIndex > 0 {
 				// Check if first part is a valid score
 				if parsedScore, err := strconv.ParseFloat(msg.Payload[:colonIndex], 64); err == nil {
@@ -154,7 +158,7 @@ func (r *RedisPubSub) listenLoop() {
 				// No colon, entire payload is member
 				member = msg.Payload
 			}
-			
+
 			// Create event with parsed data
 			event := Event{
 				Topic:  msg.Channel,
@@ -162,15 +166,13 @@ func (r *RedisPubSub) listenLoop() {
 				Score:  score, // 0 if no score provided
 				Source: "redis",
 			}
-			
+
 			// Send to all subscribers of this topic
 			if subs, ok := r.subscribers.Load(msg.Channel); ok {
 				subscriptions := subs.([]*redisSubscription)
-				sentCount := 0
 				for _, sub := range subscriptions {
 					select {
 					case sub.channel <- event:
-						sentCount++
 					case <-r.ctx.Done():
 						return
 					default:

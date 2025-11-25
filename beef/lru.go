@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 
 	"github.com/bsv-blockchain/go-sdk/chainhash"
-	"github.com/bsv-blockchain/go-sdk/transaction/chaintracker"
 )
 
 type LRUBeefStorage struct {
@@ -20,58 +19,38 @@ type LRUBeefStorage struct {
 	lruIndex    map[chainhash.Hash]*list.Element // Maps txid to list element for O(1) access
 	lru         *list.List                       // List of chainhash.Hash for LRU ordering
 	mu          sync.RWMutex
-	fallback    BeefStorage
 }
 
 // NewLRUBeefStorage creates a new LRU cache with the specified maximum size in bytes
-func NewLRUBeefStorage(maxBytes int64, fallback BeefStorage) *LRUBeefStorage {
+func NewLRUBeefStorage(maxBytes int64) *LRUBeefStorage {
 	return &LRUBeefStorage{
 		maxBytes: maxBytes,
 		cache:    make(map[chainhash.Hash][]byte),
 		lruIndex: make(map[chainhash.Hash]*list.Element),
 		lru:      list.New(),
-		fallback: fallback,
 	}
 }
 
-func (t *LRUBeefStorage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
-	// Try to get from cache
+func (t *LRUBeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	if beefBytes, found := t.cache[*txid]; found {
-		// Move to front (most recently used) using the index
+		// Move to front (most recently used)
 		if elem, exists := t.lruIndex[*txid]; exists {
 			t.lru.MoveToFront(elem)
 		}
-		t.mu.Unlock()
 		// Return a copy to avoid external modifications
 		result := make([]byte, len(beefBytes))
 		copy(result, beefBytes)
 		return result, nil
 	}
-	t.mu.Unlock()
-
-	// Not in cache, try fallback
-	if t.fallback != nil {
-		beefBytes, err := t.fallback.LoadBeef(ctx, txid)
-		if err == nil {
-			// Add to cache
-			t.addToCache(*txid, beefBytes)
-		}
-		return beefBytes, err
-	}
 
 	return nil, ErrNotFound
 }
 
-func (t *LRUBeefStorage) SaveBeef(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
-	// Add to cache
+func (t *LRUBeefStorage) Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
 	t.addToCache(*txid, beefBytes)
-
-	// Also save to fallback if available
-	if t.fallback != nil {
-		return t.fallback.SaveBeef(ctx, txid, beefBytes)
-	}
-
 	return nil
 }
 
@@ -194,33 +173,21 @@ func ParseSize(sizeStr string) (int64, error) {
 	}
 }
 
-// Close closes the fallback storage and clears the LRU cache
+// UpdateMerklePath is not supported by LRU storage
+func (lru *LRUBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	return nil, nil
+}
+
+// Close clears the LRU cache
 func (lru *LRUBeefStorage) Close() error {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
-	
+
 	// Clear cache
 	lru.cache = make(map[chainhash.Hash][]byte)
 	lru.lruIndex = make(map[chainhash.Hash]*list.Element)
 	lru.lru.Init()
 	lru.currentSize.Store(0)
-	
-	// Close fallback
-	if lru.fallback != nil {
-		return lru.fallback.Close()
-	}
-	return nil
-}
 
-// UpdateMerklePath updates the merkle path for a transaction by delegating to the fallback
-func (lru *LRUBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash, ct chaintracker.ChainTracker) ([]byte, error) {
-	if lru.fallback != nil {
-		beefBytes, err := lru.fallback.UpdateMerklePath(ctx, txid, ct)
-		if err == nil && len(beefBytes) > 0 {
-			// Update our own storage with the new beef
-			lru.SaveBeef(ctx, txid, beefBytes)
-		}
-		return beefBytes, err
-	}
-	return nil, ErrNotFound
+	return nil
 }
