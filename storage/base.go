@@ -20,9 +20,9 @@ const IMMUTABILITY_DEPTH = 100
 // This uses Go's struct embedding to achieve code reuse across different storage backends
 type BaseEventDataStorage struct {
 	beefStore    *beef.Storage
-	pubsub       pubsub.PubSub                // Generic PubSub interface for event publishing and buffering
-	queueStorage queue.QueueStorage           // QueueStorage interface for Redis-like operations
-	chainTracker chaintracker.ChainTracker    // ChainTracker for merkle validation and chain state
+	pubsub       pubsub.PubSub             // Generic PubSub interface for event publishing and buffering
+	queueStorage queue.QueueStorage        // QueueStorage interface for Redis-like operations
+	chainTracker chaintracker.ChainTracker // ChainTracker for merkle validation and chain state
 }
 
 // NewBaseEventDataStorage creates a new BaseEventDataStorage with the given dependencies

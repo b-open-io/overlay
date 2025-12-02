@@ -38,7 +38,7 @@ type TransactionData struct {
 // This is implemented by MongoDB and SQLite providers with a specific topicId
 type TopicDataStorage interface {
 	// Core engine.Storage methods (topic-scoped)
-	InsertOutput(ctx context.Context, utxo *engine.Output) error
+	InsertOutputs(ctx context.Context, txid *chainhash.Hash, outputs []uint32, outpointsConsumed []*transaction.Outpoint, beef []byte, ancillaryTxids []*chainhash.Hash) error
 	FindOutput(ctx context.Context, outpoint *transaction.Outpoint, spent *bool, includeBEEF bool) (*engine.Output, error)
 	FindOutputs(ctx context.Context, outpoints []*transaction.Outpoint, spent *bool, includeBEEF bool) ([]*engine.Output, error)
 	FindUTXOsForTopic(ctx context.Context, since float64, limit uint32, includeBEEF bool) ([]*engine.Output, error)
@@ -193,6 +193,30 @@ func (s *EventDataStorage) FindOutpointsByMerkleState(ctx context.Context, topic
 	return storage.FindOutpointsByMerkleState(ctx, state, limit)
 }
 
+// LoadAncillaryBeef merges an output's AncillaryTxids into its Beef field.
+// This is used when the full BEEF with all ancillary transactions is needed.
+func (s *EventDataStorage) LoadAncillaryBeef(ctx context.Context, output *engine.Output) error {
+	if len(output.AncillaryTxids) == 0 {
+		return nil
+	}
+
+	// Parse the existing beef
+	beef, _, _, err := transaction.ParseBeef(output.Beef)
+	if err != nil {
+		return fmt.Errorf("failed to parse beef: %w", err)
+	}
+
+	// Merge in the ancillary txids
+	mergedBeef, err := s.beefStore.MergeBeef(ctx, beef, output.AncillaryTxids)
+	if err != nil {
+		return err
+	}
+
+	// Convert back to bytes and update the output
+	output.Beef, err = mergedBeef.Bytes()
+	return err
+}
+
 // Shared service accessors
 func (s *EventDataStorage) GetBeefStorage() *beef.Storage {
 	return s.beefStore
@@ -231,12 +255,15 @@ func (s *EventDataStorage) GetActiveTopics() []string {
 }
 
 // Core engine.Storage methods - route to appropriate topic storage
-func (s *EventDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) error {
-	storage, err := s.getTopicStorage(utxo.Topic)
+func (s *EventDataStorage) InsertOutputs(ctx context.Context, topic string, txid *chainhash.Hash, outputs []uint32, outpointsConsumed []*transaction.Outpoint, beef []byte, ancillaryTxids []*chainhash.Hash) error {
+	if len(outputs) == 0 {
+		return nil
+	}
+	storage, err := s.getTopicStorage(topic)
 	if err != nil {
 		return err
 	}
-	return storage.InsertOutput(ctx, utxo)
+	return storage.InsertOutputs(ctx, txid, outputs, outpointsConsumed, beef, ancillaryTxids)
 }
 
 func (s *EventDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, topic *string, spent *bool, includeBEEF bool) (*engine.Output, error) {

@@ -186,50 +186,78 @@ func (s *MongoTopicDataStorage) GetTopic() string {
 	return s.topic
 }
 
-func (s *MongoTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) (err error) {
-	utxo.Score = float64(time.Now().UnixNano())
+func (s *MongoTopicDataStorage) InsertOutputs(ctx context.Context, txid *chainhash.Hash, outputs []uint32, outpointsConsumed []*transaction.Outpoint, beef []byte, ancillaryTxids []*chainhash.Hash) error {
+	if len(outputs) == 0 {
+		return nil
+	}
 
-	// Save BEEF to storage first
-	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
+	// Save BEEF to storage once for all outputs
+	if err := s.beefStore.SaveBeef(ctx, txid, beef); err != nil {
 		return err
 	}
 
-	// Extract merkle information from BEEF and set on output
-	blockHeight, blockIndex, merkleRoot, validationState, err := s.ExtractMerkleInfoFromBEEF(ctx, &utxo.Outpoint.Txid, utxo.Beef)
+	// Extract merkle information from BEEF once
+	blockHeight, blockIndex, merkleRoot, validationState, err := s.ExtractMerkleInfoFromBEEF(ctx, txid, beef)
 	if err != nil {
 		return fmt.Errorf("failed to extract merkle info: %w", err)
 	}
 
-	// Always use the block height and index from BEEF extraction (0 if no merkle path)
-	utxo.BlockHeight = blockHeight
-	utxo.BlockIdx = blockIndex
-
-	// Set merkle info on output before converting to BSON
-	utxo.MerkleRoot = merkleRoot
-	utxo.MerkleState = validationState
-
-	// Create BSON output with merkle info already set
-	bo := NewBSONOutput(utxo)
-
-	// Insert or update the output in the "outputs" collection with all data in single operation
-	update := bson.M{
-		"$set": bo, // Set all fields including merkle info
+	// Prepare merkle root string
+	var merkleRootStr *string
+	if merkleRoot != nil {
+		s := merkleRoot.String()
+		merkleRootStr = &s
 	}
 
-	if _, err = s.DB.Collection("outputs").UpdateOne(ctx,
-		bson.M{"outpoint": utxo.Outpoint.String()},
-		update,
-		options.UpdateOne().SetUpsert(true),
-	); err != nil {
-		return err
+	// Convert shared data to strings
+	ancillaryTxidStrs := make([]string, len(ancillaryTxids))
+	for i, tid := range ancillaryTxids {
+		ancillaryTxidStrs[i] = tid.String()
 	}
 
-	// // Manually publish topic event to pubsub since we're not using SaveEvents
-	// if s.pubsub != nil {
-	// 	if err := s.pubsub.Publish(ctx, s.topic, utxo.Outpoint.String()); err != nil {
-	// 		log.Printf("Failed to publish topic event: %v", err)
-	// 	}
-	// }
+	outputsConsumedStrs := make([]string, len(outpointsConsumed))
+	for i, op := range outpointsConsumed {
+		outputsConsumedStrs[i] = op.String()
+	}
+
+	// Calculate score once for all outputs
+	score := float64(time.Now().UnixNano())
+	txidStr := txid.String()
+
+	// Insert each output
+	for _, vout := range outputs {
+		outpoint := transaction.Outpoint{Txid: *txid, Index: vout}
+
+		bo := &BSONOutput{
+			Outpoint:        outpoint.String(),
+			Txid:            txidStr,
+			Vout:            vout,
+			Topic:           s.topic,
+			Spend:           nil,
+			BlockHeight:     blockHeight,
+			BlockIdx:        blockIndex,
+			Score:           score,
+			AncillaryTxids:  ancillaryTxidStrs,
+			OutputsConsumed: outputsConsumedStrs,
+			ConsumedBy:      []string{},
+			Events:          []string{s.topic},
+			Data:            nil,
+			MerkleRoot:      merkleRootStr,
+			MerkleState:     validationState,
+		}
+
+		update := bson.M{
+			"$set": bo,
+		}
+
+		if _, err := s.DB.Collection("outputs").UpdateOne(ctx,
+			bson.M{"outpoint": outpoint.String()},
+			update,
+			options.UpdateOne().SetUpsert(true),
+		); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
@@ -255,7 +283,7 @@ func (s *MongoTopicDataStorage) FindOutput(ctx context.Context, outpoint *transa
 	}
 	o = bo.ToEngineOutput()
 	if includeBEEF {
-		if o.Beef, err = s.beefStore.LoadBeef(ctx, &outpoint.Txid, o.AncillaryTxids); err != nil {
+		if o.Beef, err = s.beefStore.LoadBeef(ctx, &outpoint.Txid); err != nil {
 			return nil, err
 		}
 	}
@@ -282,7 +310,7 @@ func (s *MongoTopicDataStorage) FindOutputs(ctx context.Context, outpoints []*tr
 			}
 			output := result.ToEngineOutput()
 			if includeBEEF {
-				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, output.AncillaryTxids); err != nil {
+				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
 					return nil, err
 				}
 			}
@@ -315,7 +343,7 @@ func (s *MongoTopicDataStorage) FindOutputsForTransaction(ctx context.Context, t
 			}
 			output := result.ToEngineOutput()
 			if includeBEEF {
-				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, output.AncillaryTxids); err != nil {
+				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
 					return nil, err
 				}
 			}
@@ -349,7 +377,7 @@ func (s *MongoTopicDataStorage) FindUTXOsForTopic(ctx context.Context, since flo
 			}
 			output := result.ToEngineOutput()
 			if includeBEEF {
-				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, output.AncillaryTxids); err != nil {
+				if output.Beef, err = s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid); err != nil {
 					return nil, err
 				}
 			}
@@ -996,8 +1024,8 @@ func (s *MongoTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainh
 		ancillaryTxids = append(ancillaryTxids, hash)
 	}
 
-	// Get BEEF from beef storage with ancillary txids (LoadBeef will merge them)
-	beefBytes, err := s.beefStore.LoadBeef(ctx, txid, ancillaryTxids)
+	// Get BEEF from beef storage
+	beefBytes, err := s.beefStore.LoadBeef(ctx, txid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load BEEF: %w", err)
 	}
@@ -1006,6 +1034,14 @@ func (s *MongoTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainh
 	beef, _, _, err := transaction.ParseBeef(beefBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse BEEF: %w", err)
+	}
+
+	// Merge ancillary txids if present
+	if len(ancillaryTxids) > 0 {
+		beef, err = s.beefStore.MergeBeef(ctx, beef, ancillaryTxids)
+		if err != nil {
+			return nil, fmt.Errorf("failed to merge ancillary txids: %w", err)
+		}
 	}
 
 	// Get atomic BEEF bytes for the specific transaction
