@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.39.1
 	github.com/aws/aws-sdk-go-v2/config v1.31.10
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.88.2
-	github.com/bsv-blockchain/go-chaintracks v1.0.1-0.20251205191610-8b68a1247a37
+	github.com/bsv-blockchain/go-chaintracks v1.0.1-0.20251205195428-2cf0e3b9f13a
 	github.com/bsv-blockchain/go-overlay-services v0.1.1
 	github.com/bsv-blockchain/go-sdk v1.2.13
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
