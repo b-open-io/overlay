@@ -289,6 +289,100 @@ func (s *MySQLTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.O
 	return nil
 }
 
+// InsertOutputs inserts outputs in a batch - saves BEEF once and extracts merkle info once
+func (s *MySQLTopicDataStorage) InsertOutputs(ctx context.Context, txid *chainhash.Hash, outputs []uint32, outpointsConsumed []*transaction.Outpoint, beef []byte, ancillaryTxids []*chainhash.Hash) error {
+	if len(outputs) == 0 {
+		return nil
+	}
+
+	// Save BEEF to storage once for all outputs
+	if err := s.beefStore.SaveBeef(ctx, txid, beef); err != nil {
+		return err
+	}
+
+	// Extract merkle information from BEEF once
+	blockHeight, blockIndex, merkleRoot, validationState, err := s.ExtractMerkleInfoFromBEEF(ctx, txid, beef)
+	if err != nil {
+		return fmt.Errorf("failed to extract merkle info: %w", err)
+	}
+
+	// Prepare merkle root string
+	merkleRootStr := ""
+	if merkleRoot != nil {
+		merkleRootStr = merkleRoot.String()
+	}
+
+	// Build metadata object (shared across all outputs)
+	metadata := OutputMetadata{}
+
+	// Convert AncillaryTxids to string array
+	if len(ancillaryTxids) > 0 {
+		metadata.AncillaryTxids = make([]string, len(ancillaryTxids))
+		for i, tid := range ancillaryTxids {
+			metadata.AncillaryTxids[i] = tid.String()
+		}
+	}
+
+	// Convert OutputsConsumed to string array
+	if len(outpointsConsumed) > 0 {
+		metadata.OutputsConsumed = make([]string, len(outpointsConsumed))
+		for i, outpoint := range outpointsConsumed {
+			metadata.OutputsConsumed[i] = outpoint.String()
+		}
+	}
+
+	// Marshal metadata to JSON (same for all outputs from this tx)
+	metadataJSON, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	// Calculate score once for all outputs
+	score := float64(time.Now().UnixNano())
+	txidStr := txid.String()
+
+	// Begin transaction for batch insert
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Insert each output
+	for _, vout := range outputs {
+		outpoint := transaction.Outpoint{Txid: *txid, Index: vout}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO outputs (outpoint, txid, script, satoshis, block_height, block_idx, score, data,
+				merkle_root, merkle_validation_state, topic)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON DUPLICATE KEY UPDATE
+				block_height = VALUES(block_height),
+				block_idx = VALUES(block_idx),
+				score = VALUES(score),
+				data = VALUES(data),
+				merkle_root = VALUES(merkle_root),
+				merkle_validation_state = VALUES(merkle_validation_state)`,
+			outpoint.String(),
+			txidStr,
+			[]byte{}, // script - empty, data is in BEEF
+			0,        // satoshis - 0, data is in BEEF
+			blockHeight,
+			blockIndex,
+			score,
+			string(metadataJSON),
+			merkleRootStr,
+			validationState,
+			s.topic,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Commit transaction
+	return tx.Commit()
+}
+
 // FindOutput finds a single output by outpoint
 func (s *MySQLTopicDataStorage) FindOutput(ctx context.Context, outpoint *transaction.Outpoint, spent *bool, includeBEEF bool) (*engine.Output, error) {
 	query := `SELECT outpoint, txid, script, satoshis, spend, block_height, block_idx, score, ancillary_beef
@@ -348,7 +442,7 @@ func (s *MySQLTopicDataStorage) FindOutput(ctx context.Context, outpoint *transa
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, nil)
+		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid)
 		if err != nil {
 			return nil, err
 		}
@@ -464,7 +558,7 @@ func (s *MySQLTopicDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*e
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid, nil)
+		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid)
 		if err != nil {
 			log.Printf("Failed to load BEEF for %s: %v", output.Outpoint.Txid, err)
 		} else {
@@ -1086,7 +1180,7 @@ func (s *MySQLTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chainh
 	}
 
 	// Get BEEF from beef storage
-	beefBytes, err := s.beefStore.LoadBeef(ctx, txid, nil)
+	beefBytes, err := s.beefStore.LoadBeef(ctx, txid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load BEEF: %w", err)
 	}
