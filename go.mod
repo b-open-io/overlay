@@ -11,6 +11,7 @@ require (
 	github.com/bsv-blockchain/go-overlay-services v0.1.1
 	github.com/bsv-blockchain/go-sdk v1.2.13
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
+	github.com/go-sql-driver/mysql v1.9.3
 	github.com/gofiber/fiber/v2 v2.52.10
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/joho/godotenv v1.6.0-pre.2
@@ -23,6 +24,7 @@ require (
 )
 
 require (
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.1 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.18.14 // indirect
@@ -181,6 +183,6 @@ require (
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
 
-replace github.com/bsv-blockchain/go-overlay-services => github.com/bsv-blockchain/go-overlay-services v1.2.3-0.20251205183456-bc9c5a96ac4e
+replace github.com/bsv-blockchain/go-overlay-services => github.com/b-open-io/go-overlay-services v0.0.1-0.20251207122223-a4c7a4d0ad3e
 
 // replace github.com/bsv-blockchain/go-overlay-services => ../go-overlay-services

@@ -467,6 +467,12 @@ func parseConnectionString(connectionString string) ([]BaseBeefStorage, error) {
 				return nil, err
 			}
 
+		case strings.HasPrefix(connectionString, "mysql://"):
+			storage, err = NewMySQLBeefStorage(connectionString)
+			if err != nil {
+				return nil, err
+			}
+
 		case strings.HasPrefix(connectionString, "s3://"):
 			// Parse S3 URL: s3://[access-key:secret-key@]bucket-name/?region=us-west-2&endpoint=https://s3.amazonaws.com
 			u, err := url.Parse(connectionString)
