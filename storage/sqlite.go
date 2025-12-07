@@ -184,24 +184,21 @@ func (s *SQLiteTopicDataStorage) createTables() error {
 	return nil
 }
 
-func (s *SQLiteTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.Output) error {
-	// Calculate score
-	utxo.Score = float64(time.Now().UnixNano())
+func (s *SQLiteTopicDataStorage) InsertOutputs(ctx context.Context, txid *chainhash.Hash, outputs []uint32, outpointsConsumed []*transaction.Outpoint, beef []byte, ancillaryTxids []*chainhash.Hash) error {
+	if len(outputs) == 0 {
+		return nil
+	}
 
-	// Save BEEF to storage first
-	if err := s.beefStore.SaveBeef(ctx, &utxo.Outpoint.Txid, utxo.Beef); err != nil {
+	// Save BEEF to storage once for all outputs
+	if err := s.beefStore.SaveBeef(ctx, txid, beef); err != nil {
 		return err
 	}
 
-	// Extract merkle information from BEEF
-	blockHeight, blockIndex, merkleRoot, validationState, err := s.ExtractMerkleInfoFromBEEF(ctx, &utxo.Outpoint.Txid, utxo.Beef)
+	// Extract merkle information from BEEF once
+	blockHeight, blockIndex, merkleRoot, validationState, err := s.ExtractMerkleInfoFromBEEF(ctx, txid, beef)
 	if err != nil {
 		return fmt.Errorf("failed to extract merkle info: %w", err)
 	}
-
-	// Always use the block height and index from BEEF extraction (0 if no merkle path)
-	utxo.BlockHeight = blockHeight
-	utxo.BlockIdx = blockIndex
 
 	// Prepare merkle root string
 	merkleRootStr := ""
@@ -209,62 +206,75 @@ func (s *SQLiteTopicDataStorage) InsertOutput(ctx context.Context, utxo *engine.
 		merkleRootStr = merkleRoot.String()
 	}
 
-	// Build metadata object
+	// Build metadata object (shared across all outputs)
 	metadata := OutputMetadata{}
 
 	// Convert AncillaryTxids to string array
-	if len(utxo.AncillaryTxids) > 0 {
-		metadata.AncillaryTxids = make([]string, len(utxo.AncillaryTxids))
-		for i, txid := range utxo.AncillaryTxids {
-			metadata.AncillaryTxids[i] = txid.String()
+	if len(ancillaryTxids) > 0 {
+		metadata.AncillaryTxids = make([]string, len(ancillaryTxids))
+		for i, tid := range ancillaryTxids {
+			metadata.AncillaryTxids[i] = tid.String()
 		}
 	}
 
 	// Convert OutputsConsumed to string array
-	if len(utxo.OutputsConsumed) > 0 {
-		metadata.OutputsConsumed = make([]string, len(utxo.OutputsConsumed))
-		for i, outpoint := range utxo.OutputsConsumed {
+	if len(outpointsConsumed) > 0 {
+		metadata.OutputsConsumed = make([]string, len(outpointsConsumed))
+		for i, outpoint := range outpointsConsumed {
 			metadata.OutputsConsumed[i] = outpoint.String()
 		}
 	}
 
-	// Convert ConsumedBy to string array
-	if len(utxo.ConsumedBy) > 0 {
-		metadata.ConsumedBy = make([]string, len(utxo.ConsumedBy))
-		for i, outpoint := range utxo.ConsumedBy {
-			metadata.ConsumedBy[i] = outpoint.String()
-		}
-	}
-
-	// Marshal metadata to JSON
+	// Marshal metadata to JSON (same for all outputs from this tx)
 	metadataJSON, err := json.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	// Insert output with merkle info and metadata in a single operation
-	_, err = s.wdb.ExecContext(ctx, `
-		INSERT OR REPLACE INTO outputs (outpoint, txid,
-			block_height, block_idx, score, metadata,
-			merkle_root, merkle_validation_state)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		utxo.Outpoint.String(),
-		utxo.Outpoint.Txid.String(),
-		utxo.BlockHeight,
-		utxo.BlockIdx,
-		utxo.Score,
-		string(metadataJSON),
-		merkleRootStr,
-		validationState,
-	)
+	// Calculate score once for all outputs
+	score := float64(time.Now().UnixNano())
+	txidStr := txid.String()
+
+	// Begin transaction for batch insert
+	tx, err := s.wdb.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 
-	// // Add topic as an event using SaveEvents (handles pubsub publishing)
-	// if err := s.SaveEvents(ctx, &utxo.Outpoint, []string{s.topic}, utxo.Score, nil); err != nil {
-	// 	return err
-	// }
+	// Prepare statement for batch insert
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT OR REPLACE INTO outputs (outpoint, txid,
+			block_height, block_idx, score, metadata,
+			merkle_root, merkle_validation_state)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	// Insert each output
+	for _, vout := range outputs {
+		outpoint := transaction.Outpoint{Txid: *txid, Index: vout}
+		_, err = stmt.ExecContext(ctx,
+			outpoint.String(),
+			txidStr,
+			blockHeight,
+			blockIndex,
+			score,
+			string(metadataJSON),
+			merkleRootStr,
+			validationState,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -365,7 +375,7 @@ func (s *SQLiteTopicDataStorage) FindOutput(ctx context.Context, outpoint *trans
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid, output.AncillaryTxids)
+		beef, err := s.beefStore.LoadBeef(ctx, &output.Outpoint.Txid)
 		if err != nil {
 			return nil, err
 		}
@@ -736,7 +746,7 @@ func (s *SQLiteTopicDataStorage) scanOutput(rows *sql.Rows, includeBEEF bool) (*
 
 	// Load BEEF if requested
 	if includeBEEF {
-		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid, output.AncillaryTxids)
+		beef, err := s.beefStore.LoadBeef(context.Background(), &output.Outpoint.Txid)
 		if err != nil {
 			log.Printf("Failed to load BEEF for %s: %v", output.Outpoint.Txid, err)
 		} else {
@@ -1384,8 +1394,8 @@ func (s *SQLiteTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chain
 		}
 	}
 
-	// Get BEEF from beef storage with ancillary txids (LoadBeef will merge them)
-	beefBytes, err := s.beefStore.LoadBeef(ctx, txid, ancillaryTxids)
+	// Get BEEF from beef storage
+	beefBytes, err := s.beefStore.LoadBeef(ctx, txid)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load BEEF: %w", err)
 	}
@@ -1394,6 +1404,14 @@ func (s *SQLiteTopicDataStorage) LoadBeefByTxid(ctx context.Context, txid *chain
 	beef, _, _, err := transaction.ParseBeef(beefBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse BEEF: %w", err)
+	}
+
+	// Merge ancillary txids if present
+	if len(ancillaryTxids) > 0 {
+		beef, err = s.beefStore.MergeBeef(ctx, beef, ancillaryTxids)
+		if err != nil {
+			return nil, fmt.Errorf("failed to merge ancillary txids: %w", err)
+		}
 	}
 
 	// Get atomic BEEF bytes for the specific transaction

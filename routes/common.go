@@ -221,7 +221,7 @@ func RegisterRoutes(group fiber.Router, config *RoutesConfig) {
 
 	group.Get("/block/tip", func(c *fiber.Ctx) error {
 		// Get current block tip from chaintracker
-		tip := chaintracker.GetTip()
+		tip := chaintracker.GetTip(c.UserContext())
 		if tip == nil {
 			log.Printf("Failed to get block tip: tip is nil")
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
@@ -246,7 +246,7 @@ func RegisterRoutes(group fiber.Router, config *RoutesConfig) {
 		height := uint32(height64)
 
 		// Get block header by height
-		blockHeader, err := chaintracker.GetHeaderByHeight(height)
+		blockHeader, err := chaintracker.GetHeaderByHeight(c.UserContext(), height)
 		if err != nil {
 			log.Printf("Failed to get block header for height %d: %v", height, err)
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{

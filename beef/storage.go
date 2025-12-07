@@ -94,36 +94,29 @@ func NewStorage(connectionString string, chainTracker chaintracker.ChainTracker)
 	return s, nil
 }
 
-// LoadBeef loads a BEEF and dynamically builds it from stored components
-func (s *Storage) LoadBeef(ctx context.Context, txid *chainhash.Hash, ancillaryTxids []*chainhash.Hash) ([]byte, error) {
-	// Use dedup loader for the main transaction
-	beefBytes, err := s.loader.Load(*txid)
-	if err != nil {
-		return nil, err
+// LoadBeef loads a BEEF from storage.
+func (s *Storage) LoadBeef(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	return s.loader.Load(*txid)
+}
+
+// MergeBeef takes an existing Beef object and merges in additional transactions by their txids.
+// Returns the merged Beef object.
+func (s *Storage) MergeBeef(ctx context.Context, beef *transaction.Beef, txids []*chainhash.Hash) (*transaction.Beef, error) {
+	if len(txids) == 0 {
+		return beef, nil
 	}
 
-	// If there are ancillary txids, we need to merge them
-	if len(ancillaryTxids) > 0 {
-		beef, _, _, err := transaction.ParseBeef(beefBytes)
+	for _, txid := range txids {
+		additionalBeef, err := s.loader.Load(*txid)
 		if err != nil {
+			return nil, errors.New("failed to load tx for merge " + txid.String() + ": " + err.Error())
+		}
+		if err := beef.MergeBeefBytes(additionalBeef); err != nil {
 			return nil, err
 		}
-
-		// Load and merge ancillary txids
-		for _, ancillaryTxid := range ancillaryTxids {
-			ancillaryBeef, err := s.loader.Load(*ancillaryTxid)
-			if err != nil {
-				return nil, errors.New("failed to load ancillary tx " + ancillaryTxid.String() + ": " + err.Error())
-			}
-			if err := beef.MergeBeefBytes(ancillaryBeef); err != nil {
-				return nil, err
-			}
-		}
-
-		return beef.Bytes()
 	}
 
-	return beefBytes, nil
+	return beef, nil
 }
 
 // loadBeefInternal is the actual load implementation
@@ -184,7 +177,6 @@ func (s *Storage) loadBeefInternal(ctx context.Context, txid *chainhash.Hash) ([
 			// Validate existing merkle proof
 			valid, err := tx.MerklePath.Verify(ctx, txid, s.chainTracker)
 			if err != nil || !valid {
-				// Invalid or verification error, need to update
 				needsUpdate = true
 			}
 		}
@@ -223,9 +215,9 @@ func (s *Storage) saveBeefInternal(ctx context.Context, txid *chainhash.Hash, be
 	if tx != nil {
 		mainTx = tx
 	} else if beef != nil && parsedTxid != nil {
-		mainTx = beef.FindTransaction(parsedTxid.String())
+		mainTx = beef.FindTransactionByHash(parsedTxid)
 	} else if beef != nil && txid != nil {
-		mainTx = beef.FindTransaction(txid.String())
+		mainTx = beef.FindTransactionByHash(txid)
 	}
 
 	if mainTx == nil {
@@ -240,7 +232,7 @@ func (s *Storage) saveBeefInternal(ctx context.Context, txid *chainhash.Hash, be
 			}
 
 			// Create individual BEEF for this transaction
-			individualBeef, err := s.createIndividualBEEF(beefTx.Transaction)
+			individualBeef, err := s.createIndividualBEEF(&txHash, beefTx.Transaction)
 			if err != nil {
 				return errors.New("failed to create individual BEEF for " + txHash.String() + ": " + err.Error())
 			}
@@ -265,7 +257,7 @@ func (s *Storage) saveBeefInternal(ctx context.Context, txid *chainhash.Hash, be
 }
 
 // createIndividualBEEF creates a BEEF for a single transaction with its merkle proof if available
-func (s *Storage) createIndividualBEEF(tx *transaction.Transaction) ([]byte, error) {
+func (s *Storage) createIndividualBEEF(txid *chainhash.Hash, tx *transaction.Transaction) ([]byte, error) {
 	// Create a new BEEF with just this transaction
 	beef := &transaction.Beef{
 		Version:      transaction.BEEF_V2,
@@ -274,7 +266,6 @@ func (s *Storage) createIndividualBEEF(tx *transaction.Transaction) ([]byte, err
 	}
 
 	// Add the transaction
-	txid := *tx.TxID()
 	beefTx := &transaction.BeefTx{
 		Transaction: tx,
 		BumpIndex:   -1,
@@ -289,11 +280,11 @@ func (s *Storage) createIndividualBEEF(tx *transaction.Transaction) ([]byte, err
 		beefTx.DataFormat = transaction.RawTx
 	}
 
-	beef.Transactions[txid] = beefTx
+	beef.Transactions[*txid] = beefTx
 
 	// Use AtomicBytes to create a BEEF that marks this transaction as the main one
 	// This ensures ParseBeef will correctly return this transaction
-	return beef.AtomicBytes(&txid)
+	return beef.AtomicBytes(txid)
 }
 
 // UpdateMerklePath attempts to fetch an updated BEEF with merkle proof from the storage chain
@@ -350,7 +341,7 @@ func (s *Storage) Close() error {
 
 // LoadTx loads a transaction from the storage
 func (s *Storage) LoadTx(ctx context.Context, txid *chainhash.Hash) (*transaction.Transaction, error) {
-	beefBytes, err := s.LoadBeef(ctx, txid, nil)
+	beefBytes, err := s.LoadBeef(ctx, txid)
 	if err != nil {
 		return nil, err
 	}
