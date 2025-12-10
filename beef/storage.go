@@ -21,15 +21,80 @@ var ErrNotFound = errors.New("not-found")
 var ErrInvalidMerkleProof = errors.New("invalid merkle proof")
 var ErrMissingInputs = errors.New("missing required input transactions")
 
+// splitBEEF extracts raw transaction and merkle proof from BEEF bytes
+func splitBEEF(beefBytes []byte) (rawTx []byte, proof []byte, err error) {
+	_, tx, _, err := transaction.ParseBeef(beefBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	if tx == nil {
+		return nil, nil, errors.New("no transaction in BEEF")
+	}
+
+	rawTx = tx.Bytes()
+	if tx.MerklePath != nil {
+		proof = tx.MerklePath.Bytes()
+	}
+	return rawTx, proof, nil
+}
+
+// assembleBEEF creates BEEF bytes from raw transaction and optional merkle proof
+func assembleBEEF(txid *chainhash.Hash, rawTx []byte, proof []byte) ([]byte, error) {
+	tx, err := transaction.NewTransactionFromBytes(rawTx)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(proof) > 0 {
+		mp, err := transaction.NewMerklePathFromBinary(proof)
+		if err != nil {
+			return nil, err
+		}
+		tx.MerklePath = mp
+	}
+
+	// Create a minimal BEEF containing just this transaction
+	beef := &transaction.Beef{
+		Version:      transaction.BEEF_V2,
+		BUMPs:        []*transaction.MerklePath{},
+		Transactions: make(map[chainhash.Hash]*transaction.BeefTx),
+	}
+
+	beefTx := &transaction.BeefTx{
+		Transaction: tx,
+		BumpIndex:   -1,
+	}
+
+	if tx.MerklePath != nil {
+		beef.BUMPs = append(beef.BUMPs, tx.MerklePath)
+		beefTx.BumpIndex = 0
+		beefTx.DataFormat = transaction.RawTxAndBumpIndex
+	} else {
+		beefTx.DataFormat = transaction.RawTx
+	}
+
+	beef.Transactions[*txid] = beefTx
+
+	return beef.AtomicBytes(txid)
+}
+
 // BaseBeefStorage is a simple key/value storage interface for BEEF data
 // Implementations should be simple and not include fallback or deduplication logic
 type BaseBeefStorage interface {
+	// Get loads a complete BEEF (assembled from tx + proof if stored separately)
 	Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error)
+	// Put stores a BEEF (may split into tx + proof for separate storage)
 	Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error
 	// UpdateMerklePath fetches a fresh BEEF with merkle proof for the transaction
 	// Only JungleBus implements this; other storages return ErrNotFound
 	UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error)
 	Close() error
+
+	// Separate tx/proof read methods for selective loading
+	// GetRawTx loads just the raw transaction bytes (without proof)
+	GetRawTx(ctx context.Context, txid *chainhash.Hash) ([]byte, error)
+	// GetProof loads just the merkle proof bytes
+	GetProof(ctx context.Context, txid *chainhash.Hash) ([]byte, error)
 }
 
 // Storage is the main implementation that handles all high-level BEEF operations
@@ -379,6 +444,52 @@ func (s *Storage) LoadTxFromBeef(ctx context.Context, beefBytes []byte, txid *ch
 	}
 
 	return tx, nil
+}
+
+// LoadRawTx loads just the raw transaction bytes from the storage chain
+func (s *Storage) LoadRawTx(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	for i, storage := range s.storages {
+		rawTx, err := storage.GetRawTx(ctx, txid)
+		if err == nil {
+			// Cache back to earlier storages using Put with assembled BEEF
+			if i > 0 {
+				if beefBytes, err := assembleBEEF(txid, rawTx, nil); err == nil {
+					for j := 0; j < i; j++ {
+						s.storages[j].Put(ctx, txid, beefBytes)
+					}
+				}
+			}
+			return rawTx, nil
+		}
+		if err != ErrNotFound {
+			return nil, err
+		}
+	}
+	return nil, ErrNotFound
+}
+
+// LoadProof loads just the merkle proof bytes from the storage chain
+func (s *Storage) LoadProof(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	for i, storage := range s.storages {
+		proof, err := storage.GetProof(ctx, txid)
+		if err == nil {
+			// Cache back to earlier storages - need rawTx to assemble BEEF
+			if i > 0 {
+				if rawTx, err := storage.GetRawTx(ctx, txid); err == nil {
+					if beefBytes, err := assembleBEEF(txid, rawTx, proof); err == nil {
+						for j := 0; j < i; j++ {
+							s.storages[j].Put(ctx, txid, beefBytes)
+						}
+					}
+				}
+			}
+			return proof, nil
+		}
+		if err != ErrNotFound {
+			return nil, err
+		}
+	}
+	return nil, ErrNotFound
 }
 
 // expandHomePath expands ~ to home directory if the path starts with ~/

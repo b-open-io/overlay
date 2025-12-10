@@ -19,12 +19,14 @@ func NewSQLiteBeefStorage(dbPath string) (*SQLiteBeefStorage, error) {
 		return nil, err
 	}
 
-	// Create table if it doesn't exist
+	// Single table with rawtx and optional proof columns
 	createTableSQL := `
 	CREATE TABLE IF NOT EXISTS beef_storage (
 		txid TEXT PRIMARY KEY,
-		beef BLOB NOT NULL,
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		rawtx BLOB NOT NULL,
+		proof BLOB,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 	CREATE INDEX IF NOT EXISTS idx_beef_created_at ON beef_storage(created_at);
 	`
@@ -33,10 +35,9 @@ func NewSQLiteBeefStorage(dbPath string) (*SQLiteBeefStorage, error) {
 		return nil, fmt.Errorf("failed to create table: %w", err)
 	}
 
-	// Set connection pool limits to prevent goroutine explosion
-	db.SetMaxOpenConns(15)   // BEEF storage needs more connections for concurrent access
-	db.SetMaxIdleConns(5)    // Keep several idle connections for frequent access
-	db.SetConnMaxLifetime(0) // No connection lifetime limit
+	db.SetMaxOpenConns(15)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(0)
 
 	return &SQLiteBeefStorage{
 		db: db,
@@ -48,29 +49,60 @@ func (t *SQLiteBeefStorage) Close() error {
 }
 
 func (t *SQLiteBeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
-	txidStr := txid.String()
-
-	var beefBytes []byte
-	err := t.db.QueryRowContext(ctx, "SELECT beef FROM beef_storage WHERE txid = ?", txidStr).Scan(&beefBytes)
-
+	var rawTx []byte
+	var proof []byte
+	err := t.db.QueryRowContext(ctx,
+		"SELECT rawtx, proof FROM beef_storage WHERE txid = ?",
+		txid.String()).Scan(&rawTx, &proof)
 	if err == sql.ErrNoRows {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("database error: %w", err)
 	}
-
-	return beefBytes, nil
+	return assembleBEEF(txid, rawTx, proof)
 }
 
 func (t *SQLiteBeefStorage) Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
-	txidStr := txid.String()
+	rawTx, proof, err := splitBEEF(beefBytes)
+	if err != nil {
+		return err
+	}
 
-	_, err := t.db.ExecContext(ctx,
-		"INSERT OR REPLACE INTO beef_storage (txid, beef) VALUES (?, ?)",
-		txidStr, beefBytes)
-
+	_, err = t.db.ExecContext(ctx,
+		"INSERT OR REPLACE INTO beef_storage (txid, rawtx, proof) VALUES (?, ?, ?)",
+		txid.String(), rawTx, proof)
 	return err
+}
+
+// GetRawTx loads just the raw transaction bytes
+func (t *SQLiteBeefStorage) GetRawTx(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	var rawTx []byte
+	err := t.db.QueryRowContext(ctx,
+		"SELECT rawtx FROM beef_storage WHERE txid = ?",
+		txid.String()).Scan(&rawTx)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("database error: %w", err)
+	}
+	return rawTx, nil
+}
+
+// GetProof loads just the merkle proof bytes
+func (t *SQLiteBeefStorage) GetProof(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	var proof []byte
+	err := t.db.QueryRowContext(ctx,
+		"SELECT proof FROM beef_storage WHERE txid = ? AND proof IS NOT NULL",
+		txid.String()).Scan(&proof)
+	if err == sql.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("database error: %w", err)
+	}
+	return proof, nil
 }
 
 // UpdateMerklePath is not supported by SQLite storage

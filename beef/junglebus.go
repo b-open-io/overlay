@@ -94,6 +94,64 @@ func (t *JunglebusBeefStorage) UpdateMerklePath(ctx context.Context, txid *chain
 	return t.Get(ctx, txid)
 }
 
+// GetRawTx fetches just the raw transaction from JungleBus
+func (t *JunglebusBeefStorage) GetRawTx(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	select {
+	case t.limiter <- struct{}{}:
+		defer func() { <-t.limiter }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	if t.junglebusURL == "" {
+		return nil, ErrNotFound
+	}
+
+	url := fmt.Sprintf("%s/v1/transaction/get/%s/bin", t.junglebusURL, txid.String())
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		return nil, ErrNotFound
+	} else if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("http-err-%d-%s", resp.StatusCode, txid.String())
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
+// GetProof fetches just the merkle proof from JungleBus
+func (t *JunglebusBeefStorage) GetProof(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	select {
+	case t.limiter <- struct{}{}:
+		defer func() { <-t.limiter }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+
+	if t.junglebusURL == "" {
+		return nil, ErrNotFound
+	}
+
+	url := fmt.Sprintf("%s/v1/transaction/proof/%s/bin", t.junglebusURL, txid.String())
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		return nil, ErrNotFound
+	} else if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("http-err-%d-%s", resp.StatusCode, txid.String())
+	}
+
+	return io.ReadAll(resp.Body)
+}
+
 // Close is a no-op for JungleBus (no persistent connections)
 func (j *JunglebusBeefStorage) Close() error {
 	return nil

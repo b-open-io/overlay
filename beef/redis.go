@@ -10,6 +10,11 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const (
+	txField    = "tx"
+	proofField = "prf"
+)
+
 type RedisBeefStorage struct {
 	db               *redis.Client
 	ttl              time.Duration
@@ -25,7 +30,6 @@ func NewRedisBeefStorage(connString string) (*RedisBeefStorage, error) {
 	cleanConnString := connString
 
 	if idx := strings.Index(connString, "?"); idx != -1 {
-		// Extract TTL from query string before parsing URL
 		queryStr := connString[idx+1:]
 		params := parseRedisQueryParams(queryStr)
 		if ttlStr, ok := params["ttl"]; ok {
@@ -33,7 +37,6 @@ func NewRedisBeefStorage(connString string) (*RedisBeefStorage, error) {
 				cacheTTL = ttl
 			}
 		}
-		// Redis ParseURL doesn't understand ttl parameter, so remove it
 		cleanConnString = connString[:idx]
 	}
 
@@ -45,11 +48,11 @@ func NewRedisBeefStorage(connString string) (*RedisBeefStorage, error) {
 	} else {
 		r.db = redis.NewClient(opts)
 
-		// Test if HEXPIRE is supported by trying it on a test key
+		// Test if HEXPIRE is supported
 		if cacheTTL > 0 {
 			r.hexpireSupported = r.testHExpireSupport()
 			if !r.hexpireSupported {
-				log.Println("Warning: HEXPIRE not supported by this Redis server. TTL will not be set on individual entries.")
+				log.Println("Warning: HEXPIRE not supported. Proof TTL will use key-level expiry.")
 			}
 		}
 
@@ -57,18 +60,36 @@ func NewRedisBeefStorage(connString string) (*RedisBeefStorage, error) {
 	}
 }
 
-func (t *RedisBeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
-	txidStr := txid.String()
+func (r *RedisBeefStorage) beefKey(txid *chainhash.Hash) string {
+	return "beef:" + txid.String()
+}
 
-	beefBytes, err := t.db.HGet(ctx, BeefKey, txidStr).Bytes()
-	if err == redis.Nil {
-		return nil, ErrNotFound
-	}
+func (t *RedisBeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	// Get both tx and proof in single HMGET call
+	key := t.beefKey(txid)
+	results, err := t.db.HMGet(ctx, key, txField, proofField).Result()
 	if err != nil {
 		return nil, err
 	}
 
-	return beefBytes, nil
+	// Check if tx exists
+	if results[0] == nil {
+		return nil, ErrNotFound
+	}
+
+	rawTx, ok := results[0].(string)
+	if !ok {
+		return nil, ErrNotFound
+	}
+
+	var proof []byte
+	if results[1] != nil {
+		if proofStr, ok := results[1].(string); ok {
+			proof = []byte(proofStr)
+		}
+	}
+
+	return assembleBEEF(txid, []byte(rawTx), proof)
 }
 
 func (t *RedisBeefStorage) testHExpireSupport() bool {
@@ -76,32 +97,44 @@ func (t *RedisBeefStorage) testHExpireSupport() bool {
 	testKey := "beef:test:hexpire"
 	testField := "test"
 
-	// Clean up test key when done
 	defer t.db.Del(ctx, testKey)
-
-	// Try to set a field and expire it
 	t.db.HSet(ctx, testKey, testField, "test")
-
-	// Try HEXPIRE command - if it fails, the command is not supported
 	err := t.db.HExpire(ctx, testKey, time.Second, testField).Err()
 
 	return err == nil
 }
 
 func (t *RedisBeefStorage) Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
-	txidStr := txid.String()
-	_, err := t.db.Pipelined(ctx, func(p redis.Pipeliner) error {
-		if err := p.HSet(ctx, BeefKey, txidStr, beefBytes).Err(); err != nil {
-			return err
+	rawTx, proof, err := splitBEEF(beefBytes)
+	if err != nil {
+		return err
+	}
+
+	key := t.beefKey(txid)
+
+	// Store tx and proof together in hash
+	fields := map[string]interface{}{
+		txField: rawTx,
+	}
+	if len(proof) > 0 {
+		fields[proofField] = proof
+	}
+
+	if err := t.db.HSet(ctx, key, fields).Err(); err != nil {
+		return err
+	}
+
+	// Apply TTL
+	if t.ttl > 0 && len(proof) > 0 {
+		if t.hexpireSupported {
+			t.db.HExpire(ctx, key, t.ttl, proofField)
+		} else {
+			// Fallback: expire entire key (tx + proof together)
+			t.db.Expire(ctx, key, t.ttl)
 		}
-		// Set TTL on the individual hash field if configured and supported
-		if t.ttl > 0 && t.hexpireSupported {
-			// HExpire sets expiration on specific hash fields
-			p.HExpire(ctx, BeefKey, t.ttl, txidStr)
-		}
-		return nil
-	})
-	return err
+	}
+
+	return nil
 }
 
 // parseRedisQueryParams extracts key-value pairs from a query string
@@ -118,6 +151,24 @@ func parseRedisQueryParams(query string) map[string]string {
 // UpdateMerklePath is not supported by Redis storage
 func (r *RedisBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	return nil, nil
+}
+
+// GetRawTx loads just the raw transaction bytes
+func (r *RedisBeefStorage) GetRawTx(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	rawTx, err := r.db.HGet(ctx, r.beefKey(txid), txField).Bytes()
+	if err == redis.Nil {
+		return nil, ErrNotFound
+	}
+	return rawTx, err
+}
+
+// GetProof loads just the merkle proof bytes
+func (r *RedisBeefStorage) GetProof(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	proof, err := r.db.HGet(ctx, r.beefKey(txid), proofField).Bytes()
+	if err == redis.Nil {
+		return nil, ErrNotFound
+	}
+	return proof, err
 }
 
 // Close closes the Redis client connection

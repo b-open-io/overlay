@@ -12,10 +12,16 @@ import (
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 )
 
+// lruEntry stores tx and optional proof together
+type lruEntry struct {
+	rawTx []byte
+	proof []byte
+}
+
 type LRUBeefStorage struct {
 	maxBytes    int64        // Maximum total size in bytes
 	currentSize atomic.Int64 // Current total size in bytes (atomic for lock-free reads)
-	cache       map[chainhash.Hash][]byte
+	cache       map[chainhash.Hash]*lruEntry
 	lruIndex    map[chainhash.Hash]*list.Element // Maps txid to list element for O(1) access
 	lru         *list.List                       // List of chainhash.Hash for LRU ordering
 	mu          sync.RWMutex
@@ -25,7 +31,7 @@ type LRUBeefStorage struct {
 func NewLRUBeefStorage(maxBytes int64) *LRUBeefStorage {
 	return &LRUBeefStorage{
 		maxBytes: maxBytes,
-		cache:    make(map[chainhash.Hash][]byte),
+		cache:    make(map[chainhash.Hash]*lruEntry),
 		lruIndex: make(map[chainhash.Hash]*list.Element),
 		lru:      list.New(),
 	}
@@ -35,65 +41,74 @@ func (t *LRUBeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte,
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if beefBytes, found := t.cache[*txid]; found {
-		// Move to front (most recently used)
-		if elem, exists := t.lruIndex[*txid]; exists {
-			t.lru.MoveToFront(elem)
-		}
-		// Return a copy to avoid external modifications
-		result := make([]byte, len(beefBytes))
-		copy(result, beefBytes)
-		return result, nil
+	entry, found := t.cache[*txid]
+	if !found || entry.rawTx == nil {
+		return nil, ErrNotFound
 	}
 
-	return nil, ErrNotFound
+	// Move to front (most recently used)
+	if elem, exists := t.lruIndex[*txid]; exists {
+		t.lru.MoveToFront(elem)
+	}
+
+	return assembleBEEF(txid, entry.rawTx, entry.proof)
 }
 
 func (t *LRUBeefStorage) Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
-	t.addToCache(*txid, beefBytes)
-	return nil
-}
+	rawTx, proof, err := splitBEEF(beefBytes)
+	if err != nil {
+		return err
+	}
 
-func (t *LRUBeefStorage) addToCache(txid chainhash.Hash, beefBytes []byte) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	beefSize := int64(len(beefBytes))
+	t.putEntry(*txid, rawTx, proof)
+	return nil
+}
 
-	// Check if already exists
-	if oldBeef, found := t.cache[txid]; found {
-		// Update and move to front
+// putEntry stores tx and proof together (must be called with lock held)
+func (t *LRUBeefStorage) putEntry(txid chainhash.Hash, rawTx, proof []byte) {
+	newSize := int64(len(rawTx) + len(proof))
+
+	if existing, found := t.cache[txid]; found {
+		// Update existing entry
+		oldSize := int64(len(existing.rawTx) + len(existing.proof))
+		t.currentSize.Add(newSize - oldSize)
+
+		existing.rawTx = copyBytes(rawTx)
+		if len(proof) > 0 {
+			existing.proof = copyBytes(proof)
+		}
+
 		if elem, exists := t.lruIndex[txid]; exists {
 			t.lru.MoveToFront(elem)
 		}
-		oldSize := int64(len(oldBeef))
+	} else {
+		// New entry
+		entry := &lruEntry{
+			rawTx: copyBytes(rawTx),
+		}
+		if len(proof) > 0 {
+			entry.proof = copyBytes(proof)
+		}
 
-		// Update size tracking atomically
-		sizeDelta := beefSize - oldSize
-		t.currentSize.Add(sizeDelta)
-
-		// Make a copy and update the cache
-		beefCopy := make([]byte, len(beefBytes))
-		copy(beefCopy, beefBytes)
-		t.cache[txid] = beefCopy
-
-		// Still need to check capacity in case the new value is larger
-		t.evictIfNeeded()
-		return
+		elem := t.lru.PushFront(txid)
+		t.cache[txid] = entry
+		t.lruIndex[txid] = elem
+		t.currentSize.Add(newSize)
 	}
 
-	// Make a copy of the beef bytes to avoid external modifications
-	beefCopy := make([]byte, len(beefBytes))
-	copy(beefCopy, beefBytes)
-
-	// Add new entry
-	elem := t.lru.PushFront(txid)
-	t.cache[txid] = beefCopy
-	t.lruIndex[txid] = elem
-	t.currentSize.Add(beefSize)
-
-	// Evict oldest entries if over capacity
 	t.evictIfNeeded()
+}
+
+func copyBytes(b []byte) []byte {
+	if b == nil {
+		return nil
+	}
+	c := make([]byte, len(b))
+	copy(c, b)
+	return c
 }
 
 func (t *LRUBeefStorage) evictIfNeeded() {
@@ -102,13 +117,11 @@ func (t *LRUBeefStorage) evictIfNeeded() {
 		if oldest != nil {
 			txid := oldest.Value.(chainhash.Hash)
 
-			// Get the size of the beef we're about to evict
-			if beefBytes, exists := t.cache[txid]; exists {
-				t.currentSize.Add(-int64(len(beefBytes)))
+			if entry, exists := t.cache[txid]; exists {
+				t.currentSize.Add(-int64(len(entry.rawTx) + len(entry.proof)))
 				delete(t.cache, txid)
 			}
 
-			// Remove from LRU list and index
 			t.lru.Remove(oldest)
 			delete(t.lruIndex, txid)
 		}
@@ -117,15 +130,13 @@ func (t *LRUBeefStorage) evictIfNeeded() {
 
 // Stats returns cache statistics
 func (t *LRUBeefStorage) Stats() (currentBytes int64, maxBytes int64, entryCount int) {
-	// currentSize can be read atomically without a lock
 	currentBytes = t.currentSize.Load()
 	maxBytes = t.maxBytes
-	
-	// Only need lock for reading the LRU list length
+
 	t.mu.RLock()
 	entryCount = t.lru.Len()
 	t.mu.RUnlock()
-	
+
 	return currentBytes, maxBytes, entryCount
 }
 
@@ -133,7 +144,6 @@ func (t *LRUBeefStorage) Stats() (currentBytes int64, maxBytes int64, entryCount
 func ParseSize(sizeStr string) (int64, error) {
 	sizeStr = strings.ToLower(strings.TrimSpace(sizeStr))
 
-	// Extract number and unit
 	var number float64
 	var unit string
 
@@ -151,12 +161,14 @@ func ParseSize(sizeStr string) (int64, error) {
 		}
 	}
 
-	// If no unit found, assume bytes
 	if unit == "" {
-		return int64(number), nil
+		n, err := strconv.ParseFloat(sizeStr, 64)
+		if err != nil {
+			return 0, fmt.Errorf("invalid size: %s", sizeStr)
+		}
+		return int64(n), nil
 	}
 
-	// Convert to bytes based on unit
 	switch strings.TrimSpace(unit) {
 	case "b", "byte", "bytes":
 		return int64(number), nil
@@ -178,13 +190,46 @@ func (lru *LRUBeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash
 	return nil, nil
 }
 
+// GetRawTx loads just the raw transaction bytes from cache
+func (lru *LRUBeefStorage) GetRawTx(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	lru.mu.Lock()
+	defer lru.mu.Unlock()
+
+	entry, found := lru.cache[*txid]
+	if !found || entry.rawTx == nil {
+		return nil, ErrNotFound
+	}
+
+	if elem, exists := lru.lruIndex[*txid]; exists {
+		lru.lru.MoveToFront(elem)
+	}
+
+	return copyBytes(entry.rawTx), nil
+}
+
+// GetProof loads just the merkle proof bytes from cache
+func (lru *LRUBeefStorage) GetProof(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	lru.mu.Lock()
+	defer lru.mu.Unlock()
+
+	entry, found := lru.cache[*txid]
+	if !found || entry.proof == nil {
+		return nil, ErrNotFound
+	}
+
+	if elem, exists := lru.lruIndex[*txid]; exists {
+		lru.lru.MoveToFront(elem)
+	}
+
+	return copyBytes(entry.proof), nil
+}
+
 // Close clears the LRU cache
 func (lru *LRUBeefStorage) Close() error {
 	lru.mu.Lock()
 	defer lru.mu.Unlock()
 
-	// Clear cache
-	lru.cache = make(map[chainhash.Hash][]byte)
+	lru.cache = make(map[chainhash.Hash]*lruEntry)
 	lru.lruIndex = make(map[chainhash.Hash]*list.Element)
 	lru.lru.Init()
 	lru.currentSize.Store(0)

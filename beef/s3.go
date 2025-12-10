@@ -43,18 +43,61 @@ func NewS3BeefStorageWithClient(client *s3.Client, bucket string) *S3BeefStorage
 	}
 }
 
-// getKey returns the S3 key for a given txid
-// Uses subdirectories based on first 2 chars of txid to avoid too many files in one prefix
-func (s *S3BeefStorage) getKey(txid *chainhash.Hash) string {
-	txidStr := txid.String()
-	// Create subdirectory structure: xx/xxxxxxxxxxxx.beef
-	subDir := txidStr[:2]
-	fileName := txidStr + ".beef"
-	return subDir + "/" + fileName
+func (s *S3BeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	// Get assembles BEEF from separate tx and proof storage
+	rawTx, err := s.GetRawTx(ctx, txid)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try to get proof (optional)
+	proof, _ := s.GetProof(ctx, txid)
+
+	return assembleBEEF(txid, rawTx, proof)
 }
 
-func (s *S3BeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
-	key := s.getKey(txid)
+func (s *S3BeefStorage) Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
+	// Put splits BEEF into separate tx and proof storage
+	rawTx, proof, err := splitBEEF(beefBytes)
+	if err != nil {
+		return err
+	}
+
+	if err := s.putRawTx(ctx, txid, rawTx); err != nil {
+		return err
+	}
+
+	if len(proof) > 0 {
+		if err := s.putProof(ctx, txid, proof); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// UpdateMerklePath is not supported by S3 storage
+func (s *S3BeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	return nil, nil
+}
+
+// getTxKey returns the S3 key for raw transaction storage
+func (s *S3BeefStorage) getTxKey(txid *chainhash.Hash) string {
+	txidStr := txid.String()
+	subDir := txidStr[:2]
+	return subDir + "/" + txidStr + ".tx"
+}
+
+// getProofKey returns the S3 key for proof storage
+func (s *S3BeefStorage) getProofKey(txid *chainhash.Hash) string {
+	txidStr := txid.String()
+	subDir := txidStr[:2]
+	return subDir + "/" + txidStr + ".prf"
+}
+
+// GetRawTx loads just the raw transaction bytes from S3
+func (s *S3BeefStorage) GetRawTx(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	key := s.getTxKey(txid)
 
 	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -66,38 +109,60 @@ func (s *S3BeefStorage) Get(ctx context.Context, txid *chainhash.Hash) ([]byte, 
 		if errors.As(err, &nfe) {
 			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("S3 Get failed (bucket: %s, key: %s): %w", s.bucket, key, err)
+		return nil, fmt.Errorf("S3 Get tx failed: %w", err)
 	}
 
 	defer result.Body.Close()
-	beefBytes, err := io.ReadAll(result.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read S3 object: %w", err)
-	}
-
-	return beefBytes, nil
+	return io.ReadAll(result.Body)
 }
 
-func (s *S3BeefStorage) Put(ctx context.Context, txid *chainhash.Hash, beefBytes []byte) error {
-	key := s.getKey(txid)
+// putRawTx stores raw transaction bytes to S3
+func (s *S3BeefStorage) putRawTx(ctx context.Context, txid *chainhash.Hash, rawTx []byte) error {
+	key := s.getTxKey(txid)
 
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(key),
-		Body:        bytes.NewReader(beefBytes),
+		Body:        bytes.NewReader(rawTx),
 		ContentType: aws.String("application/octet-stream"),
 	})
 
-	if err != nil {
-		return fmt.Errorf("S3 Put failed (bucket: %s, key: %s): %w", s.bucket, key, err)
-	}
-
-	return nil
+	return err
 }
 
-// UpdateMerklePath is not supported by S3 storage
-func (s *S3BeefStorage) UpdateMerklePath(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
-	return nil, nil
+// GetProof loads just the merkle proof bytes from S3
+func (s *S3BeefStorage) GetProof(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
+	key := s.getProofKey(txid)
+
+	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+
+	if err != nil {
+		var nfe *types.NoSuchKey
+		if errors.As(err, &nfe) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("S3 Get proof failed: %w", err)
+	}
+
+	defer result.Body.Close()
+	return io.ReadAll(result.Body)
+}
+
+// putProof stores merkle proof bytes to S3
+func (s *S3BeefStorage) putProof(ctx context.Context, txid *chainhash.Hash, proof []byte) error {
+	key := s.getProofKey(txid)
+
+	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(proof),
+		ContentType: aws.String("application/octet-stream"),
+	})
+
+	return err
 }
 
 // Close is a no-op for S3 storage
