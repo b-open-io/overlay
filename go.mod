@@ -191,7 +191,7 @@ require (
 	modernc.org/sqlite v1.40.0 // indirect
 )
 
-replace github.com/bsv-blockchain/go-overlay-services => github.com/bsv-blockchain/go-overlay-services v1.2.3-0.20251205183456-bc9c5a96ac4e
+replace github.com/bsv-blockchain/go-overlay-services => github.com/bsv-blockchain/go-overlay-services v1.2.3-0.20251210010030-7861199ab824
 
 // replace github.com/bsv-blockchain/go-overlay-services => ../go-overlay-services
 
