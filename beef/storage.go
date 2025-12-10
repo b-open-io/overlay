@@ -616,12 +616,19 @@ func parseConnectionString(connectionString string) ([]BaseBeefStorage, error) {
 				}
 			}
 
-		case strings.HasPrefix(connectionString, "junglebus://"):
-			// Convert junglebus://host to https://host
-			host := strings.TrimPrefix(connectionString, "junglebus://")
+		case strings.HasPrefix(connectionString, "junglebus"):
+			// Supports: junglebus://, junglebus+http://, junglebus+https://
+			parts := strings.SplitN(connectionString, "://", 2)
+			schemeParts := strings.SplitN(parts[0], "+", 2)
+
+			scheme := "https"
+			if len(schemeParts) > 1 && schemeParts[1] == "http" {
+				scheme = "http"
+			}
+
 			var junglebusURL string
-			if host != "" {
-				junglebusURL = "https://" + host
+			if len(parts) > 1 {
+				junglebusURL = scheme + "://" + parts[1]
 			}
 			// Empty junglebusURL will use env var or default in NewJunglebusBeefStorage
 			storage = NewJunglebusBeefStorage(junglebusURL)
