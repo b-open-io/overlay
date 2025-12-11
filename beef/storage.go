@@ -627,7 +627,7 @@ func parseConnectionString(connectionString string) ([]BaseBeefStorage, error) {
 			}
 
 			var junglebusURL string
-			if len(parts) > 1 {
+			if len(parts) > 1 && parts[1] != "" {
 				junglebusURL = scheme + "://" + parts[1]
 			}
 			// Empty junglebusURL will use env var or default in NewJunglebusBeefStorage
