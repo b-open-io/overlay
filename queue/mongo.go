@@ -157,6 +157,52 @@ func (s *MongoQueueStorage) HDel(ctx context.Context, key string, fields ...stri
 	return err
 }
 
+func (s *MongoQueueStorage) HMSet(ctx context.Context, key string, fields map[string]string) error {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	setFields := bson.M{}
+	for field, value := range fields {
+		setFields["fields."+field] = value
+	}
+
+	_, err := s.db.Collection("hashes").UpdateOne(ctx,
+		bson.M{"_id": key},
+		bson.M{"$set": setFields},
+		options.UpdateOne().SetUpsert(true),
+	)
+	return err
+}
+
+func (s *MongoQueueStorage) HMGet(ctx context.Context, key string, fields ...string) ([]string, error) {
+	if len(fields) == 0 {
+		return []string{}, nil
+	}
+
+	var doc bson.M
+	err := s.db.Collection("hashes").FindOne(ctx, bson.M{"_id": key}).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return make([]string, len(fields)), nil // Return empty strings for all fields
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	fieldsMap, ok := doc["fields"].(bson.M)
+	if !ok {
+		return make([]string, len(fields)), nil
+	}
+
+	values := make([]string, len(fields))
+	for i, field := range fields {
+		if value, exists := fieldsMap[field]; exists {
+			values[i] = value.(string)
+		}
+	}
+	return values, nil
+}
+
 // Sorted Set Operations
 func (s *MongoQueueStorage) ZAdd(ctx context.Context, key string, members ...ScoredMember) error {
 	if len(members) == 0 {
@@ -196,9 +242,16 @@ func (s *MongoQueueStorage) ZRem(ctx context.Context, key string, members ...str
 
 
 func (s *MongoQueueStorage) ZRange(ctx context.Context, key string, scoreRange ScoreRange) ([]ScoredMember, error) {
+	return s.zRangeInternal(ctx, key, scoreRange, false)
+}
+
+func (s *MongoQueueStorage) ZRevRange(ctx context.Context, key string, scoreRange ScoreRange) ([]ScoredMember, error) {
+	return s.zRangeInternal(ctx, key, scoreRange, true)
+}
+
+func (s *MongoQueueStorage) zRangeInternal(ctx context.Context, key string, scoreRange ScoreRange, reverse bool) ([]ScoredMember, error) {
 	filter := bson.M{"key": key}
-	
-	// Add score range conditions if specified
+
 	if scoreRange.Min != nil || scoreRange.Max != nil {
 		scoreFilter := bson.M{}
 		if scoreRange.Min != nil {
@@ -209,13 +262,17 @@ func (s *MongoQueueStorage) ZRange(ctx context.Context, key string, scoreRange S
 		}
 		filter["score"] = scoreFilter
 	}
-	
-	opts := options.Find().SetSort(bson.M{"score": 1})
-	
+
+	sortOrder := 1
+	if reverse {
+		sortOrder = -1
+	}
+	opts := options.Find().SetSort(bson.M{"score": sortOrder})
+
 	if scoreRange.Offset > 0 {
 		opts.SetSkip(scoreRange.Offset)
 	}
-	
+
 	if scoreRange.Count > 0 {
 		opts.SetLimit(scoreRange.Count)
 	}

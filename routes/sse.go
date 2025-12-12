@@ -10,34 +10,30 @@ import (
 	"time"
 
 	"github.com/b-open-io/overlay/pubsub"
-	"github.com/b-open-io/overlay/storage"
+	"github.com/b-open-io/overlay/queue"
 	"github.com/gofiber/fiber/v2"
 )
 
+// CatchupFunc retrieves historical events for SSE catchup when resuming from a score.
+// It should return events from all provided keys merged in score order.
+type CatchupFunc func(ctx context.Context, keys []string, fromScore float64) ([]queue.ScoredMember, error)
+
 // SSERoutesConfig holds the configuration for SSE streaming routes
 type SSERoutesConfig struct {
-	Storage *storage.EventDataStorage
-	Context context.Context
+	SSEManager *pubsub.SSEManager
+	Catchup    CatchupFunc
+	Context    context.Context
 }
-
-// Global shared SSE manager
-var sharedSSEManager *pubsub.SSEManager
 
 // RegisterSSERoutes registers Server-Sent Events streaming routes
 func RegisterSSERoutes(group fiber.Router, config *SSERoutesConfig) {
-	if config == nil || config.Storage == nil || config.Context == nil {
-		log.Fatal("RegisterSSERoutes: config, storage, and context are required")
+	if config == nil || config.SSEManager == nil || config.Context == nil {
+		log.Fatal("RegisterSSERoutes: config, SSEManager, and context are required")
 	}
 
-	store := config.Storage
+	sseManager := config.SSEManager
+	catchup := config.Catchup
 	ctx := config.Context
-
-	// Initialize shared SSE manager once with server context
-	if sharedSSEManager == nil {
-		if ps := store.GetPubSub(); ps != nil {
-			sharedSSEManager = pubsub.NewSSEManager(ctx, ps)
-		}
-	}
 
 	// SSE subscription route
 	group.Get("/subscribe/:events", func(c *fiber.Ctx) error {
@@ -65,33 +61,17 @@ func RegisterSSERoutes(group fiber.Router, config *SSERoutesConfig) {
 		clientDone := make(chan struct{})
 
 		c.Context().SetBodyStreamWriter(func(w *bufio.Writer) {
-			// If resuming, first send any missed events using storage
-			if fromScore > 0 {
-				// For each event, get recent events since the last score
-				for _, event := range events {
-					// For BSV21, if event starts with "tm_", it's a topic, otherwise extract tokenId
-					var topic string
-					if strings.HasPrefix(event, "tm_") {
-						topic = event
-					} else {
-						// Extract tokenId from event patterns like "p2pkh:address:tokenId"
-						parts := strings.Split(event, ":")
-						if len(parts) >= 3 {
-							tokenId := parts[len(parts)-1] // Last part is tokenId
-							topic = "tm_" + tokenId
-						} else {
-							continue // Skip malformed events
-						}
-					}
-
-					if recentEvents, err := store.LookupEventScores(ctx, topic, event, fromScore); err == nil {
-						// Send each missed event with its actual score
-						for _, eventScore := range recentEvents {
-							fmt.Fprintf(w, "data: %s\n", eventScore.Member)
-							fmt.Fprintf(w, "id: %.0f\n\n", eventScore.Score)
-							if err := w.Flush(); err != nil {
-								return // Connection closed
-							}
+			// If resuming and catchup function provided, send missed events
+			if fromScore > 0 && catchup != nil {
+				members, err := catchup(ctx, events, fromScore)
+				if err != nil {
+					log.Printf("Catchup error: %v", err)
+				} else {
+					for _, member := range members {
+						fmt.Fprintf(w, "data: %s\n", member.Member)
+						fmt.Fprintf(w, "id: %.0f\n\n", member.Score)
+						if err := w.Flush(); err != nil {
+							return // Connection closed
 						}
 					}
 				}
@@ -103,17 +83,14 @@ func RegisterSSERoutes(group fiber.Router, config *SSERoutesConfig) {
 				return // Connection closed
 			}
 
-			// Register this client with the shared SSE manager
-			if sharedSSEManager != nil {
-				// Register client for all requested topics
-				clientID := sharedSSEManager.RegisterClient(events, w)
+			// Register client for all requested topics
+			clientID := sseManager.RegisterClient(events, w)
 
-				// Cleanup function - remove client when connection closes
-				defer func() {
-					sharedSSEManager.DeregisterClient(clientID)
-					close(clientDone)
-				}()
-			}
+			// Cleanup function - remove client when connection closes
+			defer func() {
+				sseManager.DeregisterClient(clientID)
+				close(clientDone)
+			}()
 
 			// Keep connection alive with periodic pings
 			ticker := time.NewTicker(15 * time.Second)

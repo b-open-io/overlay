@@ -238,6 +238,64 @@ func (s *SQLiteQueueStorage) HDel(ctx context.Context, key string, fields ...str
 	return err
 }
 
+func (s *SQLiteQueueStorage) HMSet(ctx context.Context, key string, fields map[string]string) error {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	query := "INSERT OR REPLACE INTO hashes (key_name, field, value) VALUES "
+	args := make([]interface{}, 0, len(fields)*3)
+	placeholders := make([]string, 0, len(fields))
+
+	for field, value := range fields {
+		placeholders = append(placeholders, "(?, ?, ?)")
+		args = append(args, key, field, value)
+	}
+
+	query += strings.Join(placeholders, ", ")
+	_, err := s.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+func (s *SQLiteQueueStorage) HMGet(ctx context.Context, key string, fields ...string) ([]string, error) {
+	if len(fields) == 0 {
+		return []string{}, nil
+	}
+
+	placeholders := strings.Repeat("?,", len(fields))
+	placeholders = placeholders[:len(placeholders)-1]
+
+	args := make([]interface{}, 0, len(fields)+1)
+	args = append(args, key)
+	for _, field := range fields {
+		args = append(args, field)
+	}
+
+	query := fmt.Sprintf("SELECT field, value FROM hashes WHERE key_name = ? AND field IN (%s)", placeholders)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Build a map of field -> value
+	resultMap := make(map[string]string)
+	for rows.Next() {
+		var field, value string
+		if err := rows.Scan(&field, &value); err != nil {
+			return nil, err
+		}
+		resultMap[field] = value
+	}
+
+	// Return values in the same order as requested fields
+	values := make([]string, len(fields))
+	for i, field := range fields {
+		values[i] = resultMap[field] // Empty string if not found
+	}
+	return values, rows.Err()
+}
+
 // Sorted Set Operations
 func (s *SQLiteQueueStorage) ZAdd(ctx context.Context, key string, members ...ScoredMember) error {
 	if len(members) == 0 {
@@ -279,23 +337,33 @@ func (s *SQLiteQueueStorage) ZRem(ctx context.Context, key string, members ...st
 
 
 func (s *SQLiteQueueStorage) ZRange(ctx context.Context, key string, scoreRange ScoreRange) ([]ScoredMember, error) {
+	return s.zRangeInternal(ctx, key, scoreRange, false)
+}
+
+func (s *SQLiteQueueStorage) ZRevRange(ctx context.Context, key string, scoreRange ScoreRange) ([]ScoredMember, error) {
+	return s.zRangeInternal(ctx, key, scoreRange, true)
+}
+
+func (s *SQLiteQueueStorage) zRangeInternal(ctx context.Context, key string, scoreRange ScoreRange, reverse bool) ([]ScoredMember, error) {
 	query := "SELECT member, score FROM sorted_sets WHERE key_name = ?"
 	args := []interface{}{key}
-	
-	// Add score range conditions if specified
+
 	if scoreRange.Min != nil {
 		query += " AND score >= ?"
 		args = append(args, *scoreRange.Min)
 	}
-	
+
 	if scoreRange.Max != nil {
 		query += " AND score <= ?"
 		args = append(args, *scoreRange.Max)
 	}
-	
-	query += " ORDER BY score ASC"
-	
-	// Add pagination if specified
+
+	if reverse {
+		query += " ORDER BY score DESC"
+	} else {
+		query += " ORDER BY score ASC"
+	}
+
 	if scoreRange.Count > 0 {
 		query += " LIMIT ? OFFSET ?"
 		args = append(args, scoreRange.Count, scoreRange.Offset)

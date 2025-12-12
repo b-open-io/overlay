@@ -234,6 +234,70 @@ func (q *PostgresQueueStorage) HDel(ctx context.Context, key string, fields ...s
 	return err
 }
 
+func (q *PostgresQueueStorage) HMSet(ctx context.Context, key string, fields map[string]string) error {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	valueStrings := make([]string, 0, len(fields))
+	valueArgs := make([]interface{}, 0, len(fields)*3)
+	i := 0
+
+	for field, value := range fields {
+		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d)", i*3+1, i*3+2, i*3+3))
+		valueArgs = append(valueArgs, key, field, value)
+		i++
+	}
+
+	query := fmt.Sprintf(`
+		INSERT INTO queue_hashes (key_name, field, value)
+		VALUES %s
+		ON CONFLICT (key_name, field) DO UPDATE SET value = EXCLUDED.value`,
+		strings.Join(valueStrings, ","))
+
+	_, err := q.pool.Exec(ctx, query, valueArgs...)
+	return err
+}
+
+func (q *PostgresQueueStorage) HMGet(ctx context.Context, key string, fields ...string) ([]string, error) {
+	if len(fields) == 0 {
+		return []string{}, nil
+	}
+
+	placeholders := make([]string, len(fields))
+	args := make([]interface{}, 0, len(fields)+1)
+	args = append(args, key)
+
+	for i, field := range fields {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args = append(args, field)
+	}
+
+	query := fmt.Sprintf(`SELECT field, value FROM queue_hashes WHERE key_name = $1 AND field IN (%s)`,
+		strings.Join(placeholders, ","))
+
+	rows, err := q.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	resultMap := make(map[string]string)
+	for rows.Next() {
+		var field, value string
+		if err := rows.Scan(&field, &value); err != nil {
+			return nil, err
+		}
+		resultMap[field] = value
+	}
+
+	values := make([]string, len(fields))
+	for i, field := range fields {
+		values[i] = resultMap[field]
+	}
+	return values, rows.Err()
+}
+
 // Sorted Set Operations
 func (q *PostgresQueueStorage) ZAdd(ctx context.Context, key string, members ...ScoredMember) error {
 	if len(members) == 0 {
@@ -282,34 +346,44 @@ func (q *PostgresQueueStorage) ZRem(ctx context.Context, key string, members ...
 
 
 func (q *PostgresQueueStorage) ZRange(ctx context.Context, key string, scoreRange ScoreRange) ([]ScoredMember, error) {
+	return q.zRangeInternal(ctx, key, scoreRange, false)
+}
+
+func (q *PostgresQueueStorage) ZRevRange(ctx context.Context, key string, scoreRange ScoreRange) ([]ScoredMember, error) {
+	return q.zRangeInternal(ctx, key, scoreRange, true)
+}
+
+func (q *PostgresQueueStorage) zRangeInternal(ctx context.Context, key string, scoreRange ScoreRange, reverse bool) ([]ScoredMember, error) {
 	query := "SELECT member, score FROM queue_sorted_sets WHERE key_name = $1"
 	args := []interface{}{key}
 	argCount := 1
-	
-	// Add score range conditions if specified
+
 	if scoreRange.Min != nil {
 		argCount++
 		query += fmt.Sprintf(" AND score >= $%d", argCount)
 		args = append(args, *scoreRange.Min)
 	}
-	
+
 	if scoreRange.Max != nil {
 		argCount++
 		query += fmt.Sprintf(" AND score <= $%d", argCount)
 		args = append(args, *scoreRange.Max)
 	}
-	
-	query += " ORDER BY score ASC"
-	
-	// Add pagination if specified
+
+	if reverse {
+		query += " ORDER BY score DESC"
+	} else {
+		query += " ORDER BY score ASC"
+	}
+
 	if scoreRange.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET %d", scoreRange.Offset)
 	}
-	
+
 	if scoreRange.Count > 0 {
 		query += fmt.Sprintf(" LIMIT %d", scoreRange.Count)
 	}
-	
+
 	rows, err := q.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err

@@ -65,6 +65,30 @@ func (s *RedisQueueStorage) HDel(ctx context.Context, key string, fields ...stri
 	return s.client.HDel(ctx, key, fields...).Err()
 }
 
+func (s *RedisQueueStorage) HMSet(ctx context.Context, key string, fields map[string]string) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	return s.client.HMSet(ctx, key, fields).Err()
+}
+
+func (s *RedisQueueStorage) HMGet(ctx context.Context, key string, fields ...string) ([]string, error) {
+	if len(fields) == 0 {
+		return []string{}, nil
+	}
+	results, err := s.client.HMGet(ctx, key, fields...).Result()
+	if err != nil {
+		return nil, err
+	}
+	values := make([]string, len(results))
+	for i, result := range results {
+		if result != nil {
+			values[i] = result.(string)
+		}
+	}
+	return values, nil
+}
+
 // Sorted Set Operations
 func (s *RedisQueueStorage) ZAdd(ctx context.Context, key string, members ...ScoredMember) error {
 	var redisMembers []redis.Z
@@ -91,13 +115,48 @@ func (s *RedisQueueStorage) ZRange(ctx context.Context, key string, scoreRange S
 	if scoreRange.Max != nil {
 		max = strconv.FormatFloat(*scoreRange.Max, 'f', -1, 64)
 	}
-	
+
 	count := int64(-1) // Redis -1 = all
 	if scoreRange.Count > 0 {
 		count = scoreRange.Count
 	}
-	
+
 	results, err := s.client.ZRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
+		Min:    min,
+		Max:    max,
+		Offset: scoreRange.Offset,
+		Count:  count,
+	}).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	members := make([]ScoredMember, len(results))
+	for i, result := range results {
+		members[i] = ScoredMember{
+			Member: result.Member.(string),
+			Score:  result.Score,
+		}
+	}
+	return members, nil
+}
+
+func (s *RedisQueueStorage) ZRevRange(ctx context.Context, key string, scoreRange ScoreRange) ([]ScoredMember, error) {
+	min := "-inf"
+	max := "+inf"
+	if scoreRange.Min != nil {
+		min = strconv.FormatFloat(*scoreRange.Min, 'f', -1, 64)
+	}
+	if scoreRange.Max != nil {
+		max = strconv.FormatFloat(*scoreRange.Max, 'f', -1, 64)
+	}
+
+	count := int64(-1) // Redis -1 = all
+	if scoreRange.Count > 0 {
+		count = scoreRange.Count
+	}
+
+	results, err := s.client.ZRevRangeByScoreWithScores(ctx, key, &redis.ZRangeBy{
 		Min:    min,
 		Max:    max,
 		Offset: scoreRange.Offset,
