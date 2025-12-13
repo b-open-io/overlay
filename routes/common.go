@@ -6,7 +6,7 @@ import (
 	"strconv"
 
 	"github.com/b-open-io/overlay/storage"
-	"github.com/bsv-blockchain/arcade"
+	"github.com/bsv-blockchain/go-chaintracks/chaintracks"
 	"github.com/bsv-blockchain/go-overlay-services/pkg/core/engine"
 	"github.com/bsv-blockchain/go-sdk/chainhash"
 	"github.com/gofiber/fiber/v2"
@@ -15,7 +15,7 @@ import (
 // RoutesConfig holds the configuration for common 1sat routes
 type RoutesConfig struct {
 	Storage      *storage.EventDataStorage
-	ChainTracker arcade.Chaintracks
+	ChainTracker chaintracks.Chaintracks
 	Engine       *engine.Engine
 }
 

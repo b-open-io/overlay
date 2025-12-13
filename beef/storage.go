@@ -446,6 +446,24 @@ func (s *Storage) LoadTxFromBeef(ctx context.Context, beefBytes []byte, txid *ch
 	return tx, nil
 }
 
+func (s *Storage) BuildBeefTx(ctx context.Context, txid *chainhash.Hash) (*transaction.Transaction, error) {
+	tx, err := s.LoadTx(ctx, txid)
+	if err != nil {
+		return nil, err
+	}
+
+	if tx.MerklePath == nil {
+		for _, input := range tx.Inputs {
+			input.SourceTransaction, err = s.BuildBeefTx(ctx, input.SourceTXID)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return tx, nil
+}
+
 // LoadRawTx loads just the raw transaction bytes from the storage chain
 func (s *Storage) LoadRawTx(ctx context.Context, txid *chainhash.Hash) ([]byte, error) {
 	for i, storage := range s.storages {
